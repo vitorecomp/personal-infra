@@ -165,6 +165,9 @@ def deploy_blog_repo(
         f"--substitutions={substitutions}",
     ]
 
+    runtime_sa = os.environ.get(
+        "BLOG_RUNTIME_SA", f"personal-blog-run@{project_id}.iam.gserviceaccount.com"
+    )
     image_uri = f"{region}-docker.pkg.dev/{project_id}/{ar_repo}/{service_name}:latest"
     deploy_cmd = [
         "gcloud",
@@ -174,6 +177,7 @@ def deploy_blog_repo(
         service_name,
         f"--project={project_id}",
         f"--region={region}",
+        f"--service-account={runtime_sa}",
         f"--image={image_uri}",
         f"--update-env-vars=NODE_ENV=production,url={blog_url},security__staffDeviceVerification=false",
         "--quiet",

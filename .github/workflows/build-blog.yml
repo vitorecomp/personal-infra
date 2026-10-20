@@ -26,6 +26,7 @@ jobs:
       GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
       GAR_BLOG_REPO: ${{ vars.GAR_BLOG_REPO || 'personal-blog' }}
       CLOUD_RUN_BLOG_SERVICE: ${{ vars.CLOUD_RUN_BLOG_SERVICE || 'personal-blog' }}
+      BLOG_RUNTIME_SA: ${{ vars.BLOG_RUNTIME_SA || 'personal-blog-run@compute-bench.iam.gserviceaccount.com' }}
       BLOG_URL: ${{ vars.BLOG_URL || 'https://blog.vitorx86.dev' }}
     steps:
     - uses: actions/checkout@v7
@@ -48,6 +49,13 @@ jobs:
 
     - name: Deploy Container to Cloud Run
       run: |
+        gcloud run services update "${CLOUD_RUN_BLOG_SERVICE}" \
+          --project "${GCP_PROJECT_ID}" \
+          --region "${GCP_REGION}" \
+          --service-account "${BLOG_RUNTIME_SA}" \
+          --image "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_BLOG_REPO}/${CLOUD_RUN_BLOG_SERVICE}:latest" \
+          --update-env-vars "NODE_ENV=production,url=${BLOG_URL},security__staffDeviceVerification=false" \
+          --quiet || \
         gcloud run services update "${CLOUD_RUN_BLOG_SERVICE}" \
           --project "${GCP_PROJECT_ID}" \
           --region "${GCP_REGION}" \

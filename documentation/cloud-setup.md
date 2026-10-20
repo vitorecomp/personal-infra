@@ -63,11 +63,17 @@ for ROLE in \
     --role="${ROLE}"
 done
 
-# 3. Ensure the default Compute Engine / Cloud Run runtime service account can access Cloud SQL and GCS
-PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
-for ROLE in roles/cloudsql.client roles/storage.objectAdmin; do
+# 3. Create & harden the dedicated Cloud Run runtime service account for personal-blog
+export BLOG_RUNTIME_SA="personal-blog-run@${PROJECT_ID}.iam.gserviceaccount.com"
+gcloud iam service-accounts create "personal-blog-run" \
+  --project="${PROJECT_ID}" \
+  --display-name="Personal Blog Cloud Run Runtime"
+
+# Grant ONLY minimal runtime permissions (Cloud SQL connection + logging/metrics;
+# bucket-scoped storage access on blog-content-compute-bench is managed by Terraform)
+for ROLE in roles/cloudsql.client roles/logging.logWriter roles/monitoring.metricWriter; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --member="serviceAccount:${BLOG_RUNTIME_SA}" \
     --role="${ROLE}"
 done
 ```

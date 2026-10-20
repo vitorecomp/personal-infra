@@ -18,6 +18,11 @@ import {
 }
 
 import {
+  to = module.load_balancer.google_service_account.blog_runtime[0]
+  id = "projects/compute-bench/serviceAccounts/personal-blog-run@compute-bench.iam.gserviceaccount.com"
+}
+
+import {
   to = module.load_balancer.google_artifact_registry_repository.blog_repo[0]
   id = "projects/compute-bench/locations/us-central1/repositories/personal-blog"
 }
