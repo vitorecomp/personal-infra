@@ -92,16 +92,3 @@ variable "blog_db_deletion_protection" {
   type        = bool
   default     = true
 }
-
-variable "blog_admin_email" {
-  description = "Initial Ghost Admin Owner email address"
-  type        = string
-  default     = ""
-}
-
-variable "blog_admin_password" {
-  description = "Initial Ghost Admin Owner password (sensitive)"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
