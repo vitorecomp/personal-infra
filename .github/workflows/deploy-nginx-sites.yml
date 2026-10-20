@@ -1,0 +1,69 @@
+# Deploys the nginx vhost configs in cloud/nobuffer-site/reverse-proxy/ to the server.
+#
+# Configs are copied to a staging directory first, then installed into
+# /etc/nginx/sites-available, validated with `nginx -t` and reloaded.
+# The live config is never deleted up-front, so a failed run leaves the
+# server serving the previous config. Note: removing a vhost from the
+# repo no longer removes it from the server — delete it manually.
+#
+# certbot rewrites the installed configs to re-add the HTTPS server
+# blocks (the configs in the repo are HTTP-only). On a brand-new server
+# the certbot account must already exist (run `certbot register` once).
+
+name: Deploy the Nginx
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+      - "master"
+    paths:
+      - "cloud/nobuffer-site/reverse-proxy/**"
+      - ".github/workflows/deploy-nginx-sites.yml"
+
+concurrency:
+  group: deploy-nginx
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Copy configs to a staging directory
+      uses: appleboy/scp-action@v1.0.0
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.KEY }}
+        source: "cloud/nobuffer-site/reverse-proxy"
+        target: "nginx-staging"
+        strip_components: 3
+        rm: true
+
+    - name: Install, validate, reload and issue certificates
+      uses: appleboy/ssh-action@v1.2.5
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.KEY }}
+        script: |
+          set -euo pipefail
+          cd ~/nginx-staging
+          for file in *.dev; do
+            echo "installing $file"
+            install -m 644 "$file" "/etc/nginx/sites-available/$file"
+            ln -sf "/etc/nginx/sites-available/$file" "/etc/nginx/sites-enabled/$file"
+          done
+          nginx -t
+          systemctl reload nginx
+          for file in *.dev; do
+            echo "ensuring certificate for $file"
+            certbot --nginx -d "$file" -n
+          done

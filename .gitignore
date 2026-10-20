@@ -127,3 +127,18 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Downloaded repositories for cloud deployments
+cloud/nobuffer-site/repo/
+cloud/personal-portifolio/repo/
+cloud/personal-blog/repo/
+
+# Terraform
+**/.terraform/*
+**/.terraform.d/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+.terraform.lock.hcl
+

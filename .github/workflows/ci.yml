@@ -1,0 +1,55 @@
+name: CI Validation
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ "main", "master" ]
+  push:
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  python-checks:
+    name: Validate Python Scripts & Dry-Runs
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Syntax check Python scripts
+      run: |
+        python3 -m py_compile workspace/scripts/*.py cloud/scripts/*.py
+
+    - name: Verify workspace sync dry-run
+      run: |
+        python3 workspace/scripts/sync_workspace_repos.py --dry-run
+
+    - name: Verify cloud download & deploy scripts dry-run
+      run: |
+        python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket ci-nobuffer-bucket --dry-run
+        python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket ci-portfolio-bucket --dry-run
+        python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
+
+  terraform-validate:
+    name: Validate Terraform Configuration
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    - name: Terraform format check
+      run: |
+        terraform fmt -check -recursive cloud/infra
+
+    - name: Terraform init & validate (prod)
+      working-directory: cloud/infra/envs/prod
+      run: |
+        terraform init -backend=false
+        terraform validate

@@ -1,0 +1,39 @@
+name: Build the Main Website
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [ "deploy-nobuffer-site" ]
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "cloud/nobuffer-site/cloudbuild.yaml"
+      - "cloud/scripts/download_nobuffer_site.py"
+      - ".github/workflows/build-website.yml"
+
+concurrency:
+  group: build-website
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download nobuffer-site repository
+      run: |
+        python3 cloud/scripts/download_nobuffer_site.py --https
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Submit Build to Cloud Build
+      run: |
+        gcloud builds submit cloud/nobuffer-site/repo \
+          --config cloud/nobuffer-site/cloudbuild.yaml \
+          --substitutions=_BUCKET_NAME=${{ vars.GCS_BUCKET_NAME }}
