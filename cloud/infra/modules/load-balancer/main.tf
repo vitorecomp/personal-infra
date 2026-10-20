@@ -138,10 +138,11 @@ resource "google_storage_bucket_iam_member" "blog_runtime_storage" {
 
 # Cloud Run v2 Service for personal-blog (Ghost 5 connected to Cloud SQL MySQL 8.0)
 resource "google_cloud_run_v2_service" "blog" {
-  count    = local.enable_blog ? 1 : 0
-  name     = var.blog_service_name
-  location = var.region
-  ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  count                = local.enable_blog ? 1 : 0
+  name                 = var.blog_service_name
+  location             = var.region
+  ingress              = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  invoker_iam_disabled = true
 
   template {
     service_account       = google_service_account.blog_runtime[0].email
@@ -243,7 +244,6 @@ resource "google_cloud_run_v2_service" "blog" {
   lifecycle {
     ignore_changes = [
       template[0].containers[0].image,
-      template[0].service_account,
       client,
       client_version,
     ]
