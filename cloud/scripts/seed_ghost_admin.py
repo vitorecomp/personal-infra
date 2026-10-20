@@ -58,6 +58,9 @@ def _request_ghost_api(
         "Accept": "application/json",
         "User-Agent": "personal-infra-ghost-seeder/1.0",
     }
+    serverless_token = os.environ.get("GHOST_SERVERLESS_ID_TOKEN", "").strip()
+    if serverless_token:
+        headers["X-Serverless-Authorization"] = f"Bearer {serverless_token}"
     body_bytes: bytes | None = None
     if payload is not None:
         body_bytes = json.dumps(payload).encode("utf-8")
@@ -123,6 +126,7 @@ def seed_ghost_admin(
 
     print(f"[seed] Checking Ghost Admin setup status at {blog_url.rstrip('/')}{SETUP_ENDPOINT} ...")
     setup_completed: bool | None = None
+    saw_forbidden = False
     for attempt in range(1, retries + 1):
         try:
             status_code, data = _request_ghost_api(
@@ -136,6 +140,10 @@ def seed_ghost_admin(
                 if setup_list and isinstance(setup_list[0], dict):
                     setup_completed = bool(setup_list[0].get("status"))
                     break
+            if status_code == 403:
+                saw_forbidden = True
+                if attempt >= 3:
+                    break
             print(
                 f"[wait] Attempt {attempt}/{retries}: unexpected status {status_code}, retrying in {retry_delay}s..."
             )
@@ -146,6 +154,12 @@ def seed_ghost_admin(
         time.sleep(retry_delay)
 
     if setup_completed is None:
+        if saw_forbidden:
+            print(
+                "[warn] Cloud Run service returned HTTP 403 Forbidden (public invoker IAM / --no-invoker-iam-check "
+                "requires roles/run.admin on compute-bench). Skipping Ghost Admin seed until public invoker is enabled."
+            )
+            return 0
         print(
             f"[error] Timed out waiting for Ghost Admin API at {blog_url.rstrip('/')}{SETUP_ENDPOINT}",
             file=sys.stderr,
