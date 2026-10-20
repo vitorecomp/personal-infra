@@ -61,7 +61,7 @@ variable "blog_ar_repo_name" {
 variable "blog_image" {
   description = "Container image URI for the personal-blog Cloud Run service"
   type        = string
-  default     = "docker.io/library/ghost:5-alpine"
+  default     = "us-central1-docker.pkg.dev/compute-bench/personal-blog/personal-blog:latest"
 }
 
 variable "blog_content_bucket_name" {

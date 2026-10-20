@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Idempotently seeds the initial Ghost Admin Owner account via the Ghost Admin Setup API.
+"""Idempotently seeds the initial Ghost Admin Owner account and activates the custom theme via the Ghost Admin API.
 
 Designed to run as a post-deploy step in the deployment pipeline (not on every
-container startup). Checks `GET /ghost/api/admin/authentication/setup/` first:
-- If `setup[0].status` is `true`, the Owner user already exists and the script
-  exits cleanly without modifying state.
-- If `setup[0].status` is `false`, sends `POST /ghost/api/admin/authentication/setup/`
-  using `BLOG_ADMIN_EMAIL` and `BLOG_ADMIN_PASSWORD` from environment variables.
+container startup).
+1. Checks `GET /ghost/api/admin/authentication/setup/`:
+   - If `setup[0].status` is `false`, sends `POST /ghost/api/admin/authentication/setup/`
+     using `BLOG_ADMIN_EMAIL` and `BLOG_ADMIN_PASSWORD` from environment variables.
+2. Logs into `POST /ghost/api/admin/session/` to obtain a session cookie and:
+   - Activates the `vitorx86-garage` theme (`PUT /ghost/api/admin/themes/vitorx86-garage/activate/`).
+   - Removes Ghost's default `"Coming soon"` post (`slug:coming-soon`) if present.
 """
 
 import argparse
@@ -21,9 +23,11 @@ from urllib.parse import urlparse
 
 DEFAULT_BLOG_URL = "https://blog.vitorx86.dev"
 DEFAULT_ADMIN_NAME = "Vitor Vieira"
-DEFAULT_BLOG_TITLE = "vitorx86.dev"
+DEFAULT_BLOG_TITLE = "vitorx86.dev // blog"
+DEFAULT_THEME_NAME = "vitorx86-garage"
 DEFAULT_FALLBACK_SNI = "vitorx86.dev"
 SETUP_ENDPOINT = "/ghost/api/admin/authentication/setup/"
+SESSION_ENDPOINT = "/ghost/api/admin/session/"
 
 
 class _SNIOverrideHTTPSConnection(http.client.HTTPSConnection):
@@ -44,9 +48,10 @@ def _request_ghost_api(
     method: str,
     path: str,
     payload: dict[str, object] | None = None,
+    cookie: str | None = None,
     fallback_sni: str = DEFAULT_FALLBACK_SNI,
     timeout: float = 20.0,
-) -> tuple[int, dict[str, object]]:
+) -> tuple[int, dict[str, object], list[str]]:
     parsed = urlparse(blog_url)
     host = parsed.hostname or "blog.vitorx86.dev"
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -58,6 +63,8 @@ def _request_ghost_api(
         "Accept": "application/json",
         "User-Agent": "personal-infra-ghost-seeder/1.0",
     }
+    if cookie:
+        headers["Cookie"] = cookie
     serverless_token = os.environ.get("GHOST_SERVERLESS_ID_TOKEN", "").strip()
     if serverless_token:
         headers["X-Serverless-Authorization"] = f"Bearer {serverless_token}"
@@ -84,8 +91,9 @@ def _request_ghost_api(
                 conn.request(method, path, body=body_bytes, headers=headers)
                 resp = conn.getresponse()
                 raw = resp.read().decode("utf-8", errors="replace")
+                set_cookies = resp.headers.get_all("Set-Cookie") or []
                 data = json.loads(raw) if raw.strip().startswith("{") else {"raw": raw}
-                return resp.status, data
+                return resp.status, data, set_cookies
             finally:
                 conn.close()
         except ssl.SSLError as err:
@@ -100,12 +108,90 @@ def _request_ghost_api(
     raise RuntimeError("Failed to connect to Ghost Admin API")
 
 
+def _extract_session_cookie(set_cookies: list[str]) -> str | None:
+    parts: list[str] = []
+    for header in set_cookies:
+        first_pair = header.split(";", 1)[0].strip()
+        if first_pair:
+            parts.append(first_pair)
+    return "; ".join(parts) if parts else None
+
+
+def _reconcile_theme_and_posts(
+    blog_url: str,
+    email: str,
+    password: str,
+    theme_name: str = DEFAULT_THEME_NAME,
+    fallback_sni: str = DEFAULT_FALLBACK_SNI,
+) -> None:
+    try:
+        login_status, login_data, set_cookies = _request_ghost_api(
+            blog_url=blog_url,
+            method="POST",
+            path=SESSION_ENDPOINT,
+            payload={"username": email, "password": password},
+            fallback_sni=fallback_sni,
+        )
+        if login_status not in (200, 201):
+            print(
+                f"[warn] Could not authenticate Ghost Admin session (HTTP {login_status}: {login_data}); "
+                "relying on container pre-boot DB reconciler."
+            )
+            return
+
+        cookie = _extract_session_cookie(set_cookies)
+        if not cookie:
+            print("[warn] Ghost Admin session did not return a Set-Cookie header.")
+            return
+
+        # 1. Activate custom theme
+        theme_status, theme_data, _ = _request_ghost_api(
+            blog_url=blog_url,
+            method="PUT",
+            path=f"/ghost/api/admin/themes/{theme_name}/activate/",
+            payload={},
+            cookie=cookie,
+            fallback_sni=fallback_sni,
+        )
+        if theme_status == 200:
+            print(f"[ok] Activated Ghost theme '{theme_name}'.")
+        else:
+            print(
+                f"[warn] Could not activate theme '{theme_name}' via API (HTTP {theme_status}: {theme_data})."
+            )
+
+        # 2. Delete default "Coming soon" post if present
+        posts_status, posts_data, _ = _request_ghost_api(
+            blog_url=blog_url,
+            method="GET",
+            path="/ghost/api/admin/posts/?filter=slug:coming-soon",
+            cookie=cookie,
+            fallback_sni=fallback_sni,
+        )
+        if posts_status == 200 and isinstance(posts_data.get("posts"), list):
+            for post in posts_data["posts"]:
+                if isinstance(post, dict) and post.get("slug") == "coming-soon" and post.get("id"):
+                    post_id = post["id"]
+                    del_status, _, _ = _request_ghost_api(
+                        blog_url=blog_url,
+                        method="DELETE",
+                        path=f"/ghost/api/admin/posts/{post_id}/",
+                        cookie=cookie,
+                        fallback_sni=fallback_sni,
+                    )
+                    if del_status in (200, 204):
+                        print("[ok] Removed default 'Coming soon' post (0 articles).")
+    except Exception as exc:
+        print(f"[warn] Post-seed theme/post reconciliation warning: {exc}")
+
+
 def seed_ghost_admin(
     blog_url: str,
     email: str,
     password: str,
     name: str = DEFAULT_ADMIN_NAME,
     blog_title: str = DEFAULT_BLOG_TITLE,
+    theme_name: str = DEFAULT_THEME_NAME,
     fallback_sni: str = DEFAULT_FALLBACK_SNI,
     retries: int = 18,
     retry_delay: float = 5.0,
@@ -119,8 +205,8 @@ def seed_ghost_admin(
 
     if dry_run:
         print(
-            f"[dry-run] Would check GET {blog_url.rstrip('/')}{SETUP_ENDPOINT} "
-            f"and seed Ghost Owner '{email}' if setup status is false."
+            f"[dry-run] Would check GET {blog_url.rstrip('/')}{SETUP_ENDPOINT}, "
+            f"seed Ghost Owner '{email}' if needed, and activate theme '{theme_name}'."
         )
         return 0
 
@@ -129,7 +215,7 @@ def seed_ghost_admin(
     saw_forbidden = False
     for attempt in range(1, retries + 1):
         try:
-            status_code, data = _request_ghost_api(
+            status_code, data, _ = _request_ghost_api(
                 blog_url=blog_url,
                 method="GET",
                 path=SETUP_ENDPOINT,
@@ -167,7 +253,14 @@ def seed_ghost_admin(
         return 1
 
     if setup_completed:
-        print("[ok] Ghost Admin Owner is already configured; skipping setup.")
+        print("[ok] Ghost Admin Owner is already configured; reconciling active theme & initial posts...")
+        _reconcile_theme_and_posts(
+            blog_url=blog_url,
+            email=email,
+            password=password,
+            theme_name=theme_name,
+            fallback_sni=fallback_sni,
+        )
         return 0
 
     print(f"[seed] Initial setup required. Creating Ghost Owner account for {email} ...")
@@ -183,7 +276,7 @@ def seed_ghost_admin(
     }
 
     try:
-        post_status, post_data = _request_ghost_api(
+        post_status, post_data, _ = _request_ghost_api(
             blog_url=blog_url,
             method="POST",
             path=SETUP_ENDPOINT,
@@ -196,6 +289,13 @@ def seed_ghost_admin(
 
     if post_status in (200, 201):
         print(f"[ok] Successfully seeded Ghost Admin Owner account ({email}).")
+        _reconcile_theme_and_posts(
+            blog_url=blog_url,
+            email=email,
+            password=password,
+            theme_name=theme_name,
+            fallback_sni=fallback_sni,
+        )
         return 0
 
     print(
@@ -207,7 +307,7 @@ def seed_ghost_admin(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Idempotently seed the initial Ghost Admin Owner account via the Ghost Admin Setup API."
+        description="Idempotently seed the initial Ghost Admin Owner account and activate the custom theme."
     )
     parser.add_argument(
         "--blog-url",
@@ -232,6 +332,12 @@ def main() -> None:
         type=str,
         default=os.environ.get("BLOG_TITLE", DEFAULT_BLOG_TITLE),
         help=f"Ghost publication title (default: {DEFAULT_BLOG_TITLE}).",
+    )
+    parser.add_argument(
+        "--theme",
+        type=str,
+        default=os.environ.get("BLOG_THEME_NAME", DEFAULT_THEME_NAME),
+        help=f"Ghost theme to activate (default: {DEFAULT_THEME_NAME}).",
     )
     parser.add_argument(
         "--fallback-sni",
@@ -266,6 +372,7 @@ def main() -> None:
             password=password,
             name=args.name,
             blog_title=args.blog_title,
+            theme_name=args.theme,
             fallback_sni=args.fallback_sni,
             retries=args.retries,
             retry_delay=args.retry_delay,

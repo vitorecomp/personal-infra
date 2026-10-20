@@ -2,13 +2,11 @@ steps:
 - name: 'node:22'
   entrypoint: 'npm'
   args: ['ci']
-  dir: 'website'
 - name: 'node:22'
   entrypoint: 'npm'
   args: ['run', 'build']
-  dir: 'website'
 - name: 'gcr.io/cloud-builders/gsutil'
-  args: ['-m', 'rsync', '-d', '-r', 'build/website', 'gs://${_BUCKET_NAME}']
+  args: ['-m', 'rsync', '-d', '-r', 'build', 'gs://${_BUCKET_NAME}']
 # index.html references content-hashed assets that rsync -d deletes on the next
 # deploy, so the CDN must never serve a stale copy of it
 - name: 'gcr.io/cloud-builders/gsutil'
