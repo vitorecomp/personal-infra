@@ -83,18 +83,6 @@ Each application repository contains `.github/workflows/trigger-deploy.yml`, whi
 | :--- | :--- | :--- |
 | `PERSONAL_INFRA_TOKEN` _(or `METRICS_TOKEN`)_ | `nobuffer-site`, `personal-portifolio`, `personal-blog` | Fine-grained GitHub PAT with **Contents: Read and write** on `vitorecomp/personal-infra` so `gh api repos/vitorecomp/personal-infra/dispatches` can trigger deployments. |
 
-### 3.3 Automated GitHub Variables & Secrets Provisioning (`setup_github_config.py`)
-
-You can configure all of the above GitHub Actions Variables and Secrets across `vitorecomp/personal-infra`, `vitorecomp/nobuffer-site`, `vitorecomp/personal-portifolio`, and `vitorecomp/personal-blog` in one command using [`cloud/scripts/setup_github_config.py`](../cloud/scripts/setup_github_config.py):
-
-```bash
-# Preview all variables and secrets to be configured (safe, read-only)
-python3 cloud/scripts/setup_github_config.py --dry-run
-
-# Apply all variables and secrets to GitHub (generates GCP_SA_KEY in memory for compute-bench)
-GITHUB_TOKEN=ghp_xxx python3 cloud/scripts/setup_github_config.py
-```
-
 ---
 
 ## 4. Local CLI Deployment Reference

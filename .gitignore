@@ -101,14 +101,22 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# Environments & Secrets
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+*sa-key*.json
+*credentials*.json
+*-key.json
+*.pem
+*.key
+*.p12
 
 # Spyder project settings
 .spyderproject
@@ -128,17 +136,35 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
 # Downloaded repositories for cloud deployments
-cloud/nobuffer-site/repo/
-cloud/personal-portifolio/repo/
-cloud/personal-blog/repo/
+cloud/*/repo/
 
 # Terraform
 **/.terraform/*
 **/.terraform.d/*
+.terraform/
+.terraform.d/
 *.tfstate
 *.tfstate.*
 *.tfvars
 *.tfvars.json
+!*.tfvars.example
+tfplan
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
 .terraform.lock.hcl
+.terraformrc
+terraform.rc
 

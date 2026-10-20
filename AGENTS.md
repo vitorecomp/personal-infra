@@ -49,7 +49,6 @@ personal-infra/
 │   ├── personal-blog/
 │   │   └── cloudbuild.yaml                 # Cloud Build container & Cloud Run pipeline for personal-blog
 │   └── scripts/
-│       ├── setup_github_config.py          # Configures GitHub Actions variables & secrets for compute-bench
 │       ├── download_nobuffer_site.py       # Clones/updates nobuffer-site and optionally deploys
 │       ├── download_personal_portifolio.py # Clones/updates personal-portifolio and optionally deploys
 │       └── download_personal_blog.py       # Clones/updates personal-blog and optionally deploys
