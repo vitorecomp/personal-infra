@@ -17,3 +17,8 @@ output "blog_service_uri" {
   description = "Cloud Run service URI for personal-blog"
   value       = local.enable_blog ? google_cloud_run_v2_service.blog[0].uri : null
 }
+
+output "blog_sql_connection_name" {
+  description = "Cloud SQL MySQL 8.0 instance connection name for personal-blog"
+  value       = local.enable_blog ? google_sql_database_instance.blog_db[0].connection_name : null
+}

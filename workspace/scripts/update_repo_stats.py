@@ -7,9 +7,11 @@ Columns:
 When documentation/repo_stats.csv already exists, existing rows are matched by
 `name` and only changed GitHub metadata fields (`link`, `ssh link`,
 `last updated`, `is a fork`) are updated, preserving manual values in
-`folder`, `is-custom`, and `is-template`.
+`folder`, `is-custom`, and `is-template`. All rows are ordered by
+`last updated` descending (most recently updated first).
 """
 
+import argparse
 import csv
 import json
 import os
@@ -126,12 +128,23 @@ def build_repo_row(repo: dict) -> dict[str, str]:
     }
 
 
-def update_repo_stats() -> None:
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("METRICS_TOKEN")
-    DOC_DIR.mkdir(parents=True, exist_ok=True)
+def sort_rows_by_last_updated(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Sorts rows by `last updated` descending (most recent first), with `name` ascending as tie-breaker."""
+    by_name = sorted(rows, key=lambda r: (r.get("name") or "").lower())
+    return sorted(
+        by_name,
+        key=lambda r: r.get("last updated") or "",
+        reverse=True,
+    )
 
-    file_existed = CSV_PATH.exists()
-    existing_rows = load_existing_csv(CSV_PATH)
+
+def update_repo_stats(csv_path: Path = CSV_PATH, dry_run: bool = False) -> None:
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("METRICS_TOKEN")
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    file_existed = csv_path.exists()
+    existing_rows = load_existing_csv(csv_path)
+    original_snapshot = [dict(row) for row in existing_rows]
 
     repos = fetch_all_repos(USER, token)
     fresh_by_name = {repo["name"]: build_repo_row(repo) for repo in repos}
@@ -140,43 +153,56 @@ def update_repo_stats() -> None:
     updated_count = 0
     unchanged_count = 0
 
-    final_rows: list[dict[str, str]] = []
+    merged_rows: list[dict[str, str]] = []
     seen_names: set[str] = set()
 
-    # Update existing rows in place so row ordering and custom columns are preserved.
+    # Update existing rows while preserving manual columns.
     for row in existing_rows:
         name = row["name"]
         seen_names.add(name)
+        row_copy = dict(row)
         fresh = fresh_by_name.get(name)
         if not fresh:
-            final_rows.append(row)
+            merged_rows.append(row_copy)
             unchanged_count += 1
             continue
 
         changed = False
         for field in TRACKED_FIELDS:
-            if row.get(field, "") != fresh[field]:
-                row[field] = fresh[field]
+            if row_copy.get(field, "") != fresh[field]:
+                row_copy[field] = fresh[field]
                 changed = True
         for field in EMPTY_FIELDS:
-            row.setdefault(field, "")
+            row_copy.setdefault(field, "")
 
         if changed:
             updated_count += 1
         else:
             unchanged_count += 1
-        final_rows.append(row)
+        merged_rows.append(row_copy)
 
-    # Append newly discovered repositories.
+    # Include newly discovered repositories.
     for repo in repos:
         name = repo["name"]
         if name not in seen_names:
             seen_names.add(name)
             added_count += 1
-            final_rows.append(fresh_by_name[name])
+            merged_rows.append(fresh_by_name[name])
 
-    if not file_existed or added_count > 0 or updated_count > 0:
-        with CSV_PATH.open("w", encoding="utf-8", newline="") as handle:
+    # Sort all rows by `last updated` descending (most recently updated first).
+    final_rows = sort_rows_by_last_updated(merged_rows)
+    reordered = final_rows != original_snapshot
+
+    if not file_existed or added_count > 0 or updated_count > 0 or reordered:
+        if dry_run:
+            print(
+                f"[dry-run] Would write {csv_path}: total={len(final_rows)}, "
+                f"added={added_count}, updated={updated_count}, "
+                f"unchanged={unchanged_count}, reordered={reordered}"
+            )
+            return
+
+        with csv_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(
                 handle, fieldnames=FIELDNAMES, lineterminator="\n"
             )
@@ -184,10 +210,30 @@ def update_repo_stats() -> None:
             writer.writerows(final_rows)
 
     print(
-        f"{CSV_PATH}: total={len(final_rows)}, "
-        f"added={added_count}, updated={updated_count}, unchanged={unchanged_count}"
+        f"{csv_path}: total={len(final_rows)}, "
+        f"added={added_count}, updated={updated_count}, "
+        f"unchanged={unchanged_count}, reordered={reordered}"
     )
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Update documentation/repo_stats.csv with GitHub metadata ordered by last updated."
+    )
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=CSV_PATH,
+        help=f"Path to repo_stats.csv (default: {CSV_PATH})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview changes without writing to repo_stats.csv.",
+    )
+    args = parser.parse_args()
+    update_repo_stats(csv_path=args.csv.expanduser().resolve(), dry_run=args.dry_run)
+
+
 if __name__ == "__main__":
-    update_repo_stats()
+    main()

@@ -1,6 +1,7 @@
 variable "project_id" {
   description = "The GCP Project ID"
   type        = string
+  default     = "legacy-gcp-project"
 }
 
 variable "region" {
@@ -12,29 +13,31 @@ variable "region" {
 variable "bucket_name" {
   description = "The name of the GCS bucket for nobuffer-site"
   type        = string
+  default     = "main-website-legacy-gcp-project"
 }
 
 variable "domain" {
   description = "The domain names for nobuffer-site"
   type        = list(string)
+  default     = ["example.com", "www.example.com"]
 }
 
 variable "portfolio_bucket_name" {
   description = "The name of the GCS bucket for personal-portifolio"
   type        = string
-  default     = ""
+  default     = "portfolio-website-legacy-gcp-project"
 }
 
 variable "portfolio_domain" {
   description = "The domain names for personal-portifolio (routed via host rules on the shared load balancer)"
   type        = list(string)
-  default     = []
+  default     = ["cases.example.com", "me.example.com"]
 }
 
 variable "blog_domain" {
   description = "The domain names for personal-blog (routed to Cloud Run via Serverless NEG on the shared load balancer)"
   type        = list(string)
-  default     = []
+  default     = ["blog.example.com"]
 }
 
 variable "blog_service_name" {
@@ -56,7 +59,44 @@ variable "blog_image" {
 }
 
 variable "blog_content_bucket_name" {
-  description = "Optional GCS bucket name for persisting Ghost SQLite database and media across Cloud Run restarts"
+  description = "Optional GCS bucket name for persisting Ghost uploaded media/images across Cloud Run restarts"
+  type        = string
+  default     = "blog-content-legacy-gcp-project"
+}
+
+variable "blog_db_instance_name" {
+  description = "The Cloud SQL MySQL 8.0 instance name for personal-blog"
+  type        = string
+  default     = "personal-blog-mysql"
+}
+
+variable "blog_db_tier" {
+  description = "The Cloud SQL machine tier for personal-blog"
+  type        = string
+  default     = "db-f1-micro"
+}
+
+variable "blog_db_name" {
+  description = "The MySQL database name for Ghost on Cloud SQL"
+  type        = string
+  default     = "ghost"
+}
+
+variable "blog_db_user" {
+  description = "The MySQL database username for Ghost on Cloud SQL"
+  type        = string
+  default     = "ghost"
+}
+
+variable "blog_db_password" {
+  description = "Optional MySQL password for the Ghost Cloud SQL user (auto-generated if empty)"
   type        = string
   default     = ""
+  sensitive   = true
+}
+
+variable "blog_db_deletion_protection" {
+  description = "Whether to enable deletion protection on the Cloud SQL instance"
+  type        = bool
+  default     = true
 }

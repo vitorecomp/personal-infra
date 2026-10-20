@@ -1,9 +1,10 @@
 data "google_project" "current" {}
 
 locals {
-  enable_portfolio    = var.portfolio_bucket_name != ""
-  enable_blog         = length(var.blog_domain) > 0
-  enable_blog_storage = local.enable_blog && var.blog_content_bucket_name != ""
+  enable_portfolio          = var.portfolio_bucket_name != ""
+  enable_blog               = length(var.blog_domain) > 0
+  enable_blog_storage       = local.enable_blog && var.blog_content_bucket_name != ""
+  resolved_blog_db_password = local.enable_blog ? (var.blog_db_password != "" ? var.blog_db_password : random_password.blog_db_password[0].result) : ""
   all_domains = distinct(concat(
     var.domain,
     local.enable_portfolio ? var.portfolio_domain : [],
@@ -66,7 +67,54 @@ resource "google_artifact_registry_repository" "blog_repo" {
   format        = "DOCKER"
 }
 
-# Optional private GCS Bucket for persisting Ghost SQLite database and media on Cloud Run
+# Cloud SQL MySQL 8.0 Instance for personal-blog (Ghost 5 production database)
+resource "google_sql_database_instance" "blog_db" {
+  count               = local.enable_blog ? 1 : 0
+  name                = var.blog_db_instance_name
+  database_version    = "MYSQL_8_0"
+  region              = var.region
+  deletion_protection = var.blog_db_deletion_protection
+
+  settings {
+    tier              = var.blog_db_tier
+    edition           = "ENTERPRISE"
+    availability_type = "ZONAL"
+    disk_autoresize   = true
+    disk_size         = 10
+    disk_type         = "PD_SSD"
+
+    backup_configuration {
+      enabled            = true
+      binary_log_enabled = false
+    }
+  }
+}
+
+# MySQL Database for Ghost 5
+resource "google_sql_database" "blog_database" {
+  count     = local.enable_blog ? 1 : 0
+  name      = var.blog_db_name
+  instance  = google_sql_database_instance.blog_db[0].name
+  charset   = "utf8mb4"
+  collation = "utf8mb4_0900_ai_ci"
+}
+
+# Auto-generated password for the Ghost Cloud SQL MySQL user when not explicitly provided
+resource "random_password" "blog_db_password" {
+  count   = local.enable_blog && var.blog_db_password == "" ? 1 : 0
+  length  = 32
+  special = false
+}
+
+# MySQL User for Ghost 5
+resource "google_sql_user" "blog_user" {
+  count    = local.enable_blog ? 1 : 0
+  name     = var.blog_db_user
+  instance = google_sql_database_instance.blog_db[0].name
+  password = local.resolved_blog_db_password
+}
+
+# Optional private GCS Bucket for persisting Ghost uploaded media/images on Cloud Run
 resource "google_storage_bucket" "blog_content_bucket" {
   count         = local.enable_blog_storage ? 1 : 0
   name          = var.blog_content_bucket_name
@@ -77,7 +125,7 @@ resource "google_storage_bucket" "blog_content_bucket" {
   public_access_prevention    = "enforced"
 }
 
-# Cloud Run v2 Service for personal-blog (Ghost 5)
+# Cloud Run v2 Service for personal-blog (Ghost 5 connected to Cloud SQL MySQL 8.0)
 resource "google_cloud_run_v2_service" "blog" {
   count    = local.enable_blog ? 1 : 0
   name     = var.blog_service_name
@@ -89,7 +137,14 @@ resource "google_cloud_run_v2_service" "blog" {
 
     scaling {
       min_instance_count = 0
-      max_instance_count = 1
+      max_instance_count = 2
+    }
+
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [google_sql_database_instance.blog_db[0].connection_name]
+      }
     }
 
     dynamic "volumes" {
@@ -122,12 +177,32 @@ resource "google_cloud_run_v2_service" "blog" {
 
       env {
         name  = "database__client"
-        value = "sqlite3"
+        value = "mysql"
       }
 
       env {
-        name  = "database__connection__filename"
-        value = "/var/lib/ghost/content/data/ghost.db"
+        name  = "database__connection__socketPath"
+        value = "/cloudsql/${google_sql_database_instance.blog_db[0].connection_name}"
+      }
+
+      env {
+        name  = "database__connection__user"
+        value = google_sql_user.blog_user[0].name
+      }
+
+      env {
+        name  = "database__connection__password"
+        value = local.resolved_blog_db_password
+      }
+
+      env {
+        name  = "database__connection__database"
+        value = google_sql_database.blog_database[0].name
+      }
+
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
       }
 
       dynamic "env" {

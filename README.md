@@ -7,6 +7,7 @@ Central repository for automatically provisioning, configuring, and maintaining 
 ```text
 personal-infra/
 ├── .github/workflows/        # CI/CD workflows (website/blog builds, Terraform, Nginx deploy)
+├── documentation/            # Project, architecture, cloud setup, and pipeline documentation
 ├── cloud/                    # Cloud infrastructure provisioning and workload deployments
 │   ├── infra/                # Shared Terraform (GCP LB, Cloud CDN, Cloud Run, SSL cert, GCS)
 │   ├── nobuffer-site/        # Cloud Build, Nginx reverse-proxy & maintenance page for nobuffer-site
@@ -20,6 +21,7 @@ personal-infra/
 
 | Directory | Responsibility | Status |
 | :--- | :--- | :--- |
+| **[`documentation/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation)** | Detailed guides for [Cloud Architecture](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/cloud-architecture.md), [Cloud Setup](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/cloud-setup.md), [Pipeline Setup](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/pipeline-setup.md), and [Workspace Management](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/workspace-setup.md). | Active |
 | **`cloud/`** | Provisioning and maintaining cloud resources, networking, and hosted workloads (`nobuffer-site`, `personal-portifolio`, `personal-blog`). | Active |
 | **`home-server/`** | Self-hosted services, container stacks, backups, and home lab automation. | _Planned (to be defined)_ |
 | **`linux/`** | Workstation/system setup, packages, dotfiles, and OS-level maintenance scripts. | _Planned (to be defined)_ |
@@ -33,7 +35,7 @@ personal-infra/
 Manages cloud infrastructure and deployments for hosted sites and services.
 
 - **Shared Terraform Infrastructure ([`cloud/infra/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/infra))**:
-  - [`modules/load-balancer`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/infra/modules/load-balancer): Provisions the shared Global External HTTPS Load Balancer, static IP, Managed SSL Certificate, HTTP-to-HTTPS redirect, Cloud CDN + GCS static hosting buckets for `nobuffer-site` and `personal-portifolio`, and Cloud Run v2 + Serverless NEG + Artifact Registry for `personal-blog`.
+  - [`modules/load-balancer`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/infra/modules/load-balancer): Provisions the shared Global External HTTPS Load Balancer, static IP, Managed SSL Certificate, HTTP-to-HTTPS redirect, Cloud CDN + GCS static hosting buckets for `nobuffer-site` and `personal-portifolio`, and Cloud Run v2 + Cloud SQL for MySQL 8.0 + Serverless NEG + Artifact Registry for `personal-blog`.
   - [`envs/prod`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/infra/envs/prod): Production environment configuration.
 - **`nobuffer-site` Deployment ([`cloud/nobuffer-site/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/nobuffer-site))**:
   - [`cloudbuild.yaml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/nobuffer-site/cloudbuild.yaml): Compiles the `nobuffer-site` static website (`npm ci && npm run build`) and syncs `build/website` to `gs://${_BUCKET_NAME}`.
@@ -69,7 +71,7 @@ _Details to be added._ Will hold scripts and configuration files to bootstrap an
 Manages the local `~/workspace` directory hierarchy based on a tracked inventory of GitHub repositories.
 
 - **Inventory ([`repo_stats.csv`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/documentation/repo_stats.csv))**: Tracks repository metadata (`name`, `link`, `ssh link`, `last updated`, `is a fork`) alongside manual curation fields (`folder`, `is-custom`, `is-template`).
-- **Update Inventory ([`update_repo_stats.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/update_repo_stats.py))**: Queries the GitHub API for `vitorecomp` repositories and updates metadata in `repo_stats.csv` while preserving manual columns (`folder`, `is-custom`, `is-template`) and row ordering.
+- **Update Inventory ([`update_repo_stats.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/update_repo_stats.py))**: Queries the GitHub API for `vitorecomp` repositories, updates metadata in `repo_stats.csv` while preserving manual columns (`folder`, `is-custom`, `is-template`), and orders all rows by `last updated` descending.
   ```bash
   # Optional: export GITHUB_TOKEN or METRICS_TOKEN to include private repos / avoid rate limits
   python3 workspace/scripts/update_repo_stats.py
@@ -100,14 +102,16 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
 ### Required GitHub Secrets & Variables
 
 - **Secrets (`personal-infra`)**:
-  - `GCP_SA_KEY`: GCP service account JSON key for Cloud Build, Cloud Run, Artifact Registry, and Terraform.
+  - `GCP_SA_KEY`: GCP service account JSON key for Cloud Build, Cloud Run, Cloud SQL, Artifact Registry, and Terraform.
+  - `BLOG_DB_PASSWORD` _(optional)_: Cloud SQL MySQL password for the Ghost user (auto-generated by Terraform if omitted).
   - `HOST`, `USERNAME`, `KEY`: SSH credentials for the Nginx reverse-proxy deployment.
   - `METRICS_TOKEN` _(optional)_: GitHub token with repo read access for `update_repo_stats.py`.
 - **Variables (`personal-infra`)**:
-  - `GCP_PROJECT_ID`, `GCP_REGION`: Target GCP project and region for Terraform and Cloud Run.
+  - `GCP_PROJECT_ID`, `GCP_REGION`: Target GCP project and region for Terraform, Cloud SQL, and Cloud Run.
   - `GCS_BUCKET_NAME`: GCS bucket name for `nobuffer-site`.
   - `GCS_PORTFOLIO_BUCKET_NAME`: GCS bucket name for `personal-portifolio`.
-  - `GCS_BLOG_CONTENT_BUCKET_NAME` _(optional)_: GCS bucket name for persistent Ghost SQLite DB & media on Cloud Run.
+  - `GCS_BLOG_CONTENT_BUCKET_NAME` _(optional)_: GCS bucket name for persistent Ghost media/images on Cloud Run.
+  - `BLOG_DB_INSTANCE_NAME`, `BLOG_DB_TIER`, `BLOG_DB_NAME`, `BLOG_DB_USER` _(optional)_: Cloud SQL MySQL 8.0 settings for `personal-blog`.
   - `GAR_BLOG_REPO`, `CLOUD_RUN_BLOG_SERVICE`, `BLOG_URL` _(optional)_: Artifact Registry repo, Cloud Run service name, and public URL for `personal-blog`.
   - `NOBUFFER_DOMAINS`, `PORTFOLIO_DOMAINS`, `BLOG_DOMAINS` _(optional JSON lists)_: Domains routed by the shared load balancer.
 - **Secrets (`nobuffer-site`, `personal-portifolio` & `personal-blog`)**:
