@@ -122,11 +122,10 @@ resource "google_storage_bucket" "blog_content_bucket" {
 
 # Cloud Run v2 Service for personal-blog (Ghost 5 connected to Cloud SQL MySQL 8.0)
 resource "google_cloud_run_v2_service" "blog" {
-  count                = local.enable_blog ? 1 : 0
-  name                 = var.blog_service_name
-  location             = var.region
-  ingress              = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
-  invoker_iam_disabled = true
+  count    = local.enable_blog ? 1 : 0
+  name     = var.blog_service_name
+  location = var.region
+  ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
 
   template {
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"

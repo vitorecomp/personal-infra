@@ -176,7 +176,6 @@ def deploy_blog_repo(
         f"--region={region}",
         f"--image={image_uri}",
         f"--update-env-vars=NODE_ENV=production,url={blog_url},security__staffDeviceVerification=false",
-        "--no-invoker-iam-check",
         "--quiet",
     ]
 
