@@ -1,6 +1,11 @@
 terraform {
   required_version = ">= 1.0"
 
+  backend "gcs" {
+    bucket = "compute-bench_cloudbuild"
+    prefix = "terraform/state/personal-infra-prod"
+  }
+
   required_providers {
     google = {
       source  = "hashicorp/google"
@@ -36,6 +41,4 @@ module "load_balancer" {
   blog_db_user                = var.blog_db_user
   blog_db_password            = var.blog_db_password
   blog_db_deletion_protection = var.blog_db_deletion_protection
-  blog_admin_email            = var.blog_admin_email
-  blog_admin_password         = var.blog_admin_password
 }

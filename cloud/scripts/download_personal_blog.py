@@ -139,6 +139,7 @@ def deploy_blog_repo(
     ar_repo: str,
     service_name: str,
     blog_url: str,
+    project_id: str = "compute-bench",
     dry_run: bool = False,
 ) -> bool:
     if not cloudbuild_config.exists():
@@ -155,26 +156,64 @@ def deploy_blog_repo(
         f"_BLOG_URL={blog_url}"
     )
 
-    cmd = [
+    build_cmd = [
         "gcloud",
         "builds",
         "submit",
         str(target_dir),
+        f"--project={project_id}",
         f"--config={cloudbuild_config}",
         f"--substitutions={substitutions}",
     ]
 
+    image_uri = f"{region}-docker.pkg.dev/{project_id}/{ar_repo}/{service_name}:latest"
+    deploy_cmd = [
+        "gcloud",
+        "run",
+        "services",
+        "update",
+        service_name,
+        f"--project={project_id}",
+        f"--region={region}",
+        f"--image={image_uri}",
+        f"--update-env-vars=NODE_ENV=production,url={blog_url},security__staffDeviceVerification=false",
+        "--quiet",
+    ]
+
+    seed_script = Path(__file__).resolve().parent / "seed_ghost_admin.py"
+    seed_cmd = [
+        sys.executable,
+        str(seed_script),
+        f"--blog-url={blog_url}",
+    ]
+
     if dry_run:
-        print(f"[dry-run] Would run: {' '.join(cmd)}")
+        print(f"[dry-run] Would run: {' '.join(build_cmd)}")
+        print(f"[dry-run] Would run: {' '.join(deploy_cmd)}")
+        print(f"[dry-run] Would run: {' '.join(seed_cmd)} --dry-run")
         return True
 
     print(
-        f"[deploy] Submitting Cloud Build for {target_dir} -> Cloud Run service '{service_name}' ({region}) ..."
+        f"[deploy] Submitting Cloud Build for {target_dir} -> Artifact Registry '{ar_repo}/{service_name}' ({region}) ..."
     )
-    result = subprocess.run(cmd, check=False)
+    result = subprocess.run(build_cmd, check=False)
     if result.returncode != 0:
         print("[error] Cloud Build submission failed.", file=sys.stderr)
         return False
+
+    print(
+        f"[deploy] Updating Cloud Run service '{service_name}' ({region}) with image {image_uri} ..."
+    )
+    deploy_res = subprocess.run(deploy_cmd, check=False)
+    if deploy_res.returncode != 0:
+        print("[error] Cloud Run service update failed.", file=sys.stderr)
+        return False
+
+    if seed_script.exists():
+        seed_res = subprocess.run(seed_cmd, check=False)
+        if seed_res.returncode != 0:
+            print("[error] Ghost Admin Owner seeding failed.", file=sys.stderr)
+            return False
 
     print(f"[ok] Deployed personal-blog to Cloud Run service '{service_name}'")
     return True

@@ -47,8 +47,6 @@ jobs:
       TF_VAR_blog_db_name: ${{ vars.BLOG_DB_NAME || 'ghost' }}
       TF_VAR_blog_db_user: ${{ vars.BLOG_DB_USER || 'ghost' }}
       TF_VAR_blog_db_password: ${{ secrets.BLOG_DB_PASSWORD || '' }}
-      TF_VAR_blog_admin_email: ${{ vars.BLOG_ADMIN_EMAIL || 'vitor.ecomp@gmail.com' }}
-      TF_VAR_blog_admin_password: ${{ secrets.BLOG_ADMIN_PASSWORD || '' }}
 
     steps:
     - uses: actions/checkout@v4

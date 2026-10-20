@@ -5,11 +5,6 @@ locals {
   enable_blog               = length(var.blog_domain) > 0
   enable_blog_storage       = local.enable_blog && var.blog_content_bucket_name != ""
   resolved_blog_db_password = local.enable_blog ? (var.blog_db_password != "" ? var.blog_db_password : random_password.blog_db_password[0].result) : ""
-  all_domains = distinct(concat(
-    var.domain,
-    local.enable_portfolio ? var.portfolio_domain : [],
-    local.enable_blog ? var.blog_domain : []
-  ))
 }
 
 # Create the GCS Bucket for nobuffer-site static website hosting
@@ -205,22 +200,6 @@ resource "google_cloud_run_v2_service" "blog" {
         value = "false"
       }
 
-      dynamic "env" {
-        for_each = var.blog_admin_email != "" && var.blog_admin_password != "" ? [1] : []
-        content {
-          name  = "GHOST_ADMIN_EMAIL"
-          value = var.blog_admin_email
-        }
-      }
-
-      dynamic "env" {
-        for_each = var.blog_admin_email != "" && var.blog_admin_password != "" ? [1] : []
-        content {
-          name  = "GHOST_ADMIN_PASSWORD"
-          value = var.blog_admin_password
-        }
-      }
-
       volume_mounts {
         name       = "cloudsql"
         mount_path = "/cloudsql"
@@ -364,22 +343,50 @@ resource "google_compute_url_map" "nobuffer_site_url_map" {
   }
 }
 
-# Create a Managed SSL Certificate covering all configured domains
+# Managed SSL Certificate for nobuffer-site (vitorx86.dev, www.vitorx86.dev)
 resource "google_compute_managed_ssl_certificate" "nobuffer_site_cert" {
   name = "nobuffer-site-cert-v2"
   managed {
-    domains = local.all_domains
+    domains = var.domain
   }
   lifecycle {
     create_before_destroy = true
   }
 }
 
-# Create a Target HTTPS Proxy
+# Managed SSL Certificate for personal-portifolio (cases.vitorx86.dev, me.vitorx86.dev)
+resource "google_compute_managed_ssl_certificate" "portfolio_cert" {
+  count = local.enable_portfolio && length(var.portfolio_domain) > 0 ? 1 : 0
+  name  = "personal-portifolio-cert"
+  managed {
+    domains = var.portfolio_domain
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Managed SSL Certificate for personal-blog (blog.vitorx86.dev)
+resource "google_compute_managed_ssl_certificate" "blog_cert" {
+  count = local.enable_blog ? 1 : 0
+  name  = "personal-blog-cert"
+  managed {
+    domains = var.blog_domain
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# Create a Target HTTPS Proxy attaching all workload SSL certificates
 resource "google_compute_target_https_proxy" "nobuffer_site_https_proxy" {
-  name             = "nobuffer-site-https-proxy"
-  url_map          = google_compute_url_map.nobuffer_site_url_map.id
-  ssl_certificates = [google_compute_managed_ssl_certificate.nobuffer_site_cert.id]
+  name    = "nobuffer-site-https-proxy"
+  url_map = google_compute_url_map.nobuffer_site_url_map.id
+  ssl_certificates = concat(
+    [google_compute_managed_ssl_certificate.nobuffer_site_cert.id],
+    local.enable_portfolio && length(var.portfolio_domain) > 0 ? [google_compute_managed_ssl_certificate.portfolio_cert[0].id] : [],
+    local.enable_blog ? [google_compute_managed_ssl_certificate.blog_cert[0].id] : []
+  )
 }
 
 # Create a Global Forwarding Rule for HTTPS

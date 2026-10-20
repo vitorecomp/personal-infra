@@ -73,7 +73,7 @@ sequenceDiagram
 | `GAR_BLOG_REPO` | `personal-blog` | Artifact Registry Docker repository name for `personal-blog`. |
 | `CLOUD_RUN_BLOG_SERVICE` | `personal-blog` | Cloud Run service name for `personal-blog`. |
 | `BLOG_URL` | `https://blog.vitorx86.dev` | Public canonical URL passed to Ghost (`url` env var). |
-| `BLOG_ADMIN_EMAIL` | `vitor.ecomp@gmail.com` | Initial Ghost Admin Owner email address seeded on startup. |
+| `BLOG_ADMIN_EMAIL` | `vitor.ecomp@gmail.com` | Initial Ghost Admin Owner email address seeded during the blog deployment pipeline. |
 
 ---
 

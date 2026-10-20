@@ -51,7 +51,8 @@ personal-infra/
 │   └── scripts/
 │       ├── download_nobuffer_site.py       # Clones/updates nobuffer-site and optionally deploys
 │       ├── download_personal_portifolio.py # Clones/updates personal-portifolio and optionally deploys
-│       └── download_personal_blog.py       # Clones/updates personal-blog and optionally deploys
+│       ├── download_personal_blog.py       # Clones/updates personal-blog and optionally deploys
+│       └── seed_ghost_admin.py             # Idempotently seeds Ghost Admin Owner in the deploy pipeline
 ├── home-server/                            # (Planned) Home server setup and maintenance
 ├── linux/                                  # (Planned) Linux workstation/system configuration
 └── workspace/                              # Local repository management

@@ -8,6 +8,7 @@ on:
     paths:
       - "cloud/personal-blog/cloudbuild.yaml"
       - "cloud/scripts/download_personal_blog.py"
+      - "cloud/scripts/seed_ghost_admin.py"
       - ".github/workflows/build-blog.yml"
 
 concurrency:
@@ -20,6 +21,12 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'compute-bench' }}
+      GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+      GAR_BLOG_REPO: ${{ vars.GAR_BLOG_REPO || 'personal-blog' }}
+      CLOUD_RUN_BLOG_SERVICE: ${{ vars.CLOUD_RUN_BLOG_SERVICE || 'personal-blog' }}
+      BLOG_URL: ${{ vars.BLOG_URL || 'https://blog.vitorx86.dev' }}
     steps:
     - uses: actions/checkout@v4
 
@@ -35,5 +42,22 @@ jobs:
     - name: Submit Build to Cloud Build
       run: |
         gcloud builds submit cloud/personal-blog/repo \
+          --project "${GCP_PROJECT_ID}" \
           --config cloud/personal-blog/cloudbuild.yaml \
-          --substitutions=_REGION=${{ vars.GCP_REGION || 'us-central1' }},_AR_REPO=${{ vars.GAR_BLOG_REPO || 'personal-blog' }},_SERVICE_NAME=${{ vars.CLOUD_RUN_BLOG_SERVICE || 'personal-blog' }},_BLOG_URL=${{ vars.BLOG_URL || 'https://blog.vitorx86.dev' }}
+          --substitutions=_REGION=${GCP_REGION},_AR_REPO=${GAR_BLOG_REPO},_SERVICE_NAME=${CLOUD_RUN_BLOG_SERVICE},_BLOG_URL=${BLOG_URL}
+
+    - name: Deploy Container to Cloud Run
+      run: |
+        gcloud run services update "${CLOUD_RUN_BLOG_SERVICE}" \
+          --project "${GCP_PROJECT_ID}" \
+          --region "${GCP_REGION}" \
+          --image "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_BLOG_REPO}/${CLOUD_RUN_BLOG_SERVICE}:latest" \
+          --update-env-vars "NODE_ENV=production,url=${BLOG_URL},security__staffDeviceVerification=false" \
+          --quiet
+
+    - name: Seed Ghost Admin Owner
+      env:
+        BLOG_ADMIN_EMAIL: ${{ vars.BLOG_ADMIN_EMAIL || 'vitor.ecomp@gmail.com' }}
+        BLOG_ADMIN_PASSWORD: ${{ secrets.BLOG_ADMIN_PASSWORD }}
+      run: |
+        python3 cloud/scripts/seed_ghost_admin.py --blog-url "${BLOG_URL}"
