@@ -19,7 +19,7 @@ variable "bucket_name" {
 variable "domain" {
   description = "The domain names for nobuffer-site"
   type        = list(string)
-  default     = ["example.com", "www.example.com"]
+  default     = ["www.example.com", "example.com"]
 }
 
 variable "portfolio_bucket_name" {
