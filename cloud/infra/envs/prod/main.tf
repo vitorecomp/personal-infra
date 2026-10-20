@@ -36,4 +36,6 @@ module "load_balancer" {
   blog_db_user                = var.blog_db_user
   blog_db_password            = var.blog_db_password
   blog_db_deletion_protection = var.blog_db_deletion_protection
+  blog_admin_email            = var.blog_admin_email
+  blog_admin_password         = var.blog_admin_password
 }
