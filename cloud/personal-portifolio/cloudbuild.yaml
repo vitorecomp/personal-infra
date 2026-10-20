@@ -1,0 +1,12 @@
+steps:
+- name: 'node:24-alpine'
+  entrypoint: 'sh'
+  args:
+    - '-c'
+    - 'corepack enable && corepack prepare pnpm@10.34.7 --activate && pnpm install --frozen-lockfile && pnpm run build:export'
+- name: 'gcr.io/cloud-builders/gsutil'
+  args: ['-m', 'rsync', '-d', '-r', 'out', 'gs://${_BUCKET_NAME}']
+# HTML entrypoints reference content-hashed assets that rsync -d deletes on the
+# next deploy, so the CDN must never serve a stale copy of them
+- name: 'gcr.io/cloud-builders/gsutil'
+  args: ['-m', 'setmeta', '-h', 'Cache-Control:no-cache', 'gs://${_BUCKET_NAME}/index.html', 'gs://${_BUCKET_NAME}/404.html']

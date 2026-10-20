@@ -1,0 +1,10 @@
+project_id               = "<project_id>"
+region                   = "us-central1"
+bucket_name              = "<nobuffer_site_bucket_name>"
+domain                   = ["www.vitorx86.dev", "vitorx86.dev"]
+portfolio_bucket_name    = "<personal_portifolio_bucket_name>"
+portfolio_domain         = ["cases.vitorx86.dev", "me.vitorx86.dev"]
+blog_domain              = ["blog.vitorx86.dev"]
+blog_service_name        = "personal-blog"
+blog_ar_repo_name        = "personal-blog"
+blog_content_bucket_name = "<personal_blog_content_bucket_name>"

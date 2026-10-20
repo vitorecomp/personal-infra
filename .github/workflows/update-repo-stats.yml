@@ -1,0 +1,43 @@
+name: Update Workspace Repo Stats
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs every Monday at 06:00 UTC
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: update-repo-stats
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  update-stats:
+    name: Sync GitHub Metadata into repo_stats.csv
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Run update_repo_stats.py
+      env:
+        GITHUB_TOKEN: ${{ secrets.METRICS_TOKEN || secrets.GITHUB_TOKEN }}
+      run: |
+        python3 workspace/scripts/update_repo_stats.py
+
+    - name: Commit and push updated repo_stats.csv
+      run: |
+        if git diff --quiet workspace/documentation/repo_stats.csv; then
+          echo "No changes to repo_stats.csv"
+          exit 0
+        fi
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add workspace/documentation/repo_stats.csv
+        git commit -m "chore(workspace): update repo_stats.csv metadata"
+        git push

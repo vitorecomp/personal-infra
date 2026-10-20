@@ -1,0 +1,39 @@
+name: Build the Personal Portfolio
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [ "deploy-personal-portifolio" ]
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "cloud/personal-portifolio/cloudbuild.yaml"
+      - "cloud/scripts/download_personal_portifolio.py"
+      - ".github/workflows/build-portfolio.yml"
+
+concurrency:
+  group: build-portfolio
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download personal-portifolio repository
+      run: |
+        python3 cloud/scripts/download_personal_portifolio.py --https
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Submit Build to Cloud Build
+      run: |
+        gcloud builds submit cloud/personal-portifolio/repo \
+          --config cloud/personal-portifolio/cloudbuild.yaml \
+          --substitutions=_BUCKET_NAME=${{ vars.GCS_PORTFOLIO_BUCKET_NAME }}

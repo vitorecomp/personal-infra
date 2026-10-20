@@ -1,0 +1,70 @@
+name: Terraform Cloud Infrastructure
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Run terraform apply after plan"
+        required: false
+        default: false
+        type: boolean
+  pull_request:
+    branches: [ "main", "master" ]
+    paths:
+      - "cloud/infra/**"
+      - ".github/workflows/terraform-cloud.yml"
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "cloud/infra/**"
+
+concurrency:
+  group: terraform-cloud-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform Plan & Apply (prod)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud/infra/envs/prod
+    env:
+      TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+      TF_VAR_region: ${{ vars.GCP_REGION || 'us-central1' }}
+      TF_VAR_bucket_name: ${{ vars.GCS_BUCKET_NAME }}
+      TF_VAR_domain: ${{ vars.NOBUFFER_DOMAINS || '["www.vitorx86.dev","vitorx86.dev"]' }}
+      TF_VAR_portfolio_bucket_name: ${{ vars.GCS_PORTFOLIO_BUCKET_NAME || '' }}
+      TF_VAR_portfolio_domain: ${{ vars.PORTFOLIO_DOMAINS || '["cases.vitorx86.dev","me.vitorx86.dev"]' }}
+      TF_VAR_blog_domain: ${{ vars.BLOG_DOMAINS || '["blog.vitorx86.dev"]' }}
+      TF_VAR_blog_service_name: ${{ vars.CLOUD_RUN_BLOG_SERVICE || 'personal-blog' }}
+      TF_VAR_blog_ar_repo_name: ${{ vars.GAR_BLOG_REPO || 'personal-blog' }}
+      TF_VAR_blog_content_bucket_name: ${{ vars.GCS_BLOG_CONTENT_BUCKET_NAME || '' }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Terraform Init
+      run: terraform init
+
+    - name: Terraform Validate
+      run: terraform validate
+
+    - name: Terraform Plan
+      run: terraform plan -input=false -out=tfplan
+
+    - name: Terraform Apply
+      if: >-
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) ||
+        (github.event_name == 'workflow_dispatch' && inputs.apply == true)
+      run: terraform apply -input=false -auto-approve tfplan

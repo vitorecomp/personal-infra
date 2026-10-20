@@ -1,0 +1,39 @@
+name: Build and Deploy the Personal Blog
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [ "deploy-personal-blog" ]
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "cloud/personal-blog/cloudbuild.yaml"
+      - "cloud/scripts/download_personal_blog.py"
+      - ".github/workflows/build-blog.yml"
+
+concurrency:
+  group: build-blog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download personal-blog repository
+      run: |
+        python3 cloud/scripts/download_personal_blog.py --https
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Submit Build to Cloud Build
+      run: |
+        gcloud builds submit cloud/personal-blog/repo \
+          --config cloud/personal-blog/cloudbuild.yaml \
+          --substitutions=_REGION=${{ vars.GCP_REGION || 'us-central1' }},_AR_REPO=${{ vars.GAR_BLOG_REPO || 'personal-blog' }},_SERVICE_NAME=${{ vars.CLOUD_RUN_BLOG_SERVICE || 'personal-blog' }},_BLOG_URL=${{ vars.BLOG_URL || 'https://blog.vitorx86.dev' }}
