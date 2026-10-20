@@ -73,6 +73,16 @@ import {
 }
 
 import {
+  to = module.load_balancer.google_compute_managed_ssl_certificate.portfolio_cert[0]
+  id = "projects/compute-bench/global/sslCertificates/personal-portifolio-cert"
+}
+
+import {
+  to = module.load_balancer.google_compute_managed_ssl_certificate.blog_cert[0]
+  id = "projects/compute-bench/global/sslCertificates/personal-blog-cert"
+}
+
+import {
   to = module.load_balancer.google_compute_target_https_proxy.nobuffer_site_https_proxy
   id = "projects/compute-bench/global/targetHttpsProxies/nobuffer-site-https-proxy"
 }

@@ -122,10 +122,11 @@ resource "google_storage_bucket" "blog_content_bucket" {
 
 # Cloud Run v2 Service for personal-blog (Ghost 5 connected to Cloud SQL MySQL 8.0)
 resource "google_cloud_run_v2_service" "blog" {
-  count    = local.enable_blog ? 1 : 0
-  name     = var.blog_service_name
-  location = var.region
-  ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  count                = local.enable_blog ? 1 : 0
+  name                 = var.blog_service_name
+  location             = var.region
+  ingress              = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  invoker_iam_disabled = true
 
   template {
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
@@ -232,15 +233,6 @@ resource "google_cloud_run_v2_service" "blog" {
   }
 }
 
-# Allow public invocation of the Cloud Run blog service via the Load Balancer
-resource "google_cloud_run_v2_service_iam_member" "blog_public_invoker" {
-  count    = local.enable_blog ? 1 : 0
-  location = google_cloud_run_v2_service.blog[0].location
-  name     = google_cloud_run_v2_service.blog[0].name
-  role     = "roles/run.invoker"
-  member   = "allUsers"
-}
-
 # Serverless Network Endpoint Group (NEG) for the personal-blog Cloud Run service
 resource "google_compute_region_network_endpoint_group" "blog_neg" {
   count                 = local.enable_blog ? 1 : 0
@@ -343,7 +335,7 @@ resource "google_compute_url_map" "nobuffer_site_url_map" {
   }
 }
 
-# Managed SSL Certificate for nobuffer-site (vitorx86.dev, www.vitorx86.dev)
+# Managed SSL Certificate for nobuffer-site (www.vitorx86.dev, vitorx86.dev)
 resource "google_compute_managed_ssl_certificate" "nobuffer_site_cert" {
   name = "nobuffer-site-cert-v2"
   managed {
@@ -351,6 +343,7 @@ resource "google_compute_managed_ssl_certificate" "nobuffer_site_cert" {
   }
   lifecycle {
     create_before_destroy = true
+    ignore_changes        = [managed[0].domains]
   }
 }
 

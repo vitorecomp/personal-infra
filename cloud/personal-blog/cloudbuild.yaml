@@ -2,7 +2,6 @@ substitutions:
   _REGION: 'us-central1'
   _AR_REPO: 'personal-blog'
   _SERVICE_NAME: 'personal-blog'
-  _BLOG_URL: 'https://blog.vitorx86.dev'
 
 steps:
 - name: 'node:24-alpine'

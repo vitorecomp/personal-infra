@@ -16,6 +16,7 @@ on:
     branches: [ "main", "master" ]
     paths:
       - "cloud/infra/**"
+      - ".github/workflows/terraform-cloud.yml"
 
 concurrency:
   group: terraform-cloud-prod
@@ -35,7 +36,7 @@ jobs:
       TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID || 'compute-bench' }}
       TF_VAR_region: ${{ vars.GCP_REGION || 'us-central1' }}
       TF_VAR_bucket_name: ${{ vars.GCS_BUCKET_NAME || 'main-website-compute-bench' }}
-      TF_VAR_domain: ${{ vars.NOBUFFER_DOMAINS || '["vitorx86.dev","www.vitorx86.dev"]' }}
+      TF_VAR_domain: ${{ vars.NOBUFFER_DOMAINS || '["www.vitorx86.dev","vitorx86.dev"]' }}
       TF_VAR_portfolio_bucket_name: ${{ vars.GCS_PORTFOLIO_BUCKET_NAME || 'portfolio-website-compute-bench' }}
       TF_VAR_portfolio_domain: ${{ vars.PORTFOLIO_DOMAINS || '["cases.vitorx86.dev","me.vitorx86.dev"]' }}
       TF_VAR_blog_domain: ${{ vars.BLOG_DOMAINS || '["blog.vitorx86.dev"]' }}
@@ -49,13 +50,13 @@ jobs:
       TF_VAR_blog_db_password: ${{ secrets.BLOG_DB_PASSWORD || '' }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up Terraform
-      uses: hashicorp/setup-terraform@v3
+      uses: hashicorp/setup-terraform@v4
 
     - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v2
+      uses: google-github-actions/auth@v3
       with:
         credentials_json: ${{ secrets.GCP_SA_KEY }}
 

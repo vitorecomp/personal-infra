@@ -28,14 +28,14 @@ jobs:
       CLOUD_RUN_BLOG_SERVICE: ${{ vars.CLOUD_RUN_BLOG_SERVICE || 'personal-blog' }}
       BLOG_URL: ${{ vars.BLOG_URL || 'https://blog.vitorx86.dev' }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Download personal-blog repository
       run: |
         python3 cloud/scripts/download_personal_blog.py --https
 
     - name: Authenticate to Google Cloud
-      uses: google-github-actions/auth@v2
+      uses: google-github-actions/auth@v3
       with:
         credentials_json: ${{ secrets.GCP_SA_KEY }}
 
@@ -44,7 +44,7 @@ jobs:
         gcloud builds submit cloud/personal-blog/repo \
           --project "${GCP_PROJECT_ID}" \
           --config cloud/personal-blog/cloudbuild.yaml \
-          --substitutions=_REGION=${GCP_REGION},_AR_REPO=${GAR_BLOG_REPO},_SERVICE_NAME=${CLOUD_RUN_BLOG_SERVICE},_BLOG_URL=${BLOG_URL}
+          --substitutions=_REGION=${GCP_REGION},_AR_REPO=${GAR_BLOG_REPO},_SERVICE_NAME=${CLOUD_RUN_BLOG_SERVICE}
 
     - name: Deploy Container to Cloud Run
       run: |
@@ -53,6 +53,7 @@ jobs:
           --region "${GCP_REGION}" \
           --image "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_BLOG_REPO}/${CLOUD_RUN_BLOG_SERVICE}:latest" \
           --update-env-vars "NODE_ENV=production,url=${BLOG_URL},security__staffDeviceVerification=false" \
+          --no-invoker-iam-check \
           --quiet
 
     - name: Seed Ghost Admin Owner

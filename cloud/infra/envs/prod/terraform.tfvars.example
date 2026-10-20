@@ -1,7 +1,7 @@
 project_id               = "compute-bench"
 region                   = "us-central1"
 bucket_name              = "main-website-compute-bench"
-domain                   = ["vitorx86.dev", "www.vitorx86.dev"]
+domain                   = ["www.vitorx86.dev", "vitorx86.dev"]
 portfolio_bucket_name    = "portfolio-website-compute-bench"
 portfolio_domain         = ["cases.vitorx86.dev", "me.vitorx86.dev"]
 blog_domain              = ["blog.vitorx86.dev"]
