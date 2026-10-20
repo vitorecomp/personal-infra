@@ -120,6 +120,22 @@ resource "google_storage_bucket" "blog_content_bucket" {
   public_access_prevention    = "enforced"
 }
 
+# Dedicated least-privilege runtime Service Account for the personal-blog Cloud Run service
+resource "google_service_account" "blog_runtime" {
+  count        = local.enable_blog ? 1 : 0
+  account_id   = var.blog_runtime_sa_name
+  display_name = "Personal Blog Cloud Run Runtime"
+  description  = "Hardened least-privilege runtime service account for the personal-blog Cloud Run service"
+}
+
+# Grant the hardened blog runtime Service Account access ONLY to the blog content GCS bucket
+resource "google_storage_bucket_iam_member" "blog_runtime_storage" {
+  count  = local.enable_blog_storage ? 1 : 0
+  bucket = google_storage_bucket.blog_content_bucket[0].name
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${google_service_account.blog_runtime[0].email}"
+}
+
 # Cloud Run v2 Service for personal-blog (Ghost 5 connected to Cloud SQL MySQL 8.0)
 resource "google_cloud_run_v2_service" "blog" {
   count    = local.enable_blog ? 1 : 0
@@ -128,6 +144,7 @@ resource "google_cloud_run_v2_service" "blog" {
   ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
 
   template {
+    service_account       = google_service_account.blog_runtime[0].email
     execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
 
     scaling {
@@ -226,6 +243,7 @@ resource "google_cloud_run_v2_service" "blog" {
   lifecycle {
     ignore_changes = [
       template[0].containers[0].image,
+      template[0].service_account,
       client,
       client_version,
     ]

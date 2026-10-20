@@ -32,6 +32,7 @@ module "load_balancer" {
   portfolio_domain            = var.portfolio_domain
   blog_domain                 = var.blog_domain
   blog_service_name           = var.blog_service_name
+  blog_runtime_sa_name        = var.blog_runtime_sa_name
   blog_ar_repo_name           = var.blog_ar_repo_name
   blog_image                  = var.blog_image
   blog_content_bucket_name    = var.blog_content_bucket_name

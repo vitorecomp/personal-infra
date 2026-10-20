@@ -18,6 +18,11 @@ import {
 }
 
 import {
+  to = module.load_balancer.google_service_account.blog_runtime[0]
+  id = "projects/legacy-gcp-project/serviceAccounts/personal-blog-run@legacy-gcp-project.iam.gserviceaccount.com"
+}
+
+import {
   to = module.load_balancer.google_artifact_registry_repository.blog_repo[0]
   id = "projects/legacy-gcp-project/locations/us-central1/repositories/personal-blog"
 }

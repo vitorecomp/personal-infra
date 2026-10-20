@@ -46,6 +46,12 @@ variable "blog_service_name" {
   default     = "personal-blog"
 }
 
+variable "blog_runtime_sa_name" {
+  description = "The account ID for the dedicated least-privilege Cloud Run runtime service account for personal-blog"
+  type        = string
+  default     = "personal-blog-run"
+}
+
 variable "blog_ar_repo_name" {
   description = "The Artifact Registry Docker repository name for personal-blog"
   type        = string
