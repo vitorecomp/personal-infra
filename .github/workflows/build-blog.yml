@@ -55,12 +55,7 @@ jobs:
           --service-account "${BLOG_RUNTIME_SA}" \
           --image "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_BLOG_REPO}/${CLOUD_RUN_BLOG_SERVICE}:latest" \
           --update-env-vars "NODE_ENV=production,url=${BLOG_URL},security__staffDeviceVerification=false" \
-          --quiet || \
-        gcloud run services update "${CLOUD_RUN_BLOG_SERVICE}" \
-          --project "${GCP_PROJECT_ID}" \
-          --region "${GCP_REGION}" \
-          --image "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_BLOG_REPO}/${CLOUD_RUN_BLOG_SERVICE}:latest" \
-          --update-env-vars "NODE_ENV=production,url=${BLOG_URL},security__staffDeviceVerification=false" \
+          --no-invoker-iam-check \
           --quiet
 
     - name: Seed Ghost Admin Owner
