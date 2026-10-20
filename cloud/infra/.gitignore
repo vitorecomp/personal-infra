@@ -22,6 +22,11 @@ crash.*.log
 # Exclude all .tfvars files (may contain secrets)
 *.tfvars
 *.tfvars.json
+!*.tfvars.example
+
+# Terraform plan outputs (may contain sensitive variables)
+tfplan
+*.tfplan
 
 # Ignore override files
 override.tf
