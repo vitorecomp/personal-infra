@@ -8,7 +8,7 @@ Instructions and context for AI coding agents working in `personal-infra`.
 
 The repository is organized into four top-level domains:
 
-1. **`cloud/`** — Shared GCP Terraform infrastructure (Global HTTPS Load Balancer, Cloud CDN, SSL certificates, GCS static buckets, Cloud Run + Serverless NEG + Artifact Registry), reverse-proxy configs, and Cloud Build deployment automation for `nobuffer-site`, `personal-portifolio`, and `personal-blog`.
+1. **`cloud/`** — Shared GCP Terraform infrastructure (Global HTTPS Load Balancer, Cloud CDN, SSL certificates, GCS static buckets, Cloud Run + Cloud SQL for MySQL 8.0 + Serverless NEG + Artifact Registry), reverse-proxy configs, and Cloud Build deployment automation for `nobuffer-site`, `personal-portifolio`, and `personal-blog`.
 2. **`home-server/`** — Home server workloads, self-hosted services, networking, and maintenance _(specification pending)_.
 3. **`linux/`** — Linux system bootstrap, package installation, dotfiles, and OS configuration _(specification pending)_.
 4. **`workspace/`** — Local `~/workspace` directory orchestration and GitHub repository synchronization.
@@ -24,6 +24,12 @@ personal-infra/
 ├── README.md
 ├── AGENTS.md
 ├── LICENSE
+├── documentation/
+│   ├── README.md                           # Documentation index
+│   ├── cloud-architecture.md               # GCP LB, CDN, GCS, Cloud Run & Cloud SQL architecture
+│   ├── cloud-setup.md                      # GCP bootstrap, IAM, Terraform & DNS setup guide
+│   ├── pipeline-setup.md                   # GitHub Actions, Cloud Build & secrets/variables guide
+│   └── workspace-setup.md                  # Local ~/workspace inventory & sync documentation
 ├── .github/workflows/
 │   ├── ci.yml                              # Python syntax/dry-run checks & Terraform fmt/validate
 │   ├── terraform-cloud.yml                 # Terraform plan/apply for cloud/infra/envs/prod
@@ -43,6 +49,7 @@ personal-infra/
 │   ├── personal-blog/
 │   │   └── cloudbuild.yaml                 # Cloud Build container & Cloud Run pipeline for personal-blog
 │   └── scripts/
+│       ├── setup_github_config.py          # Configures GitHub Actions variables & secrets for compute-bench
 │       ├── download_nobuffer_site.py       # Clones/updates nobuffer-site and optionally deploys
 │       ├── download_personal_portifolio.py # Clones/updates personal-portifolio and optionally deploys
 │       └── download_personal_blog.py       # Clones/updates personal-blog and optionally deploys
@@ -66,7 +73,7 @@ personal-infra/
 - Always test state-changing scripts with `--dry-run` before running them for real.
 
 ### 2. Preserve User-Curated State
-- When updating partially automated data files (such as `documentation/repo_stats.csv`), never overwrite manual columns (`folder`, `is-custom`, `is-template`) or scramble existing row ordering.
+- When updating partially automated data files (such as `documentation/repo_stats.csv`), never overwrite manual columns (`folder`, `is-custom`, `is-template`); rows in `repo_stats.csv` are sorted by `last updated` descending.
 - When moving or syncing local directories (such as `~/workspace`), never delete or overwrite existing repositories or untracked local folders that are omitted from configuration.
 
 ### 3. Secrets & Credentials

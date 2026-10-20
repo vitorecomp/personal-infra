@@ -17,3 +17,8 @@ output "blog_service_uri" {
   description = "Cloud Run service URI for personal-blog"
   value       = module.load_balancer.blog_service_uri
 }
+
+output "blog_sql_connection_name" {
+  description = "Cloud SQL MySQL 8.0 instance connection name for personal-blog"
+  value       = module.load_balancer.blog_sql_connection_name
+}

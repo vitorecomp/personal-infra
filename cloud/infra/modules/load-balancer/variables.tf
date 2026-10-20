@@ -1,5 +1,5 @@
 variable "region" {
-  description = "The GCP region for regional resources (Cloud Run, Artifact Registry, Serverless NEG)"
+  description = "The GCP region for regional resources (Cloud Run, Cloud SQL, Artifact Registry, Serverless NEG)"
   type        = string
   default     = "us-central1"
 }
@@ -51,7 +51,44 @@ variable "blog_image" {
 }
 
 variable "blog_content_bucket_name" {
-  description = "Optional GCS bucket name for persisting Ghost SQLite database and media across Cloud Run restarts"
+  description = "Optional GCS bucket name for persisting Ghost uploaded media/images across Cloud Run restarts"
   type        = string
   default     = ""
+}
+
+variable "blog_db_instance_name" {
+  description = "The Cloud SQL MySQL 8.0 instance name for personal-blog"
+  type        = string
+  default     = "personal-blog-mysql"
+}
+
+variable "blog_db_tier" {
+  description = "The Cloud SQL machine tier for personal-blog"
+  type        = string
+  default     = "db-f1-micro"
+}
+
+variable "blog_db_name" {
+  description = "The MySQL database name for Ghost on Cloud SQL"
+  type        = string
+  default     = "ghost"
+}
+
+variable "blog_db_user" {
+  description = "The MySQL database username for Ghost on Cloud SQL"
+  type        = string
+  default     = "ghost"
+}
+
+variable "blog_db_password" {
+  description = "Optional MySQL password for the Ghost Cloud SQL user (auto-generated if empty)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "blog_db_deletion_protection" {
+  description = "Whether to enable deletion protection on the Cloud SQL instance"
+  type        = bool
+  default     = true
 }

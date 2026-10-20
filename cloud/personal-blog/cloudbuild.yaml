@@ -34,9 +34,8 @@ steps:
     - '--region=${_REGION}'
     - '--platform=managed'
     - '--port=2368'
-    - '--max-instances=1'
     - '--allow-unauthenticated'
-    - '--set-env-vars=NODE_ENV=production,url=${_BLOG_URL}'
+    - '--update-env-vars=NODE_ENV=production,url=${_BLOG_URL}'
 
 images:
   - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE_NAME}:$BUILD_ID'

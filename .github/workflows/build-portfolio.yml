@@ -36,4 +36,4 @@ jobs:
       run: |
         gcloud builds submit cloud/personal-portifolio/repo \
           --config cloud/personal-portifolio/cloudbuild.yaml \
-          --substitutions=_BUCKET_NAME=${{ vars.GCS_PORTFOLIO_BUCKET_NAME }}
+          --substitutions=_BUCKET_NAME=${{ vars.GCS_PORTFOLIO_BUCKET_NAME || 'portfolio-website-compute-bench' }}
