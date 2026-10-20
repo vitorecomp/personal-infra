@@ -200,6 +200,27 @@ resource "google_cloud_run_v2_service" "blog" {
         value = google_sql_database.blog_database[0].name
       }
 
+      env {
+        name  = "security__staffDeviceVerification"
+        value = "false"
+      }
+
+      dynamic "env" {
+        for_each = var.blog_admin_email != "" && var.blog_admin_password != "" ? [1] : []
+        content {
+          name  = "GHOST_ADMIN_EMAIL"
+          value = var.blog_admin_email
+        }
+      }
+
+      dynamic "env" {
+        for_each = var.blog_admin_email != "" && var.blog_admin_password != "" ? [1] : []
+        content {
+          name  = "GHOST_ADMIN_PASSWORD"
+          value = var.blog_admin_password
+        }
+      }
+
       volume_mounts {
         name       = "cloudsql"
         mount_path = "/cloudsql"

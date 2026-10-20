@@ -51,6 +51,7 @@ sequenceDiagram
 | Secret Name | Required By | Description |
 | :--- | :--- | :--- |
 | `GCP_SA_KEY` | `terraform-cloud.yml`, `build-website.yml`, `build-portfolio.yml`, `build-blog.yml` | Service Account JSON key with permissions for Cloud Build, GCS, Cloud Run, Cloud SQL, Artifact Registry, and Compute Load Balancing. |
+| `BLOG_ADMIN_PASSWORD` | `terraform-cloud.yml` | Initial Ghost Admin Owner password seeded automatically on Cloud Run startup. |
 | `BLOG_DB_PASSWORD` | `terraform-cloud.yml` _(optional)_ | Password for the Ghost Cloud SQL MySQL user (`ghost`). If omitted, Terraform generates a 32-character random password automatically. |
 | `HOST` | `deploy-nginx-sites.yml` | Target SSH hostname or IP address for Nginx reverse-proxy deployment. |
 | `USERNAME` | `deploy-nginx-sites.yml` | SSH username for the Nginx server. |
@@ -72,6 +73,7 @@ sequenceDiagram
 | `GAR_BLOG_REPO` | `personal-blog` | Artifact Registry Docker repository name for `personal-blog`. |
 | `CLOUD_RUN_BLOG_SERVICE` | `personal-blog` | Cloud Run service name for `personal-blog`. |
 | `BLOG_URL` | `https://blog.vitorx86.dev` | Public canonical URL passed to Ghost (`url` env var). |
+| `BLOG_ADMIN_EMAIL` | `vitor.ecomp@gmail.com` | Initial Ghost Admin Owner email address seeded on startup. |
 
 ---
 
