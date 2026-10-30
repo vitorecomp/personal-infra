@@ -55,3 +55,21 @@ python3 workspace/scripts/sync_workspace_repos.py --dry-run
 # Synchronize ~/workspace with 4 concurrent clone workers
 python3 workspace/scripts/sync_workspace_repos.py --jobs 4
 ```
+
+### 3.3 Validating Repositories Are Pushed (`validate_repos_pushed.py`)
+
+Scans `~/workspace` (or any specified folder/category) for Git repositories and verifies that each repository has a remote configured, a clean working tree, and no unpushed local commits across its branches.
+
+```bash
+# Preview repositories that would be validated
+python3 workspace/scripts/validate_repos_pushed.py --dry-run
+
+# Validate all repositories in ~/workspace
+python3 workspace/scripts/validate_repos_pushed.py
+
+# Validate a specific category folder under ~/workspace (or an explicit path)
+python3 workspace/scripts/validate_repos_pushed.py personal
+
+# Fetch remotes first and ignore untracked files
+python3 workspace/scripts/validate_repos_pushed.py --fetch --ignore-untracked
+```

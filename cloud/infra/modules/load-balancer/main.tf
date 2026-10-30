@@ -178,6 +178,21 @@ resource "google_cloud_run_v2_service" "blog" {
         container_port = 2368
       }
 
+      resources {
+        startup_cpu_boost = true
+      }
+
+      startup_probe {
+        initial_delay_seconds = 2
+        period_seconds        = 2
+        timeout_seconds       = 2
+        failure_threshold     = 60
+        http_get {
+          path = "/"
+          port = 2368
+        }
+      }
+
       env {
         name  = "NODE_ENV"
         value = "production"

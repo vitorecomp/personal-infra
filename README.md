@@ -85,6 +85,14 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
   # Execute workspace synchronization
   python3 workspace/scripts/sync_workspace_repos.py --jobs 4
   ```
+- **Validate Repositories Pushed ([`validate_repos_pushed.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/validate_repos_pushed.py))**: Scans `~/workspace` (or a specific subfolder/category) and checks that every Git repository has a configured remote, a clean working tree, and all local commits pushed.
+  ```bash
+  # Validate all repositories in ~/workspace
+  python3 workspace/scripts/validate_repos_pushed.py
+
+  # Validate a specific category folder (e.g., ~/workspace/personal)
+  python3 workspace/scripts/validate_repos_pushed.py personal
+  ```
 
 ---
 

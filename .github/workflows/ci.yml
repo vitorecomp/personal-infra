@@ -28,6 +28,7 @@ jobs:
     - name: Verify workspace sync dry-run
       run: |
         python3 workspace/scripts/sync_workspace_repos.py --dry-run
+        python3 workspace/scripts/validate_repos_pushed.py --dry-run
 
     - name: Verify cloud download & deploy scripts dry-run
       run: |

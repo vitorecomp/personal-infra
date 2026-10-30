@@ -60,7 +60,8 @@ personal-infra/
     │   └── repo_stats.csv                  # Source-of-truth repo inventory & folder mapping
     └── scripts/
         ├── update_repo_stats.py            # Syncs GitHub repo metadata into repo_stats.csv
-        └── sync_workspace_repos.py         # Moves/clones repos into ~/workspace/<folder>/<name>
+        ├── sync_workspace_repos.py         # Moves/clones repos into ~/workspace/<folder>/<name>
+        └── validate_repos_pushed.py        # Validates whether git repos in a folder are clean and pushed
 ```
 
 ---
@@ -110,4 +111,8 @@ python3 workspace/scripts/sync_workspace_repos.py --dry-run
 
 # Apply ~/workspace organization and clone missing assigned repositories
 python3 workspace/scripts/sync_workspace_repos.py --jobs 4
+
+# Validate whether all git repositories in ~/workspace (or a specific folder) are clean and pushed
+python3 workspace/scripts/validate_repos_pushed.py
+python3 workspace/scripts/validate_repos_pushed.py personal
 ```

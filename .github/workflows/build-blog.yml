@@ -55,6 +55,8 @@ jobs:
           --service-account "${BLOG_RUNTIME_SA}" \
           --image "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_BLOG_REPO}/${CLOUD_RUN_BLOG_SERVICE}:latest" \
           --update-env-vars "NODE_ENV=production,url=${BLOG_URL},security__staffDeviceVerification=false" \
+          --cpu-boost \
+          --startup-probe=httpGet.path=/,httpGet.port=2368,initialDelaySeconds=2,periodSeconds=2,failureThreshold=60,timeoutSeconds=2 \
           --no-invoker-iam-check \
           --quiet
 
