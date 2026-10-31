@@ -24,6 +24,7 @@ from pathlib import Path
 import re
 import socket
 import ssl
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -286,6 +287,48 @@ def build_project_payload(
     return payload
 
 
+def _resolve_password_from_cloud_run(
+    project_id: str = "compute-bench",
+    region: str = "us-central1",
+    service_name: str = "taiga",
+) -> str:
+    """Falls back to reading TAIGA_ADMIN_PASSWORD from the Cloud Run service via gcloud if authenticated locally."""
+    try:
+        res = subprocess.run(
+            [
+                "gcloud",
+                "run",
+                "services",
+                "describe",
+                service_name,
+                f"--project={project_id}",
+                f"--region={region}",
+                "--format=json",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if res.returncode != 0:
+            return ""
+        data = json.loads(res.stdout)
+        containers = (
+            data.get("spec", {})
+            .get("template", {})
+            .get("spec", {})
+            .get("containers", [])
+        )
+        if not containers:
+            return ""
+        for env_entry in containers[0].get("env", []):
+            if isinstance(env_entry, dict) and env_entry.get("name") == "TAIGA_ADMIN_PASSWORD":
+                return str(env_entry.get("value") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
 def authenticate_taiga(
     taiga_url: str,
     username: str,
@@ -296,6 +339,9 @@ def authenticate_taiga(
 ) -> str:
     if auth_token:
         return auth_token
+
+    if not password:
+        password = _resolve_password_from_cloud_run()
 
     if not password:
         sys.exit(
