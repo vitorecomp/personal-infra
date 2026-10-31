@@ -77,13 +77,19 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings.config")
 django.setup()
 
 from django.contrib.auth import get_user_model
-from taiga.projects.models import ProjectTemplate
+from taiga.projects.models import Project, ProjectTemplate
 
 if not ProjectTemplate.objects.exists():
     print("[entrypoint] Loading initial_project_templates (Scrum & Kanban)...")
     call_command("loaddata", "initial_project_templates")
 else:
     print("[entrypoint] Project templates already present; skipping loaddata.")
+
+broken_projects = Project.objects.filter(memberships__isnull=True).distinct()
+if broken_projects.exists():
+    broken_names = list(broken_projects.values_list("name", flat=True))
+    broken_projects.delete()
+    print(f"[entrypoint] Cleaned up incomplete project(s) without memberships: {broken_names}")
 
 admin_username = os.environ.get("TAIGA_ADMIN_USER", "admin").strip() or "admin"
 admin_email = os.environ.get("TAIGA_ADMIN_EMAIL", "vitor.ecomp@gmail.com").strip()
