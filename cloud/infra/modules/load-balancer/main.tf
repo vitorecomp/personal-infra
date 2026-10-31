@@ -1,10 +1,14 @@
 data "google_project" "current" {}
 
 locals {
-  enable_portfolio          = var.portfolio_bucket_name != ""
-  enable_blog               = length(var.blog_domain) > 0
-  enable_blog_storage       = local.enable_blog && var.blog_content_bucket_name != ""
-  resolved_blog_db_password = local.enable_blog ? (var.blog_db_password != "" ? var.blog_db_password : random_password.blog_db_password[0].result) : ""
+  enable_portfolio           = var.portfolio_bucket_name != ""
+  enable_blog                = length(var.blog_domain) > 0
+  enable_blog_storage        = local.enable_blog && var.blog_content_bucket_name != ""
+  resolved_blog_db_password  = local.enable_blog ? (var.blog_db_password != "" ? var.blog_db_password : random_password.blog_db_password[0].result) : ""
+  enable_taiga               = length(var.taiga_domain) > 0
+  enable_taiga_storage       = local.enable_taiga && var.taiga_content_bucket_name != ""
+  resolved_taiga_db_password = local.enable_taiga ? (var.taiga_db_password != "" ? var.taiga_db_password : random_password.taiga_db_password[0].result) : ""
+  resolved_taiga_secret_key  = local.enable_taiga ? (var.taiga_secret_key != "" ? var.taiga_secret_key : random_password.taiga_secret_key[0].result) : ""
 }
 
 # Create the GCS Bucket for nobuffer-site static website hosting
@@ -134,6 +138,18 @@ resource "google_storage_bucket_iam_member" "blog_runtime_storage" {
   bucket = google_storage_bucket.blog_content_bucket[0].name
   role   = "roles/storage.objectUser"
   member = "serviceAccount:${google_service_account.blog_runtime[0].email}"
+}
+
+# Grant the blog runtime Service Account minimal project roles (Cloud SQL client, logging, metrics)
+resource "google_project_iam_member" "blog_runtime_roles" {
+  for_each = local.enable_blog ? toset([
+    "roles/cloudsql.client",
+    "roles/logging.logWriter",
+    "roles/monitoring.metricWriter",
+  ]) : toset([])
+  project = data.google_project.current.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.blog_runtime[0].email}"
 }
 
 # Cloud Run v2 Service for personal-blog (Ghost 5 connected to Cloud SQL MySQL 8.0)
@@ -290,6 +306,279 @@ resource "google_compute_backend_service" "blog_backend" {
   }
 }
 
+# Create Artifact Registry repository for Taiga container images
+resource "google_artifact_registry_repository" "taiga_repo" {
+  count         = local.enable_taiga ? 1 : 0
+  location      = var.region
+  repository_id = var.taiga_ar_repo_name
+  description   = "Docker repository for Taiga Project Manager (taiga-back + taiga-front + nginx)"
+  format        = "DOCKER"
+}
+
+# Cloud SQL PostgreSQL 15 Instance for Taiga
+resource "google_sql_database_instance" "taiga_db" {
+  count               = local.enable_taiga ? 1 : 0
+  name                = var.taiga_db_instance_name
+  database_version    = "POSTGRES_15"
+  region              = var.region
+  deletion_protection = var.taiga_db_deletion_protection
+
+  settings {
+    tier              = var.taiga_db_tier
+    edition           = "ENTERPRISE"
+    availability_type = "ZONAL"
+    disk_autoresize   = true
+    disk_size         = 10
+    disk_type         = "PD_SSD"
+
+    backup_configuration {
+      enabled = true
+    }
+  }
+}
+
+# PostgreSQL Database for Taiga
+resource "google_sql_database" "taiga_database" {
+  count    = local.enable_taiga ? 1 : 0
+  name     = var.taiga_db_name
+  instance = google_sql_database_instance.taiga_db[0].name
+}
+
+# Auto-generated password for the Taiga Cloud SQL PostgreSQL user when not explicitly provided
+resource "random_password" "taiga_db_password" {
+  count   = local.enable_taiga && var.taiga_db_password == "" ? 1 : 0
+  length  = 32
+  special = false
+}
+
+# Auto-generated Django cryptographic secret key for Taiga when not explicitly provided
+resource "random_password" "taiga_secret_key" {
+  count   = local.enable_taiga && var.taiga_secret_key == "" ? 1 : 0
+  length  = 50
+  special = false
+}
+
+# PostgreSQL User for Taiga
+resource "google_sql_user" "taiga_user" {
+  count    = local.enable_taiga ? 1 : 0
+  name     = var.taiga_db_user
+  instance = google_sql_database_instance.taiga_db[0].name
+  password = local.resolved_taiga_db_password
+}
+
+# Optional private GCS Bucket for persisting Taiga uploaded media/attachments on Cloud Run
+resource "google_storage_bucket" "taiga_content_bucket" {
+  count         = local.enable_taiga_storage ? 1 : 0
+  name          = var.taiga_content_bucket_name
+  location      = var.region
+  force_destroy = false
+
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+}
+
+# Dedicated least-privilege runtime Service Account for the Taiga Cloud Run service
+resource "google_service_account" "taiga_runtime" {
+  count        = local.enable_taiga ? 1 : 0
+  account_id   = var.taiga_runtime_sa_name
+  display_name = "Taiga Project Manager Cloud Run Runtime"
+  description  = "Hardened least-privilege runtime service account for the Taiga Cloud Run service"
+}
+
+# Grant the hardened Taiga runtime Service Account access ONLY to the Taiga content GCS bucket
+resource "google_storage_bucket_iam_member" "taiga_runtime_storage" {
+  count  = local.enable_taiga_storage ? 1 : 0
+  bucket = google_storage_bucket.taiga_content_bucket[0].name
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${google_service_account.taiga_runtime[0].email}"
+}
+
+# Grant the Taiga runtime Service Account minimal project roles (Cloud SQL client, logging, metrics)
+resource "google_project_iam_member" "taiga_runtime_roles" {
+  for_each = local.enable_taiga ? toset([
+    "roles/cloudsql.client",
+    "roles/logging.logWriter",
+    "roles/monitoring.metricWriter",
+  ]) : toset([])
+  project = data.google_project.current.project_id
+  role    = each.value
+  member  = "serviceAccount:${google_service_account.taiga_runtime[0].email}"
+}
+
+# Cloud Run v2 Service for Taiga (connected to Cloud SQL PostgreSQL 15)
+resource "google_cloud_run_v2_service" "taiga" {
+  count                = local.enable_taiga ? 1 : 0
+  name                 = var.taiga_service_name
+  location             = var.region
+  ingress              = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  invoker_iam_disabled = true
+
+  template {
+    service_account       = google_service_account.taiga_runtime[0].email
+    execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 2
+    }
+
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [google_sql_database_instance.taiga_db[0].connection_name]
+      }
+    }
+
+    dynamic "volumes" {
+      for_each = local.enable_taiga_storage ? [1] : []
+      content {
+        name = "taiga-storage"
+        gcs {
+          bucket    = google_storage_bucket.taiga_content_bucket[0].name
+          read_only = false
+        }
+      }
+    }
+
+    containers {
+      image = var.taiga_image
+
+      ports {
+        container_port = 8080
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "1Gi"
+        }
+        startup_cpu_boost = true
+      }
+
+      startup_probe {
+        initial_delay_seconds = 5
+        period_seconds        = 5
+        timeout_seconds       = 5
+        failure_threshold     = 36
+        http_get {
+          path = "/"
+          port = 8080
+        }
+      }
+
+      env {
+        name  = "TAIGA_SITES_SCHEME"
+        value = "https"
+      }
+
+      env {
+        name  = "TAIGA_SITES_DOMAIN"
+        value = var.taiga_domain[0]
+      }
+
+      env {
+        name  = "TAIGA_URL"
+        value = "https://${var.taiga_domain[0]}"
+      }
+
+      env {
+        name  = "TAIGA_SECRET_KEY"
+        value = local.resolved_taiga_secret_key
+      }
+
+      env {
+        name  = "POSTGRES_DB"
+        value = google_sql_database.taiga_database[0].name
+      }
+
+      env {
+        name  = "POSTGRES_USER"
+        value = google_sql_user.taiga_user[0].name
+      }
+
+      env {
+        name  = "POSTGRES_PASSWORD"
+        value = local.resolved_taiga_db_password
+      }
+
+      env {
+        name  = "POSTGRES_HOST"
+        value = "/cloudsql/${google_sql_database_instance.taiga_db[0].connection_name}"
+      }
+
+      env {
+        name  = "PUBLIC_REGISTER_ENABLED"
+        value = "False"
+      }
+
+      env {
+        name  = "ENABLE_TELEMETRY"
+        value = "False"
+      }
+
+      env {
+        name  = "CELERY_ENABLED"
+        value = "False"
+      }
+
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
+      }
+
+      dynamic "env" {
+        for_each = local.enable_taiga_storage ? [1] : []
+        content {
+          name  = "TAIGA_STORAGE_SYNC_DIR"
+          value = "/mnt/taiga-storage"
+        }
+      }
+
+      dynamic "volume_mounts" {
+        for_each = local.enable_taiga_storage ? [1] : []
+        content {
+          name       = "taiga-storage"
+          mount_path = "/mnt/taiga-storage"
+        }
+      }
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [
+      template[0].containers[0].image,
+      client,
+      client_version,
+    ]
+  }
+}
+
+# Serverless Network Endpoint Group (NEG) for the Taiga Cloud Run service
+resource "google_compute_region_network_endpoint_group" "taiga_neg" {
+  count                 = local.enable_taiga ? 1 : 0
+  name                  = "taiga-neg"
+  network_endpoint_type = "SERVERLESS"
+  region                = var.region
+
+  cloud_run {
+    service = google_cloud_run_v2_service.taiga[0].name
+  }
+}
+
+# Backend Service routing Load Balancer traffic to the Taiga Serverless NEG
+resource "google_compute_backend_service" "taiga_backend" {
+  count                 = local.enable_taiga ? 1 : 0
+  name                  = "taiga-backend"
+  protocol              = "HTTP"
+  port_name             = "http"
+  timeout_sec           = 60
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+
+  backend {
+    group = google_compute_region_network_endpoint_group.taiga_neg[0].id
+  }
+}
+
 # Reserve a shared static external IP address
 resource "google_compute_global_address" "nobuffer_site_ip" {
   name = "nobuffer-site-ip"
@@ -364,6 +653,22 @@ resource "google_compute_url_map" "nobuffer_site_url_map" {
       default_service = google_compute_backend_service.blog_backend[0].id
     }
   }
+
+  dynamic "host_rule" {
+    for_each = local.enable_taiga ? [1] : []
+    content {
+      hosts        = var.taiga_domain
+      path_matcher = "taiga-matcher"
+    }
+  }
+
+  dynamic "path_matcher" {
+    for_each = local.enable_taiga ? [1] : []
+    content {
+      name            = "taiga-matcher"
+      default_service = google_compute_backend_service.taiga_backend[0].id
+    }
+  }
 }
 
 # Managed SSL Certificate for nobuffer-site (www.vitorx86.dev, vitorx86.dev)
@@ -402,6 +707,18 @@ resource "google_compute_managed_ssl_certificate" "blog_cert" {
   }
 }
 
+# Managed SSL Certificate for Taiga (taiga.vitorx86.dev)
+resource "google_compute_managed_ssl_certificate" "taiga_cert" {
+  count = local.enable_taiga ? 1 : 0
+  name  = "taiga-cert"
+  managed {
+    domains = var.taiga_domain
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # Create a Target HTTPS Proxy attaching all workload SSL certificates
 resource "google_compute_target_https_proxy" "nobuffer_site_https_proxy" {
   name    = "nobuffer-site-https-proxy"
@@ -409,7 +726,8 @@ resource "google_compute_target_https_proxy" "nobuffer_site_https_proxy" {
   ssl_certificates = concat(
     [google_compute_managed_ssl_certificate.nobuffer_site_cert.id],
     local.enable_portfolio && length(var.portfolio_domain) > 0 ? [google_compute_managed_ssl_certificate.portfolio_cert[0].id] : [],
-    local.enable_blog ? [google_compute_managed_ssl_certificate.blog_cert[0].id] : []
+    local.enable_blog ? [google_compute_managed_ssl_certificate.blog_cert[0].id] : [],
+    local.enable_taiga ? [google_compute_managed_ssl_certificate.taiga_cert[0].id] : []
   )
 }
 

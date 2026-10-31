@@ -66,6 +66,7 @@ flowchart LR
 | **Main Website** (`nobuffer-site`) | `vitorecomp/nobuffer-site` | `www.vitorx86.dev`, `vitorx86.dev` | Cloud CDN + GCS Static Bucket | Public GCS Bucket (`website_bucket`) |
 | **Personal Portfolio** (`personal-portifolio`) | `vitorecomp/personal-portifolio` | `cases.vitorx86.dev`, `me.vitorx86.dev` | Cloud CDN + GCS Static Bucket (Next.js/Nextra static export) | Public GCS Bucket (`portfolio_bucket`) |
 | **Technology Blog** (`personal-blog`) | `vitorecomp/personal-blog` | `blog.vitorx86.dev` | Cloud Run v2 (`ghost:5-alpine` + `vitorx86-garage` theme) via Serverless NEG | Cloud SQL for MySQL 8.0 (`personal-blog-mysql`) + Private GCS Bucket (`blog_content_bucket`) |
+| **Taiga Project Manager** (`taiga`) | `personal-infra/cloud/taiga` | `taiga.vitorx86.dev` | Cloud Run v2 (`taiga-front` + `taiga-back` + `nginx` on `:8080`) via Serverless NEG | Cloud SQL for PostgreSQL 15 (`taiga-postgres`) + Private GCS Bucket (`taiga_content_bucket`) |
 | **Subdomain Reverse Proxy** | `personal-infra/cloud/nobuffer-site/reverse-proxy` | `demo.vitorx86.dev`, `homeapi.vitorx86.dev`, `maintance.vitorx86.dev` | Nginx + Certbot on Linux Server | Local container ports (`localhost:8081`) |
 
 ---

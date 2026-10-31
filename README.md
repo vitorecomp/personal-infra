@@ -13,6 +13,7 @@ personal-infra/
 │   ├── nobuffer-site/        # Cloud Build, Nginx reverse-proxy & maintenance page for nobuffer-site
 │   ├── personal-portifolio/  # Cloud Build static-export pipeline for personal-portifolio
 │   ├── personal-blog/        # Cloud Build container & Cloud Run deploy pipeline for personal-blog
+│   ├── taiga/                # Self-contained Dockerfile, Nginx gateway & Cloud Build for Taiga
 │   └── scripts/              # Automation scripts to fetch and deploy cloud workloads
 ├── home-server/              # Home server / self-hosted services and maintenance (TBD)
 ├── linux/                    # Linux OS bootstrap, packages, and system configuration (TBD)
@@ -22,7 +23,7 @@ personal-infra/
 | Directory | Responsibility | Status |
 | :--- | :--- | :--- |
 | **[`documentation/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation)** | Detailed guides for [Cloud Architecture](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/cloud-architecture.md), [Cloud Setup](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/cloud-setup.md), [Pipeline Setup](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/pipeline-setup.md), and [Workspace Management](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/workspace-setup.md). | Active |
-| **`cloud/`** | Provisioning and maintaining cloud resources, networking, and hosted workloads (`nobuffer-site`, `personal-portifolio`, `personal-blog`). | Active |
+| **`cloud/`** | Provisioning and maintaining cloud resources, networking, and hosted workloads (`nobuffer-site`, `personal-portifolio`, `personal-blog`, `taiga`). | Active |
 | **`home-server/`** | Self-hosted services, container stacks, backups, and home lab automation. | _Planned (to be defined)_ |
 | **`linux/`** | Workstation/system setup, packages, dotfiles, and OS-level maintenance scripts. | _Planned (to be defined)_ |
 | **`workspace/`** | Automated discovery, organization, and cloning of GitHub repositories into `~/workspace`. | Active |
@@ -55,11 +56,13 @@ Manages cloud infrastructure and deployments for hosted sites and services.
 python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_bucket> --dry-run
 python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket> --dry-run
 python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
+python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
 
 # Download/update and deploy workloads via Cloud Build
 python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_bucket>
 python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket>
 python3 cloud/scripts/download_personal_blog.py --deploy
+python3 cloud/scripts/deploy_taiga.py --deploy
 ```
 
 ### 2. `home-server/`

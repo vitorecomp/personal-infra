@@ -96,6 +96,7 @@ All cloud deployments can also be previewed (`--dry-run`) or executed directly f
 python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_bucket> --dry-run
 python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket> --dry-run
 python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
+python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
 
 # 2. Download/update source repositories only (into cloud/<project>/repo)
 python3 cloud/scripts/download_nobuffer_site.py
@@ -106,4 +107,5 @@ python3 cloud/scripts/download_personal_blog.py
 python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_bucket>
 python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket>
 python3 cloud/scripts/download_personal_blog.py --deploy --region us-central1
+python3 cloud/scripts/deploy_taiga.py --deploy --region us-central1
 ```

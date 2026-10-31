@@ -48,6 +48,16 @@ jobs:
       TF_VAR_blog_db_name: ${{ vars.BLOG_DB_NAME || 'ghost' }}
       TF_VAR_blog_db_user: ${{ vars.BLOG_DB_USER || 'ghost' }}
       TF_VAR_blog_db_password: ${{ secrets.BLOG_DB_PASSWORD || '' }}
+      TF_VAR_taiga_domain: ${{ vars.TAIGA_DOMAINS || '["taiga.vitorx86.dev"]' }}
+      TF_VAR_taiga_service_name: ${{ vars.CLOUD_RUN_TAIGA_SERVICE || 'taiga' }}
+      TF_VAR_taiga_ar_repo_name: ${{ vars.GAR_TAIGA_REPO || 'taiga' }}
+      TF_VAR_taiga_content_bucket_name: ${{ vars.GCS_TAIGA_CONTENT_BUCKET_NAME || 'taiga-content-compute-bench' }}
+      TF_VAR_taiga_db_instance_name: ${{ vars.TAIGA_DB_INSTANCE_NAME || 'taiga-postgres' }}
+      TF_VAR_taiga_db_tier: ${{ vars.TAIGA_DB_TIER || 'db-f1-micro' }}
+      TF_VAR_taiga_db_name: ${{ vars.TAIGA_DB_NAME || 'taiga' }}
+      TF_VAR_taiga_db_user: ${{ vars.TAIGA_DB_USER || 'taiga' }}
+      TF_VAR_taiga_db_password: ${{ secrets.TAIGA_DB_PASSWORD || '' }}
+      TF_VAR_taiga_secret_key: ${{ secrets.TAIGA_SECRET_KEY || '' }}
 
     steps:
     - uses: actions/checkout@v7

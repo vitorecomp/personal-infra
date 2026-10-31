@@ -8,7 +8,7 @@ Instructions and context for AI coding agents working in `personal-infra`.
 
 The repository is organized into four top-level domains:
 
-1. **`cloud/`** — Shared GCP Terraform infrastructure (Global HTTPS Load Balancer, Cloud CDN, SSL certificates, GCS static buckets, Cloud Run + Cloud SQL for MySQL 8.0 + Serverless NEG + Artifact Registry), reverse-proxy configs, and Cloud Build deployment automation for `nobuffer-site`, `personal-portifolio`, and `personal-blog`.
+1. **`cloud/`** — Shared GCP Terraform infrastructure (Global HTTPS Load Balancer, Cloud CDN, SSL certificates, GCS static buckets, Cloud Run + Cloud SQL for MySQL 8.0 / PostgreSQL 15 + Serverless NEG + Artifact Registry), reverse-proxy configs, and Cloud Build deployment automation for `nobuffer-site`, `personal-portifolio`, `personal-blog`, and `taiga`.
 2. **`home-server/`** — Home server workloads, self-hosted services, networking, and maintenance _(specification pending)_.
 3. **`linux/`** — Linux system bootstrap, package installation, dotfiles, and OS configuration _(specification pending)_.
 4. **`workspace/`** — Local `~/workspace` directory orchestration and GitHub repository synchronization.
@@ -36,6 +36,7 @@ personal-infra/
 │   ├── build-website.yml                   # Fetches nobuffer-site and submits Cloud Build
 │   ├── build-portfolio.yml                 # Fetches personal-portifolio and submits Cloud Build
 │   ├── build-blog.yml                      # Fetches personal-blog and submits Cloud Build -> Cloud Run
+│   ├── build-taiga.yml                     # Builds cloud/taiga and deploys to Cloud Run
 │   ├── deploy-nginx-sites.yml              # Deploys reverse-proxy vhosts to server via SSH
 │   └── update-repo-stats.yml               # Scheduled/manual sync of repo_stats.csv
 ├── cloud/                                  # Cloud infrastructure and deployment automation
@@ -48,11 +49,19 @@ personal-infra/
 │   │   └── cloudbuild.yaml                 # Cloud Build static-export pipeline for personal-portifolio
 │   ├── personal-blog/
 │   │   └── cloudbuild.yaml                 # Cloud Build container & Cloud Run pipeline for personal-blog
+│   ├── taiga/
+│   │   ├── Dockerfile                      # Multi-stage Taiga (taiga-front + taiga-back + nginx) container
+│   │   ├── nginx.conf                      # Nginx gateway routing /, /api, /admin, /static, /media on :8080
+│   │   ├── docker-entrypoint.sh            # Idempotent DB migrations, template load & superuser seed
+│   │   ├── docker-compose.yml              # Local dev compose stack (PostgreSQL 15 + Taiga)
+│   │   └── cloudbuild.yaml                 # Cloud Build container pipeline for Taiga
 │   └── scripts/
 │       ├── download_nobuffer_site.py       # Clones/updates nobuffer-site and optionally deploys
 │       ├── download_personal_portifolio.py # Clones/updates personal-portifolio and optionally deploys
 │       ├── download_personal_blog.py       # Clones/updates personal-blog and optionally deploys
-│       └── seed_ghost_admin.py             # Idempotently seeds Ghost Admin Owner in the deploy pipeline
+│       ├── deploy_taiga.py                 # Validates cloud/taiga and deploys to Cloud Run
+│       ├── seed_ghost_admin.py             # Idempotently seeds Ghost Admin Owner in the deploy pipeline
+│       └── seed_taiga_admin.py             # Idempotently verifies Taiga API & admin login in the deploy pipeline
 ├── home-server/                            # (Planned) Home server setup and maintenance
 ├── linux/                                  # (Planned) Linux workstation/system configuration
 └── workspace/                              # Local repository management
@@ -97,6 +106,7 @@ personal-infra/
 python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_bucket> --dry-run
 python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket> --dry-run
 python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
+python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
 
 # Download or update repositories into cloud/<project>/repo
 python3 cloud/scripts/download_nobuffer_site.py

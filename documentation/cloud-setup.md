@@ -48,6 +48,8 @@ gcloud iam service-accounts create "${SA_NAME}" \
   --display-name="personal-infra CI/CD & Terraform Deployer"
 
 # 2. Grant required roles for Terraform & Cloud Build
+# (Terraform automatically provisions and binds the hardened runtime SAs
+# `personal-blog-run` and `taiga-run` using these permissions)
 for ROLE in \
   roles/compute.loadBalancerAdmin \
   roles/compute.networkAdmin \
@@ -56,24 +58,12 @@ for ROLE in \
   roles/run.admin \
   roles/cloudsql.admin \
   roles/artifactregistry.admin \
+  roles/iam.serviceAccountAdmin \
   roles/iam.serviceAccountUser \
+  roles/resourcemanager.projectIamAdmin \
   roles/viewer; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
-    --role="${ROLE}"
-done
-
-# 3. Create & harden the dedicated Cloud Run runtime service account for personal-blog
-export BLOG_RUNTIME_SA="personal-blog-run@${PROJECT_ID}.iam.gserviceaccount.com"
-gcloud iam service-accounts create "personal-blog-run" \
-  --project="${PROJECT_ID}" \
-  --display-name="Personal Blog Cloud Run Runtime"
-
-# Grant ONLY minimal runtime permissions (Cloud SQL connection + logging/metrics;
-# bucket-scoped storage access on blog-content-compute-bench is managed by Terraform)
-for ROLE in roles/cloudsql.client roles/logging.logWriter roles/monitoring.metricWriter; do
-  gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-    --member="serviceAccount:${BLOG_RUNTIME_SA}" \
     --role="${ROLE}"
 done
 ```
@@ -150,6 +140,7 @@ In your DNS provider for `vitorx86.dev`, point the following `A` records to the 
 | `cases` (`cases.vitorx86.dev`) | `A` | `<load_balancer_ip>` |
 | `me` (`me.vitorx86.dev`) | `A` | `<load_balancer_ip>` |
 | `blog` (`blog.vitorx86.dev`) | `A` | `<load_balancer_ip>` |
+| `taiga` (`taiga.vitorx86.dev`) | `A` | `<load_balancer_ip>` |
 
 > [!NOTE]
 > Google-managed SSL certificates (`nobuffer-site-cert-v2`) require DNS `A` records to resolve to the Load Balancer IP before certificate provisioning transitions from `PROVISIONING` to `ACTIVE` (typically 15–45 minutes after DNS propagation).
@@ -169,6 +160,9 @@ python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <persona
 
 # 3. Deploy personal-blog (blog.vitorx86.dev)
 python3 cloud/scripts/download_personal_blog.py --deploy --region us-central1
+
+# 4. Deploy Taiga Project Manager (taiga.vitorx86.dev)
+python3 cloud/scripts/deploy_taiga.py --deploy --region us-central1
 ```
 
 After `personal-blog` is deployed, visit `https://blog.vitorx86.dev/ghost` once to create your Ghost Admin owner account.
