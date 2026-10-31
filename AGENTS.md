@@ -70,7 +70,8 @@ personal-infra/
     └── scripts/
         ├── update_repo_stats.py            # Syncs GitHub repo metadata into repo_stats.csv
         ├── sync_workspace_repos.py         # Moves/clones repos into ~/workspace/<folder>/<name>
-        └── validate_repos_pushed.py        # Validates whether git repos in a folder are clean and pushed
+        ├── validate_repos_pushed.py        # Validates whether git repos in a folder are clean and pushed
+        └── enroll_taiga_projects.py        # Idempotently enrolls GitHub repos from repo_stats.csv as Taiga projects
 ```
 
 ---
@@ -125,4 +126,8 @@ python3 workspace/scripts/sync_workspace_repos.py --jobs 4
 # Validate whether all git repositories in ~/workspace (or a specific folder) are clean and pushed
 python3 workspace/scripts/validate_repos_pushed.py
 python3 workspace/scripts/validate_repos_pushed.py personal
+
+# Preview or enroll GitHub repositories from repo_stats.csv as projects on Taiga
+python3 workspace/scripts/enroll_taiga_projects.py --dry-run
+TAIGA_ADMIN_PASSWORD=<password> python3 workspace/scripts/enroll_taiga_projects.py personal
 ```

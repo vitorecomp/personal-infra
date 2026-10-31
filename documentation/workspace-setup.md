@@ -73,3 +73,22 @@ python3 workspace/scripts/validate_repos_pushed.py personal
 # Fetch remotes first and ignore untracked files
 python3 workspace/scripts/validate_repos_pushed.py --fetch --ignore-untracked
 ```
+
+### 3.4 Enrolling GitHub Repositories on Taiga (`enroll_taiga_projects.py`)
+
+Reads `repo_stats.csv`, optionally fetches live GitHub descriptions/topics, and idempotently creates corresponding projects on the Taiga server (`https://taiga.vitorx86.dev`) via the Taiga REST API (`/api/v1/projects`).
+
+```bash
+# Preview repositories that would be enrolled on Taiga (safe, read-only)
+python3 workspace/scripts/enroll_taiga_projects.py --dry-run
+
+# Preview only repositories in a specific workspace category folder (e.g., personal)
+python3 workspace/scripts/enroll_taiga_projects.py personal --dry-run
+
+# Enroll all non-fork repositories assigned a folder in repo_stats.csv
+TAIGA_ADMIN_PASSWORD=<your_taiga_password> python3 workspace/scripts/enroll_taiga_projects.py
+
+# Enroll only 'personal' folder repositories (or a single repo with --repo)
+TAIGA_ADMIN_PASSWORD=<your_taiga_password> python3 workspace/scripts/enroll_taiga_projects.py personal
+TAIGA_ADMIN_PASSWORD=<your_taiga_password> python3 workspace/scripts/enroll_taiga_projects.py --repo personal-infra
+```
