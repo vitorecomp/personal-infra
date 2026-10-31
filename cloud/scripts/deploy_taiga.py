@@ -135,6 +135,29 @@ def deploy_taiga_service(
         print("[error] Cloud Build submission failed.", file=sys.stderr)
         return False
 
+    digest_res = subprocess.run(
+        [
+            "gcloud",
+            "artifacts",
+            "docker",
+            "images",
+            "describe",
+            image_uri,
+            f"--project={project_id}",
+            "--format=value(image_summary.digest)",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    digest = digest_res.stdout.strip()
+    if digest.startswith("sha256:"):
+        resolved_image = f"{region}-docker.pkg.dev/{project_id}/{ar_repo}/{service_name}@{digest}"
+        deploy_cmd = [
+            f"--image={resolved_image}" if arg.startswith("--image=") else arg
+            for arg in deploy_cmd
+        ]
+
     print(
         f"[deploy] Updating Cloud Run service '{service_name}' ({region}) with image {image_uri} ..."
     )

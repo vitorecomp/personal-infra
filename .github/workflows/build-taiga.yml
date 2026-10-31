@@ -80,11 +80,12 @@ jobs:
         TAIGA_ADMIN_EMAIL: ${{ vars.TAIGA_ADMIN_EMAIL || 'vitor.ecomp@gmail.com' }}
         TAIGA_ADMIN_PASSWORD: ${{ secrets.TAIGA_ADMIN_PASSWORD || secrets.BLOG_ADMIN_PASSWORD || '' }}
       run: |
+        IMAGE_DIGEST=$(gcloud artifacts docker images describe "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_TAIGA_REPO}/${CLOUD_RUN_TAIGA_SERVICE}:latest" --project "${GCP_PROJECT_ID}" --format="value(image_summary.digest)")
         gcloud run services update "${CLOUD_RUN_TAIGA_SERVICE}" \
           --project "${GCP_PROJECT_ID}" \
           --region "${GCP_REGION}" \
           --service-account "${TAIGA_RUNTIME_SA}" \
-          --image "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_TAIGA_REPO}/${CLOUD_RUN_TAIGA_SERVICE}:latest" \
+          --image "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_TAIGA_REPO}/${CLOUD_RUN_TAIGA_SERVICE}@${IMAGE_DIGEST}" \
           --update-env-vars "TAIGA_SITES_SCHEME=https,TAIGA_SITES_DOMAIN=${TAIGA_DOMAIN},TAIGA_URL=${TAIGA_URL},PUBLIC_REGISTER_ENABLED=False,ENABLE_TELEMETRY=False,CELERY_ENABLED=False,TAIGA_ADMIN_USER=${TAIGA_ADMIN_USER},TAIGA_ADMIN_EMAIL=${TAIGA_ADMIN_EMAIL},TAIGA_ADMIN_PASSWORD=${TAIGA_ADMIN_PASSWORD}" \
           --cpu-boost \
           --startup-probe=httpGet.path=/,httpGet.port=8080,initialDelaySeconds=5,periodSeconds=5,failureThreshold=36,timeoutSeconds=5 \

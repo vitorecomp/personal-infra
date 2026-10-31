@@ -85,10 +85,12 @@ if not ProjectTemplate.objects.exists():
 else:
     print("[entrypoint] Project templates already present; skipping loaddata.")
 
-broken_projects = Project.objects.filter(memberships__isnull=True).distinct()
-if broken_projects.exists():
-    broken_names = list(broken_projects.values_list("name", flat=True))
-    broken_projects.delete()
+broken_ids = list(
+    Project.objects.filter(memberships__isnull=True).values_list("id", flat=True).distinct()
+)
+if broken_ids:
+    broken_names = list(Project.objects.filter(id__in=broken_ids).values_list("name", flat=True))
+    Project.objects.filter(id__in=broken_ids).delete()
     print(f"[entrypoint] Cleaned up incomplete project(s) without memberships: {broken_names}")
 
 admin_username = os.environ.get("TAIGA_ADMIN_USER", "admin").strip() or "admin"
