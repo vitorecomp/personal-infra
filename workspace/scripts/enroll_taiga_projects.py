@@ -63,7 +63,7 @@ def _request_taiga_api(
     taiga_url: str,
     method: str,
     path: str,
-    payload: dict[str, object] | None = None,
+    payload: object = None,
     auth_token: str | None = None,
     fallback_sni: str = DEFAULT_FALLBACK_SNI,
     timeout: float = 25.0,
@@ -175,6 +175,7 @@ def load_candidate_repos(
                 }
             )
 
+    candidates.sort(key=lambda r: r.get("last_updated", ""), reverse=True)
     return candidates
 
 
@@ -431,6 +432,77 @@ def fetch_existing_projects(
     return by_key
 
 
+def sync_project_order(
+    taiga_url: str,
+    auth_token: str,
+    candidates: list[dict[str, str]],
+    existing_projects: dict[str, dict[str, object]],
+    fallback_sni: str = DEFAULT_FALLBACK_SNI,
+) -> bool:
+    """Updates the user display order on Taiga so the most recently updated GitHub repo is shown first."""
+    order_payload: list[dict[str, int]] = []
+    seen_ids: set[int] = set()
+    for idx, repo in enumerate(candidates, start=1):
+        name = repo["name"]
+        lookup_keys = (name.lower(), slugify_name(name))
+        proj = next(
+            (existing_projects[k] for k in lookup_keys if k in existing_projects),
+            None,
+        )
+        if proj is None:
+            continue
+        proj_id = proj.get("id")
+        if isinstance(proj_id, int) and proj_id not in seen_ids:
+            seen_ids.add(proj_id)
+            order_payload.append({"project_id": proj_id, "order": idx})
+
+    if not order_payload:
+        return True
+
+    status_code, resp_data = _request_taiga_api(
+        taiga_url=taiga_url,
+        method="POST",
+        path="/api/v1/projects/bulk_update_order",
+        payload=order_payload,
+        auth_token=auth_token,
+        fallback_sni=fallback_sni,
+    )
+    if status_code in (200, 204):
+        me_status, me_data = _request_taiga_api(
+            taiga_url=taiga_url,
+            method="GET",
+            path="/api/v1/users/me",
+            auth_token=auth_token,
+            fallback_sni=fallback_sni,
+        )
+        user_id = me_data.get("id", 1) if me_status == 200 and isinstance(me_data, dict) else 1
+        verify_status, verify_data = _request_taiga_api(
+            taiga_url=taiga_url,
+            method="GET",
+            path=f"/api/v1/projects?member={user_id}&order_by=user_order",
+            auth_token=auth_token,
+            fallback_sni=fallback_sni,
+        )
+        top_names: list[str] = []
+        if verify_status == 200 and isinstance(verify_data, list):
+            top_names = [
+                str(p.get("name"))
+                for p in verify_data[:5]
+                if isinstance(p, dict) and p.get("name")
+            ]
+        preview = f" -> top projects: {', '.join(top_names)}" if top_names else f" (verify HTTP {verify_status}: {verify_data})"
+        print(
+            f"[order] Synchronized display order for {len(order_payload)} projects (most recent GitHub commit first){preview}"
+        )
+        return True
+
+    print(
+        f"[warn] Could not update project display order (HTTP {status_code}: {resp_data})",
+        file=sys.stderr,
+    )
+    return False
+
+
 def enroll_projects(
     csv_path: Path,
     taiga_url: str,
@@ -573,6 +645,8 @@ def enroll_projects(
         )
         if status_code in (200, 201) and isinstance(resp_data, dict):
             slug = resp_data.get("slug", name)
+            existing_projects[name.lower()] = resp_data
+            existing_projects[slugify_name(name)] = resp_data
             print(
                 f"[create] Created Taiga project '{name}' -> {taiga_url.rstrip('/')}/project/{slug}/"
             )
@@ -583,6 +657,14 @@ def enroll_projects(
                 file=sys.stderr,
             )
             failed_count += 1
+
+    sync_project_order(
+        taiga_url=taiga_url,
+        auth_token=token,
+        candidates=candidates,
+        existing_projects=existing_projects,
+        fallback_sni=fallback_sni,
+    )
 
     print(
         f"\nSummary: candidates={len(candidates)}, created={created_count}, "
