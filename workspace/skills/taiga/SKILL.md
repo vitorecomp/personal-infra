@@ -3,14 +3,27 @@ name: taiga
 description: >-
   Manage projects, Scrum sprints (milestones), user stories, backlog items, tasks,
   issues, epics, and wiki pages on the self-hosted Taiga server (https://taiga.vitorx86.dev)
-  via the Taiga REST API (/api/v1). Use whenever the user asks to inspect, create,
-  update, plan, or organize Taiga projects, sprints, user stories, tasks, bugs/issues,
-  epics, or wiki documentation, or sync GitHub repositories with Taiga.
+  via the Taiga REST API (/api/v1). Use when the user types "/taiga" or asks to inspect,
+  create, update, plan, or organize Taiga projects, sprints, user stories, tasks,
+  bugs/issues, epics, or wiki documentation, or sync GitHub repositories with Taiga.
 ---
 
 # Taiga Project Management Skill (`https://taiga.vitorx86.dev`)
 
 This skill provides a zero-dependency CLI tool and REST API runbook for interacting with `vitorecomp`'s self-hosted Taiga instance at `https://taiga.vitorx86.dev`.
+
+## `/taiga` Slash Command Shorthands
+
+When the user invokes `/taiga ...`, interpret their arguments as follows:
+- `/taiga` or `/taiga projects [filter]` -> List projects (`taiga_cli.py projects list [--search <filter>]`).
+- `/taiga status <project>` or `/taiga get <project>` -> Show project details, active sprints, and open stories/issues for `<project>`.
+- `/taiga stories <project>` -> List user stories in `<project>` (`taiga_cli.py stories list <project>`).
+- `/taiga story <project> <subject>` -> Create a user story in `<project>` (`taiga_cli.py stories create <project> --subject "<subject>"`).
+- `/taiga sprint <project> <name> <start> <end>` -> Create a sprint in `<project>`.
+- `/taiga task <project> <subject>` -> Create a task in `<project>`.
+- `/taiga issue <project> <subject>` -> Create an issue/bug in `<project>`.
+- `/taiga sync` -> Sync and reorder GitHub repositories from `repo_stats.csv` onto Taiga (`enroll_taiga_projects.py`).
+- `/taiga <natural language instruction>` -> Execute the requested Taiga operation using `taiga_cli.py`.
 
 ## Helper Scripts
 
