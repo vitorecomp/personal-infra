@@ -30,6 +30,7 @@ jobs:
         python3 workspace/scripts/sync_workspace_repos.py --dry-run
         python3 workspace/scripts/validate_repos_pushed.py --dry-run
         python3 workspace/scripts/enroll_taiga_projects.py --dry-run
+        python3 workspace/scripts/taiga_cli.py projects create --name ci-test --dry-run
 
     - name: Verify cloud download & deploy scripts dry-run
       run: |

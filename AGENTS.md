@@ -67,11 +67,15 @@ personal-infra/
 └── workspace/                              # Local repository management
     ├── documentation/
     │   └── repo_stats.csv                  # Source-of-truth repo inventory & folder mapping
+    ├── skills/
+    │   └── taiga/
+    │       └── SKILL.md                    # Agent skill definition for Taiga REST API management
     └── scripts/
         ├── update_repo_stats.py            # Syncs GitHub repo metadata into repo_stats.csv
         ├── sync_workspace_repos.py         # Moves/clones repos into ~/workspace/<folder>/<name>
         ├── validate_repos_pushed.py        # Validates whether git repos in a folder are clean and pushed
-        └── enroll_taiga_projects.py        # Idempotently enrolls GitHub repos from repo_stats.csv as Taiga projects
+        ├── enroll_taiga_projects.py        # Idempotently enrolls GitHub repos from repo_stats.csv as Taiga projects
+        └── taiga_cli.py                    # CLI for managing Taiga projects, sprints, stories, tasks, issues & wiki
 ```
 
 ---
@@ -130,4 +134,9 @@ python3 workspace/scripts/validate_repos_pushed.py personal
 # Preview or enroll GitHub repositories from repo_stats.csv as projects on Taiga
 python3 workspace/scripts/enroll_taiga_projects.py --dry-run
 TAIGA_ADMIN_PASSWORD=<password> python3 workspace/scripts/enroll_taiga_projects.py personal
+
+# Manage Taiga projects, sprints, user stories, tasks, issues, epics, and wiki pages via CLI
+python3 workspace/scripts/taiga_cli.py projects list
+python3 workspace/scripts/taiga_cli.py stories list personal-infra
+python3 workspace/scripts/taiga_cli.py stories create personal-infra --subject "My Story" --points 3 --dry-run
 ```

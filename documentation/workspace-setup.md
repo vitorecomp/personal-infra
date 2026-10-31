@@ -92,3 +92,17 @@ TAIGA_ADMIN_PASSWORD=<your_taiga_password> python3 workspace/scripts/enroll_taig
 TAIGA_ADMIN_PASSWORD=<your_taiga_password> python3 workspace/scripts/enroll_taiga_projects.py personal
 TAIGA_ADMIN_PASSWORD=<your_taiga_password> python3 workspace/scripts/enroll_taiga_projects.py --repo personal-infra
 ```
+
+### 3.5 Managing Taiga via CLI & Agent Skill (`taiga_cli.py`)
+
+[`workspace/scripts/taiga_cli.py`](../workspace/scripts/taiga_cli.py) (along with the global agent skill in [`workspace/skills/taiga/SKILL.md`](../workspace/skills/taiga/SKILL.md) installed at `~/.gemini/config/skills/taiga/`) provides CLI subcommands for managing projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages on `https://taiga.vitorx86.dev`:
+
+```bash
+# List projects in display order or inspect a single project
+python3 workspace/scripts/taiga_cli.py projects list
+python3 workspace/scripts/taiga_cli.py projects get personal-infra
+
+# Create a Scrum sprint and a user story
+python3 workspace/scripts/taiga_cli.py sprints create personal-infra --name "Sprint 1" --start 2026-11-01 --end 2026-11-15
+python3 workspace/scripts/taiga_cli.py stories create personal-infra --subject "Add feature" --points 3 --sprint "Sprint 1"
+```

@@ -96,6 +96,17 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
   # Validate a specific category folder (e.g., ~/workspace/personal)
   python3 workspace/scripts/validate_repos_pushed.py personal
   ```
+- **Enroll GitHub Repositories on Taiga ([`enroll_taiga_projects.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/enroll_taiga_projects.py))**: Idempotently enrolls GitHub repositories from `repo_stats.csv` as Scrum projects on `https://taiga.vitorx86.dev` and orders them with the most recently committed repository first.
+  ```bash
+  python3 workspace/scripts/enroll_taiga_projects.py --dry-run
+  python3 workspace/scripts/enroll_taiga_projects.py
+  ```
+- **Taiga REST API CLI & Agent Skill ([`taiga_cli.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/taiga_cli.py) / [`SKILL.md`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/skills/taiga/SKILL.md))**: Manages projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages via the Taiga REST API (`/api/v1`).
+  ```bash
+  python3 workspace/scripts/taiga_cli.py projects list
+  python3 workspace/scripts/taiga_cli.py stories list personal-infra
+  python3 workspace/scripts/taiga_cli.py stories create personal-infra --subject "Add feature" --points 3 --dry-run
+  ```
 
 ---
 
