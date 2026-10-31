@@ -1,0 +1,49 @@
+services:
+  taiga-db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-taiga}
+      POSTGRES_USER: ${POSTGRES_USER:-taiga}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taiga-local-dev-password}
+    volumes:
+      - taiga_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taiga} -d ${POSTGRES_DB:-taiga}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  taiga:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      taiga-db:
+        condition: service_healthy
+    ports:
+      - "${TAIGA_LOCAL_PORT:-8080}:8080"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-taiga}
+      POSTGRES_USER: ${POSTGRES_USER:-taiga}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taiga-local-dev-password}
+      POSTGRES_HOST: taiga-db
+      POSTGRES_PORT: "5432"
+      TAIGA_SECRET_KEY: ${TAIGA_SECRET_KEY:-local-dev-taiga-secret-key-change-in-prod}
+      TAIGA_SITES_SCHEME: ${TAIGA_SITES_SCHEME:-http}
+      TAIGA_SITES_DOMAIN: ${TAIGA_SITES_DOMAIN:-localhost:8080}
+      TAIGA_URL: ${TAIGA_URL:-http://localhost:8080}
+      PUBLIC_REGISTER_ENABLED: ${PUBLIC_REGISTER_ENABLED:-False}
+      ENABLE_TELEMETRY: "False"
+      CELERY_ENABLED: "False"
+      TAIGA_ADMIN_USER: ${TAIGA_ADMIN_USER:-admin}
+      TAIGA_ADMIN_EMAIL: ${TAIGA_ADMIN_EMAIL:-vitor.ecomp@gmail.com}
+      TAIGA_ADMIN_PASSWORD: ${TAIGA_ADMIN_PASSWORD:-}
+      TAIGA_STORAGE_SYNC_DIR: /mnt/taiga-storage
+    volumes:
+      - taiga_media:/mnt/taiga-storage
+
+volumes:
+  taiga_pgdata:
+  taiga_media:

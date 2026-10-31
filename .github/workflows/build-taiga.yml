@@ -1,0 +1,100 @@
+name: Build and Deploy Taiga Project Manager
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [ "deploy-taiga" ]
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "cloud/taiga/**"
+      - "cloud/scripts/deploy_taiga.py"
+      - "cloud/scripts/seed_taiga_admin.py"
+      - ".github/workflows/build-taiga.yml"
+
+concurrency:
+  group: build-taiga
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'compute-bench' }}
+      GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+      GAR_TAIGA_REPO: ${{ vars.GAR_TAIGA_REPO || 'taiga' }}
+      CLOUD_RUN_TAIGA_SERVICE: ${{ vars.CLOUD_RUN_TAIGA_SERVICE || 'taiga' }}
+      TAIGA_RUNTIME_SA: ${{ vars.TAIGA_RUNTIME_SA || 'taiga-run@compute-bench.iam.gserviceaccount.com' }}
+      TAIGA_URL: ${{ vars.TAIGA_URL || 'https://taiga.vitorx86.dev' }}
+      TAIGA_DOMAIN: ${{ vars.TAIGA_DOMAIN || 'taiga.vitorx86.dev' }}
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Validate Taiga build context
+      run: |
+        python3 cloud/scripts/deploy_taiga.py
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v3
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Wait for Artifact Registry repository
+      run: |
+        for i in {1..30}; do
+          if gcloud artifacts repositories describe "${GAR_TAIGA_REPO}" \
+            --project "${GCP_PROJECT_ID}" \
+            --location "${GCP_REGION}" >/dev/null 2>&1; then
+            echo "Artifact Registry repository '${GAR_TAIGA_REPO}' is ready."
+            break
+          fi
+          echo "Waiting for Terraform to create Artifact Registry repo '${GAR_TAIGA_REPO}' (attempt ${i}/30)..."
+          sleep 10
+        done
+
+    - name: Submit Build to Cloud Build
+      run: |
+        gcloud builds submit cloud/taiga \
+          --project "${GCP_PROJECT_ID}" \
+          --config cloud/taiga/cloudbuild.yaml \
+          --substitutions=_REGION=${GCP_REGION},_AR_REPO=${GAR_TAIGA_REPO},_SERVICE_NAME=${CLOUD_RUN_TAIGA_SERVICE}
+
+    - name: Wait for Cloud Run service provisioning
+      run: |
+        for i in {1..60}; do
+          if gcloud run services describe "${CLOUD_RUN_TAIGA_SERVICE}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" >/dev/null 2>&1; then
+            echo "Cloud Run service '${CLOUD_RUN_TAIGA_SERVICE}' is ready."
+            break
+          fi
+          echo "Waiting for Terraform (Cloud SQL + Cloud Run '${CLOUD_RUN_TAIGA_SERVICE}') to finish provisioning (attempt ${i}/60)..."
+          sleep 15
+        done
+
+    - name: Deploy Container to Cloud Run
+      env:
+        TAIGA_ADMIN_USER: ${{ vars.TAIGA_ADMIN_USER || 'admin' }}
+        TAIGA_ADMIN_EMAIL: ${{ vars.TAIGA_ADMIN_EMAIL || 'vitor.ecomp@gmail.com' }}
+        TAIGA_ADMIN_PASSWORD: ${{ secrets.TAIGA_ADMIN_PASSWORD || secrets.BLOG_ADMIN_PASSWORD || '' }}
+      run: |
+        gcloud run services update "${CLOUD_RUN_TAIGA_SERVICE}" \
+          --project "${GCP_PROJECT_ID}" \
+          --region "${GCP_REGION}" \
+          --service-account "${TAIGA_RUNTIME_SA}" \
+          --image "${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_TAIGA_REPO}/${CLOUD_RUN_TAIGA_SERVICE}:latest" \
+          --update-env-vars "TAIGA_SITES_SCHEME=https,TAIGA_SITES_DOMAIN=${TAIGA_DOMAIN},TAIGA_URL=${TAIGA_URL},PUBLIC_REGISTER_ENABLED=False,ENABLE_TELEMETRY=False,CELERY_ENABLED=False,TAIGA_ADMIN_USER=${TAIGA_ADMIN_USER},TAIGA_ADMIN_EMAIL=${TAIGA_ADMIN_EMAIL},TAIGA_ADMIN_PASSWORD=${TAIGA_ADMIN_PASSWORD}" \
+          --cpu-boost \
+          --startup-probe=httpGet.path=/,httpGet.port=8080,initialDelaySeconds=5,periodSeconds=5,failureThreshold=36,timeoutSeconds=5 \
+          --no-invoker-iam-check \
+          --quiet
+
+    - name: Verify Taiga Admin & API Readiness
+      env:
+        TAIGA_ADMIN_USER: ${{ vars.TAIGA_ADMIN_USER || 'admin' }}
+        TAIGA_ADMIN_EMAIL: ${{ vars.TAIGA_ADMIN_EMAIL || 'vitor.ecomp@gmail.com' }}
+        TAIGA_ADMIN_PASSWORD: ${{ secrets.TAIGA_ADMIN_PASSWORD || secrets.BLOG_ADMIN_PASSWORD }}
+      run: |
+        python3 cloud/scripts/seed_taiga_admin.py --taiga-url "${TAIGA_URL}"
