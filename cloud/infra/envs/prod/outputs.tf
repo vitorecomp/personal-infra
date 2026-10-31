@@ -22,3 +22,14 @@ output "blog_sql_connection_name" {
   description = "Cloud SQL MySQL 8.0 instance connection name for personal-blog"
   value       = module.load_balancer.blog_sql_connection_name
 }
+
+output "taiga_service_uri" {
+  description = "Cloud Run service URI for Taiga"
+  value       = module.load_balancer.taiga_service_uri
+}
+
+output "taiga_sql_connection_name" {
+  description = "Cloud SQL PostgreSQL 15 instance connection name for Taiga"
+  value       = module.load_balancer.taiga_sql_connection_name
+}
+
