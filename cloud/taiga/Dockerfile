@@ -14,13 +14,7 @@ RUN apt-get update && \
 COPY --from=frontend /usr/share/nginx/html /taiga-front
 
 # Configure Django settings for Cloud Run + HTTPS Load Balancer proxy headers and direct media storage
-RUN cat >> /taiga-back/settings/config.py <<'EOF'
-
-# Cloud Run & Global External HTTPS Load Balancer overrides
-DEFAULT_FILE_STORAGE = "django.core.files.storage.FileSystemStorage"
-USE_X_FORWARDED_HOST = True
-SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-EOF
+RUN printf '\n# Cloud Run & Global External HTTPS Load Balancer overrides\nDEFAULT_FILE_STORAGE = "django.core.files.storage.FileSystemStorage"\nUSE_X_FORWARDED_HOST = True\nSECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")\n' >> /taiga-back/settings/config.py
 
 # Pre-collect Django static files at image build time
 WORKDIR /taiga-back
