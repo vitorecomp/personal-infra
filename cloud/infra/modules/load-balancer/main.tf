@@ -547,6 +547,9 @@ resource "google_cloud_run_v2_service" "taiga" {
   lifecycle {
     ignore_changes = [
       template[0].containers[0].image,
+      template[0].containers[0].env,
+      template[0].containers[0].volume_mounts,
+      template[0].volumes,
       client,
       client_version,
     ]
@@ -571,7 +574,7 @@ resource "google_compute_backend_service" "taiga_backend" {
   name                  = "taiga-backend"
   protocol              = "HTTP"
   port_name             = "http"
-  timeout_sec           = 60
+  timeout_sec           = 30
   load_balancing_scheme = "EXTERNAL_MANAGED"
 
   backend {
