@@ -669,7 +669,9 @@ def handle_stories(client: TaigaClient, args: argparse.Namespace) -> int:
             st_extra = s.get("status_extra_info") or {}
             st_name = st_extra.get("name") if isinstance(st_extra, dict) else s.get("status")
             pts = s.get("total_points")
-            sprint = s.get("milestone_name") or "Backlog"
+            sprint = s.get("milestone_name") or (
+                f"sprint:{s.get('milestone')}" if s.get("milestone") else "Backlog"
+            )
             print(
                 f"  - id={s.get('id')} (#{s.get('ref')}) [{st_name}] {s.get('subject')} (sprint={sprint}, points={pts})"
             )
@@ -780,9 +782,10 @@ def handle_stories(client: TaigaClient, args: argparse.Namespace) -> int:
             pt_id = _find_named_id(proj.get("points"), args.points)
             if pt_id is None:
                 sys.exit(f"[error] Unknown story points value '{args.points}'.")
+            null_pt_id = _find_named_id(proj.get("points"), "?")
             existing_pts = dict(cur_story.get("points") or {})
-            for role_id in existing_pts:
-                existing_pts[role_id] = pt_id
+            for idx, role_id in enumerate(existing_pts):
+                existing_pts[role_id] = pt_id if idx == 0 else (null_pt_id or existing_pts[role_id])
             payload_upd["points"] = existing_pts
         tags = _parse_tags(args.tags)
         if tags is not None:
