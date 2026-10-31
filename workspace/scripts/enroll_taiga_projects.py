@@ -37,7 +37,7 @@ DEFAULT_TAIGA_URL = "https://taiga.vitorx86.dev"
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_EMAIL = "vitor.ecomp@gmail.com"
 DEFAULT_FALLBACK_SNI = "vitorx86.dev"
-DEFAULT_TEMPLATE = "kanban"
+DEFAULT_TEMPLATE = "scrum"
 
 
 class _SNIOverrideHTTPSConnection(http.client.HTTPSConnection):
@@ -277,7 +277,7 @@ def build_project_payload(
         "description": description,
         "is_private": is_private,
         "is_backlog_activated": use_scrum,
-        "is_kanban_activated": use_kanban or not use_scrum,
+        "is_kanban_activated": use_kanban,
         "is_wiki_activated": True,
         "is_issues_activated": True,
         "tags": tags[:10],
@@ -520,7 +520,13 @@ def enroll_projects(
         )
 
         if existing is not None:
-            if not update_existing:
+            needs_template_sync = (
+                bool(existing.get("is_backlog_activated"))
+                != bool(payload["is_backlog_activated"])
+                or bool(existing.get("is_kanban_activated"))
+                != bool(payload["is_kanban_activated"])
+            )
+            if not update_existing and not needs_template_sync:
                 print(
                     f"[skip] Project '{name}' already exists on Taiga (slug={existing.get('slug')})"
                 )
@@ -532,6 +538,10 @@ def enroll_projects(
                 "name": payload["name"],
                 "description": payload["description"],
                 "is_private": payload["is_private"],
+                "is_backlog_activated": payload["is_backlog_activated"],
+                "is_kanban_activated": payload["is_kanban_activated"],
+                "is_wiki_activated": payload["is_wiki_activated"],
+                "is_issues_activated": payload["is_issues_activated"],
                 "tags": payload["tags"],
             }
             status_code, resp_data = _request_taiga_api(
