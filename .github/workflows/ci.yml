@@ -40,6 +40,7 @@ jobs:
         python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
         BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --dry-run
         TAIGA_ADMIN_EMAIL=ci@example.com TAIGA_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_taiga_admin.py --dry-run
+        python3 cloud/scripts/configure_ai_spend_cap.py compute-bench --billing-account 000000-000000-000000 --project-number 1234567890 --amount 1200 --services all --dry-run
 
   terraform-validate:
     name: Validate Terraform Configuration
