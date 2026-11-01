@@ -61,7 +61,8 @@ personal-infra/
 │       ├── download_personal_blog.py       # Clones/updates personal-blog and optionally deploys
 │       ├── deploy_taiga.py                 # Validates cloud/taiga and deploys to Cloud Run
 │       ├── seed_ghost_admin.py             # Idempotently seeds Ghost Admin Owner in the deploy pipeline
-│       └── seed_taiga_admin.py             # Idempotently verifies Taiga API & admin login in the deploy pipeline
+│       ├── seed_taiga_admin.py             # Idempotently verifies Taiga API & admin login in the deploy pipeline
+│       └── configure_ai_spend_cap.py       # Idempotently configures GCP Cloud Billing Spend Cap budgets for AI services
 ├── home-server/                            # (Planned) Home server setup and maintenance
 ├── linux/                                  # (Planned) Linux workstation/system configuration
 └── workspace/                              # Local repository management
@@ -112,6 +113,7 @@ python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_buck
 python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket> --dry-run
 python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
 python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
+python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --services all --dry-run
 
 # Download or update repositories into cloud/<project>/repo
 python3 cloud/scripts/download_nobuffer_site.py

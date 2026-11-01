@@ -57,12 +57,14 @@ python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_buck
 python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket> --dry-run
 python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
 python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
+python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --services all --dry-run
 
 # Download/update and deploy workloads via Cloud Build
 python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_bucket>
 python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket>
 python3 cloud/scripts/download_personal_blog.py --deploy
 python3 cloud/scripts/deploy_taiga.py --deploy
+python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --services all
 ```
 
 ### 2. `home-server/`

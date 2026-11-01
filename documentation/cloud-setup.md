@@ -29,6 +29,7 @@ gcloud services enable \
   run.googleapis.com \
   sqladmin.googleapis.com \
   artifactregistry.googleapis.com \
+  billingbudgets.googleapis.com \
   iam.googleapis.com
 ```
 
