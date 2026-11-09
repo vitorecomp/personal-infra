@@ -9,12 +9,19 @@ Behavior:
    `~/workspace/<folder>/<name>` if they are currently in a different folder.
 4. Clones any remaining repositories that have a `folder` assigned in the CSV
    into `~/workspace/<folder>/<name>`.
+
+SSH keys with a passphrase are supported: before cloning, SSH access is checked
+non-interactively. If it fails, an existing ssh-agent is reused (or a temporary
+one is started) and `ssh-add` prompts for the passphrase once, so parallel
+clones never prompt on the terminal. Keys without a passphrase skip this step.
 """
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
+import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -84,6 +91,92 @@ def find_existing_cloned_repos(
     return found, symlinks
 
 
+# Never prompt from inside (parallel) clones: SSH fails fast instead of asking for a
+# passphrase, and HTTPS fallbacks fail instead of asking for credentials.
+CLONE_ENV_OVERRIDES = {
+    "GIT_SSH_COMMAND": os.environ.get("GIT_SSH_COMMAND", "ssh -o BatchMode=yes"),
+    "GIT_TERMINAL_PROMPT": "0",
+}
+
+
+def ssh_host_from_url(url: str) -> str | None:
+    """Extracts `user@host` from `git@host:owner/repo.git` or `ssh://git@host/...` URLs."""
+    match = re.match(r"^(?:ssh://)?([^@/\s]+@[^:/\s]+)[:/]", url)
+    return match.group(1) if match else None
+
+
+def ssh_auth_works(host: str) -> bool:
+    """Checks SSH authentication without ever prompting (GitHub exits 1 even on success)."""
+    result = subprocess.run(
+        [
+            "ssh", "-T",
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=10",
+            host,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    return result.returncode == 0 or "successfully authenticated" in output
+
+
+def agent_reachable() -> bool:
+    # `ssh-add -l` exits 0 (has keys), 1 (no keys) or 2 (no agent reachable).
+    if not os.environ.get("SSH_AUTH_SOCK"):
+        return False
+    result = subprocess.run(["ssh-add", "-l"], check=False, capture_output=True)
+    return result.returncode in (0, 1)
+
+
+def start_ssh_agent() -> str | None:
+    """Starts a temporary ssh-agent, exports its env into os.environ and returns its PID."""
+    result = subprocess.run(
+        ["ssh-agent", "-s"], check=False, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return None
+    for key, value in re.findall(r"(SSH_AUTH_SOCK|SSH_AGENT_PID)=([^;]+);", result.stdout):
+        os.environ[key] = value
+    return os.environ.get("SSH_AGENT_PID")
+
+
+def ensure_ssh_auth(host: str, ssh_key: Path | None) -> str | None:
+    """Makes SSH auth to `host` work non-interactively.
+
+    Returns the PID of a temporary ssh-agent started by this script (to be killed
+    afterwards), or None if no agent was started.
+    """
+    if ssh_auth_works(host):
+        print(f"[ssh] Non-interactive SSH access to {host} OK.")
+        return None
+
+    started_pid = None
+    if not agent_reachable():
+        started_pid = start_ssh_agent()
+        if not started_pid:
+            print("[warn] Could not start ssh-agent; SSH clones may fall back to HTTPS.")
+            return None
+        print(f"[ssh] Started temporary ssh-agent (pid {started_pid}).")
+
+    print(f"[ssh] SSH key needs to be unlocked for {host}; running ssh-add ...")
+    add_cmd = ["ssh-add"] + ([str(ssh_key.expanduser())] if ssh_key else [])
+    subprocess.run(add_cmd, check=False)  # Interactive: prompts for the passphrase once.
+
+    if ssh_auth_works(host):
+        print(f"[ssh] SSH access to {host} OK via ssh-agent.")
+    else:
+        print(f"[warn] SSH access to {host} still failing; clones will fall back to HTTPS.")
+    return started_pid
+
+
+def stop_ssh_agent(pid: str) -> None:
+    subprocess.run(["ssh-agent", "-k"], check=False, capture_output=True)
+    print(f"[ssh] Stopped temporary ssh-agent (pid {pid}).")
+
+
 def clone_repo(repo: dict[str, str], target_path: Path, dry_run: bool = False) -> bool:
     clone_url = repo["ssh_link"] or repo["link"]
     if not clone_url:
@@ -101,6 +194,7 @@ def clone_repo(repo: dict[str, str], target_path: Path, dry_run: bool = False) -
         check=False,
         capture_output=True,
         text=True,
+        env={**os.environ, **CLONE_ENV_OVERRIDES},
     )
     if result.returncode == 0:
         return True
@@ -115,6 +209,7 @@ def clone_repo(repo: dict[str, str], target_path: Path, dry_run: bool = False) -
             check=False,
             capture_output=True,
             text=True,
+            env={**os.environ, **CLONE_ENV_OVERRIDES},
         )
         if result_https.returncode == 0:
             return True
@@ -132,7 +227,11 @@ def clone_repo(repo: dict[str, str], target_path: Path, dry_run: bool = False) -
 
 
 def sync_workspace(
-    csv_path: Path, workspace: Path, dry_run: bool = False, jobs: int = 4
+    csv_path: Path,
+    workspace: Path,
+    dry_run: bool = False,
+    jobs: int = 4,
+    ssh_key: Path | None = None,
 ) -> None:
     managed_repos = load_csv_repos(csv_path)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -200,23 +299,36 @@ def sync_workspace(
             continue
         to_clone.append((repo, target_dir))
 
-    if dry_run or jobs <= 1:
-        for repo, target_dir in to_clone:
-            if clone_repo(repo, target_dir, dry_run=dry_run):
-                cloned_count += 1
-            else:
-                failed_count += 1
-    elif to_clone:
-        with ThreadPoolExecutor(max_workers=jobs) as executor:
-            futures = {
-                executor.submit(clone_repo, repo, target_dir, False): repo["name"]
-                for repo, target_dir in to_clone
-            }
-            for future in as_completed(futures):
-                if future.result():
+    # Unlock SSH once up front so clones never prompt for a passphrase.
+    agent_pid = None
+    ssh_hosts = sorted(
+        {h for repo, _ in to_clone if (h := ssh_host_from_url(repo["ssh_link"]))}
+    )
+    if to_clone and not dry_run:
+        for host in ssh_hosts:
+            agent_pid = ensure_ssh_auth(host, ssh_key) or agent_pid
+
+    try:
+        if dry_run or jobs <= 1:
+            for repo, target_dir in to_clone:
+                if clone_repo(repo, target_dir, dry_run=dry_run):
                     cloned_count += 1
                 else:
                     failed_count += 1
+        elif to_clone:
+            with ThreadPoolExecutor(max_workers=jobs) as executor:
+                futures = {
+                    executor.submit(clone_repo, repo, target_dir, False): repo["name"]
+                    for repo, target_dir in to_clone
+                }
+                for future in as_completed(futures):
+                    if future.result():
+                        cloned_count += 1
+                    else:
+                        failed_count += 1
+    finally:
+        if agent_pid:
+            stop_ssh_agent(agent_pid)
 
     print(
         f"\nSummary: configured_in_csv={len(managed_repos)}, "
@@ -248,6 +360,12 @@ def main() -> None:
         help="Number of concurrent git clone operations (default: 4).",
     )
     parser.add_argument(
+        "--ssh-key",
+        type=Path,
+        default=None,
+        help="SSH private key to unlock with ssh-add if needed (default: ssh-add's default keys).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Preview moves and clones without making changes.",
@@ -258,6 +376,7 @@ def main() -> None:
         args.workspace.expanduser().resolve(),
         dry_run=args.dry_run,
         jobs=args.jobs,
+        ssh_key=args.ssh_key,
     )
 
 
