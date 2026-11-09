@@ -10,6 +10,24 @@ permissions:
   contents: read
 
 jobs:
+  secret-scan:
+    name: Scan Repository & History for Secrets
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+
+    - name: Run secret scanner self-test & full history audit
+      run: |
+        python3 workspace/scripts/scan_repo_secrets.py --self-test
+        python3 workspace/scripts/scan_repo_secrets.py --history
+
   python-checks:
     name: Validate Python Scripts & Dry-Runs
     runs-on: ubuntu-latest
@@ -29,6 +47,7 @@ jobs:
       run: |
         python3 workspace/scripts/sync_workspace_repos.py --dry-run
         python3 workspace/scripts/validate_repos_pushed.py --dry-run
+        python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
         python3 workspace/scripts/enroll_taiga_projects.py --dry-run
         python3 workspace/scripts/taiga_cli.py projects create --name ci-test --dry-run
 

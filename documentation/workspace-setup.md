@@ -74,7 +74,23 @@ python3 workspace/scripts/validate_repos_pushed.py personal
 python3 workspace/scripts/validate_repos_pushed.py --fetch --ignore-untracked
 ```
 
-### 3.4 Enrolling GitHub Repositories on Taiga (`enroll_taiga_projects.py`)
+### 3.4 Scanning for Committed Keys & Secrets (`scan_repo_secrets.py`)
+
+Audits `personal-infra` (or any repository / `~/workspace` folder) across tracked files, staged Git index blobs (`--staged`), unignored working-tree credential files, and full Git commit history (`--history`), and idempotently installs a local Git `pre-commit` hook (`--install-hook`) that blocks commits containing keys or tokens.
+
+```bash
+# Audit tracked files and full Git commit history in personal-infra
+python3 workspace/scripts/scan_repo_secrets.py --history
+
+# Preview and install the managed .git/hooks/pre-commit secret guard
+python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
+python3 workspace/scripts/scan_repo_secrets.py --install-hook
+
+# Scan all repositories in a ~/workspace category folder
+python3 workspace/scripts/scan_repo_secrets.py personal
+```
+
+### 3.5 Enrolling GitHub Repositories on Taiga (`enroll_taiga_projects.py`)
 
 Reads `repo_stats.csv`, optionally fetches live GitHub descriptions/topics, and idempotently creates corresponding projects on the Taiga server (`https://taiga.vitorx86.dev`) via the Taiga REST API (`/api/v1/projects`).
 
@@ -93,7 +109,7 @@ TAIGA_ADMIN_PASSWORD=<your_taiga_password> python3 workspace/scripts/enroll_taig
 TAIGA_ADMIN_PASSWORD=<your_taiga_password> python3 workspace/scripts/enroll_taiga_projects.py --repo personal-infra
 ```
 
-### 3.5 Managing Taiga via CLI & Agent Skill (`taiga_cli.py`)
+### 3.6 Managing Taiga via CLI & Agent Skill (`taiga_cli.py`)
 
 [`workspace/scripts/taiga_cli.py`](../workspace/scripts/taiga_cli.py) (along with the agent skill in [`.agents/skills/taiga/SKILL.md`](../.agents/skills/taiga/SKILL.md) and [`.agents/skills/taiga/scripts/taiga_cli.py`](../.agents/skills/taiga/scripts/taiga_cli.py)) provides CLI subcommands for managing projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages on `https://taiga.vitorx86.dev`:
 

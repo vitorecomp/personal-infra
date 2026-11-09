@@ -99,6 +99,15 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
   # Validate a specific category folder (e.g., ~/workspace/personal)
   python3 workspace/scripts/validate_repos_pushed.py personal
   ```
+- **Scan Repository Secrets & Pre-Commit Guard ([`scan_repo_secrets.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/scan_repo_secrets.py))**: Scans tracked files, staged index changes, and full Git commit history for leaked keys, cloud credentials, API tokens, and unignored secret files, and idempotently installs a local Git `pre-commit` hook.
+  ```bash
+  # Audit tracked files and full Git commit history
+  python3 workspace/scripts/scan_repo_secrets.py --history
+
+  # Preview and install the local Git pre-commit secret-scanning hook
+  python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
+  python3 workspace/scripts/scan_repo_secrets.py --install-hook
+  ```
 - **Enroll GitHub Repositories on Taiga ([`enroll_taiga_projects.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/enroll_taiga_projects.py))**: Idempotently enrolls GitHub repositories from `repo_stats.csv` as Scrum projects on `https://taiga.vitorx86.dev` and orders them with the most recently committed repository first.
   ```bash
   python3 workspace/scripts/enroll_taiga_projects.py --dry-run
@@ -117,7 +126,7 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
 
 | Workflow | File | Trigger | Description |
 | :--- | :--- | :--- | :--- |
-| **CI Validation** | [`.github/workflows/ci.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/ci.yml) | Push, PR, manual | Validates Python script syntax, runs `--dry-run` checks across `workspace/` and `cloud/` scripts, and runs `terraform fmt -check` & `terraform validate`. |
+| **CI Validation** | [`.github/workflows/ci.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/ci.yml) | Push, PR, manual | Scans tracked files and Git history for secrets, validates Python script syntax, runs `--dry-run` checks across `workspace/` and `cloud/` scripts, and runs `terraform fmt -check` & `terraform validate`. |
 | **Terraform Cloud Infrastructure** | [`.github/workflows/terraform-cloud.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/terraform-cloud.yml) | Push/PR on `cloud/infra/**`, manual | Runs `terraform plan` on PRs and applies infrastructure changes to `cloud/infra/envs/prod` on `main`/`master` pushes (or manual `apply=true`). |
 | **Build the Main Website** | [`.github/workflows/build-website.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/build-website.yml) | Push, `repository_dispatch` (`deploy-nobuffer-site`), manual | Clones `nobuffer-site` via [`download_nobuffer_site.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/scripts/download_nobuffer_site.py) and submits [`cloud/nobuffer-site/cloudbuild.yaml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/nobuffer-site/cloudbuild.yaml) to Cloud Build. |
 | **Build the Personal Portfolio** | [`.github/workflows/build-portfolio.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/build-portfolio.yml) | Push, `repository_dispatch` (`deploy-personal-portifolio`), manual | Clones `personal-portifolio` via [`download_personal_portifolio.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/scripts/download_personal_portifolio.py) and submits [`cloud/personal-portifolio/cloudbuild.yaml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/personal-portifolio/cloudbuild.yaml) to Cloud Build. |

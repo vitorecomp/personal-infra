@@ -32,7 +32,7 @@ sequenceDiagram
 
 | Workflow File | Triggers | Purpose |
 | :--- | :--- | :--- |
-| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | `push`, `pull_request`, `workflow_dispatch` | Syntax-checks all Python scripts, runs `--dry-run` smoke tests for workspace and cloud scripts, and runs `terraform fmt -check` + `terraform validate`. |
+| [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | `push`, `pull_request`, `workflow_dispatch` | Scans repository files and Git history for leaked keys/secrets (`scan_repo_secrets.py --history`), syntax-checks all Python scripts, runs `--dry-run` smoke tests for workspace and cloud scripts, and runs `terraform fmt -check` + `terraform validate`. |
 | [`.github/workflows/terraform-cloud.yml`](../.github/workflows/terraform-cloud.yml) | `pull_request` / `push` on `cloud/infra/**`, `workflow_dispatch` | Runs `terraform plan` on PRs and `terraform apply` on pushes to `main`/`master` (or manual dispatch with `apply: true`). |
 | [`.github/workflows/build-website.yml`](../.github/workflows/build-website.yml) | `push`, `workflow_dispatch`, `repository_dispatch` (`deploy-nobuffer-site`) | Clones `vitorecomp/nobuffer-site` and submits [`cloud/nobuffer-site/cloudbuild.yaml`](../cloud/nobuffer-site/cloudbuild.yaml) to publish static files to `gs://${GCS_BUCKET_NAME}`. |
 | [`.github/workflows/build-portfolio.yml`](../.github/workflows/build-portfolio.yml) | `push`, `workflow_dispatch`, `repository_dispatch` (`deploy-personal-portifolio`) | Clones `vitorecomp/personal-portifolio` and submits [`cloud/personal-portifolio/cloudbuild.yaml`](../cloud/personal-portifolio/cloudbuild.yaml) to export Next.js/Nextra static HTML and sync to `gs://${GCS_PORTFOLIO_BUCKET_NAME}`. |
