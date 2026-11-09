@@ -23,7 +23,7 @@ jobs:
 
     - name: Syntax check Python scripts
       run: |
-        python3 -m py_compile workspace/scripts/*.py cloud/scripts/*.py
+        python3 -m py_compile workspace/scripts/*.py cloud/scripts/*.py .agents/skills/taiga/scripts/*.py
 
     - name: Verify workspace sync dry-run
       run: |

@@ -16,12 +16,14 @@ import csv
 import json
 import os
 from pathlib import Path
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 
 USER = "vitorecomp"
 REPO_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = REPO_ROOT.parent
 DOC_DIR = REPO_ROOT / "documentation"
 CSV_PATH = DOC_DIR / "repo_stats.csv"
 
@@ -40,10 +42,59 @@ TRACKED_FIELDS = ("link", "ssh link", "last updated", "is a fork")
 EMPTY_FIELDS = ("folder", "is-custom", "is-template")
 
 
+def _resolve_github_tokens() -> list[tuple[str, str]]:
+    """Returns candidate (source, token) pairs from env vars, .env files, and `gh auth token`."""
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for key in ("GITHUB_TOKEN", "METRICS_TOKEN"):
+        val = (os.environ.get(key) or "").strip()
+        if val and val not in seen:
+            seen.add(val)
+            candidates.append((f"env:{key}", val))
+
+    for env_path in (PROJECT_ROOT / ".env", REPO_ROOT / ".env"):
+        if not env_path.exists():
+            continue
+        try:
+            for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export ") :].strip()
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'").strip('"')
+                if k in ("GITHUB_TOKEN", "METRICS_TOKEN") and v and v not in seen:
+                    seen.add(v)
+                    candidates.append((f"file:{env_path.name}:{k}", v))
+        except OSError:
+            continue
+
+    try:
+        res = subprocess.run(
+            ["gh", "auth", "token"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        gh_tok = res.stdout.strip()
+        if res.returncode == 0 and gh_tok and gh_tok not in seen:
+            seen.add(gh_tok)
+            candidates.append(("gh-cli", gh_tok))
+    except Exception:
+        pass
+
+    return candidates
+
+
 def fetch_page(url: str, token: str | None) -> list[dict]:
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "vitorecomp-repo-stats-script",
+        "Cache-Control": "no-cache",
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -53,49 +104,64 @@ def fetch_page(url: str, token: str | None) -> list[dict]:
         return json.load(response)
 
 
-def fetch_all_repos(user: str, token: str | None) -> list[dict]:
-    repos: list[dict] = []
-    page = 1
-    use_authenticated_endpoint = bool(token)
+def fetch_all_repos(user: str, token_candidates: list[tuple[str, str]]) -> list[dict]:
+    # Try each candidate token against /user/repos first, then fall back to unauthenticated /users/<user>/repos.
+    attempts: list[tuple[str, str | None, bool]] = [
+        (src, tok, True) for src, tok in token_candidates
+    ]
+    attempts.append(("unauthenticated", None, False))
 
-    while True:
-        if use_authenticated_endpoint:
-            params = urllib.parse.urlencode({
-                "per_page": 100,
-                "affiliation": "owner",
-                "sort": "updated",
-                "direction": "desc",
-                "page": page,
-            })
-            url = f"https://api.github.com/user/repos?{params}"
-        else:
-            params = urllib.parse.urlencode({
-                "per_page": 100,
-                "type": "owner",
-                "sort": "updated",
-                "direction": "desc",
-                "page": page,
-            })
-            url = f"https://api.github.com/users/{user}/repos?{params}"
+    for source_label, active_token, use_authenticated_endpoint in attempts:
+        repos: list[dict] = []
+        page = 1
+        failed_attempt = False
 
-        try:
-            batch = fetch_page(url, token)
-        except urllib.error.HTTPError as err:
-            if use_authenticated_endpoint and err.code in (401, 403):
-                # Fallback to public user endpoint if token lacks /user/repos access
-                use_authenticated_endpoint = False
-                continue
-            raise
+        while True:
+            if use_authenticated_endpoint:
+                params = urllib.parse.urlencode({
+                    "per_page": 100,
+                    "affiliation": "owner",
+                    "sort": "updated",
+                    "direction": "desc",
+                    "page": page,
+                })
+                url = f"https://api.github.com/user/repos?{params}"
+            else:
+                params = urllib.parse.urlencode({
+                    "per_page": 100,
+                    "type": "owner",
+                    "sort": "updated",
+                    "direction": "desc",
+                    "page": page,
+                })
+                url = f"https://api.github.com/users/{user}/repos?{params}"
 
-        if not batch:
-            break
+            try:
+                batch = fetch_page(url, active_token)
+            except urllib.error.HTTPError as err:
+                err_body = ""
+                try:
+                    err_body = err.read().decode("utf-8", errors="replace").strip()
+                except Exception:
+                    pass
+                print(
+                    f"[warn] GitHub API HTTP {err.code} using {source_label}: {err_body[:200]}"
+                )
+                failed_attempt = True
+                break
 
-        repos.extend(batch)
-        if len(batch) < 100:
-            break
-        page += 1
+            if not batch:
+                break
 
-    return repos
+            repos.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+
+        if not failed_attempt:
+            return repos
+
+    return []
 
 
 def load_existing_csv(csv_path: Path) -> list[dict[str, str]]:
@@ -116,11 +182,14 @@ def load_existing_csv(csv_path: Path) -> list[dict[str, str]]:
 
 
 def build_repo_row(repo: dict) -> dict[str, str]:
+    updated_at = str(repo.get("updated_at") or "")
+    pushed_at = str(repo.get("pushed_at") or "")
+    latest_ts = max(updated_at, pushed_at)
     return {
         "name": repo["name"],
         "link": repo["html_url"],
         "ssh link": repo["ssh_url"],
-        "last updated": repo.get("updated_at") or repo.get("pushed_at") or "",
+        "last updated": latest_ts,
         "is a fork": str(bool(repo.get("fork", False))),
         "folder": "",
         "is-custom": "",
@@ -139,14 +208,14 @@ def sort_rows_by_last_updated(rows: list[dict[str, str]]) -> list[dict[str, str]
 
 
 def update_repo_stats(csv_path: Path = CSV_PATH, dry_run: bool = False) -> None:
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("METRICS_TOKEN")
+    token_candidates = _resolve_github_tokens()
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     file_existed = csv_path.exists()
     existing_rows = load_existing_csv(csv_path)
     original_snapshot = [dict(row) for row in existing_rows]
 
-    repos = fetch_all_repos(USER, token)
+    repos = fetch_all_repos(USER, token_candidates)
     fresh_by_name = {repo["name"]: build_repo_row(repo) for repo in repos}
 
     added_count = 0

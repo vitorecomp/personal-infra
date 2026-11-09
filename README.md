@@ -6,6 +6,7 @@ Central repository for automatically provisioning, configuring, and maintaining 
 
 ```text
 personal-infra/
+├── .agents/skills/           # Agent skills (e.g., taiga REST API skill & CLI)
 ├── .github/workflows/        # CI/CD workflows (website/blog builds, Terraform, Nginx deploy)
 ├── documentation/            # Project, architecture, cloud setup, and pipeline documentation
 ├── cloud/                    # Cloud infrastructure provisioning and workload deployments
@@ -103,7 +104,7 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
   python3 workspace/scripts/enroll_taiga_projects.py --dry-run
   python3 workspace/scripts/enroll_taiga_projects.py
   ```
-- **Taiga REST API CLI & Agent Skill ([`taiga_cli.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/taiga_cli.py) / [`SKILL.md`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/skills/taiga/SKILL.md))**: Manages projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages via the Taiga REST API (`/api/v1`).
+- **Taiga REST API CLI & Agent Skill ([`taiga_cli.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.agents/skills/taiga/scripts/taiga_cli.py) / [`SKILL.md`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.agents/skills/taiga/SKILL.md))**: Manages projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages via the Taiga REST API (`/api/v1`).
   ```bash
   python3 workspace/scripts/taiga_cli.py projects list
   python3 workspace/scripts/taiga_cli.py stories list personal-infra

@@ -30,6 +30,11 @@ personal-infra/
 │   ├── cloud-setup.md                      # GCP bootstrap, IAM, Terraform & DNS setup guide
 │   ├── pipeline-setup.md                   # GitHub Actions, Cloud Build & secrets/variables guide
 │   └── workspace-setup.md                  # Local ~/workspace inventory & sync documentation
+├── .agents/skills/
+│   └── taiga/
+│       ├── SKILL.md                        # Agent skill definition for Taiga REST API management
+│       └── scripts/
+│           └── taiga_cli.py                # Canonical CLI for Taiga projects, sprints, stories, tasks, issues & wiki
 ├── .github/workflows/
 │   ├── ci.yml                              # Python syntax/dry-run checks & Terraform fmt/validate
 │   ├── terraform-cloud.yml                 # Terraform plan/apply for cloud/infra/envs/prod
@@ -68,15 +73,12 @@ personal-infra/
 └── workspace/                              # Local repository management
     ├── documentation/
     │   └── repo_stats.csv                  # Source-of-truth repo inventory & folder mapping
-    ├── skills/
-    │   └── taiga/
-    │       └── SKILL.md                    # Agent skill definition for Taiga REST API management
     └── scripts/
         ├── update_repo_stats.py            # Syncs GitHub repo metadata into repo_stats.csv
         ├── sync_workspace_repos.py         # Moves/clones repos into ~/workspace/<folder>/<name>
         ├── validate_repos_pushed.py        # Validates whether git repos in a folder are clean and pushed
         ├── enroll_taiga_projects.py        # Idempotently enrolls GitHub repos from repo_stats.csv as Taiga projects
-        └── taiga_cli.py                    # CLI for managing Taiga projects, sprints, stories, tasks, issues & wiki
+        └── taiga_cli.py                    # Wrapper CLI delegating to .agents/skills/taiga/scripts/taiga_cli.py
 ```
 
 ---
