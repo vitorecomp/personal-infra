@@ -95,7 +95,7 @@ TAIGA_ADMIN_PASSWORD=<your_taiga_password> python3 workspace/scripts/enroll_taig
 
 ### 3.5 Managing Taiga via CLI & Agent Skill (`taiga_cli.py`)
 
-[`workspace/scripts/taiga_cli.py`](../workspace/scripts/taiga_cli.py) (along with the global agent skill in [`workspace/skills/taiga/SKILL.md`](../workspace/skills/taiga/SKILL.md) installed at `~/.gemini/config/skills/taiga/`) provides CLI subcommands for managing projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages on `https://taiga.vitorx86.dev`:
+[`workspace/scripts/taiga_cli.py`](../workspace/scripts/taiga_cli.py) (along with the agent skill in [`.agents/skills/taiga/SKILL.md`](../.agents/skills/taiga/SKILL.md) and [`.agents/skills/taiga/scripts/taiga_cli.py`](../.agents/skills/taiga/scripts/taiga_cli.py)) provides CLI subcommands for managing projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages on `https://taiga.vitorx86.dev`:
 
 ```bash
 # List projects in display order or inspect a single project

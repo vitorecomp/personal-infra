@@ -46,14 +46,22 @@ def load_csv_repos(csv_path: Path) -> dict[str, dict[str, str]]:
     return repos
 
 
-def find_existing_cloned_repos(workspace: Path) -> dict[str, list[Path]]:
-    """Finds git repositories under ~/workspace (up to 2 levels deep: ~/workspace/<repo> or ~/workspace/<folder>/<repo>)."""
+def find_existing_cloned_repos(
+    workspace: Path,
+) -> tuple[dict[str, list[Path]], dict[str, list[Path]]]:
+    """Finds real git repositories and any repo symlinks under ~/workspace (up to 2 levels deep)."""
     found: dict[str, list[Path]] = {}
+    symlinks: dict[str, list[Path]] = {}
     if not workspace.exists():
-        return found
+        return found, symlinks
 
     for child in sorted(workspace.iterdir()):
-        if not child.is_dir() or child.name.startswith("."):
+        if child.name.startswith("."):
+            continue
+        if child.is_symlink():
+            symlinks.setdefault(child.name, []).append(child)
+            continue
+        if not child.is_dir():
             continue
 
         # Direct repo at ~/workspace/<repo>
@@ -63,12 +71,17 @@ def find_existing_cloned_repos(workspace: Path) -> dict[str, list[Path]]:
 
         # Category folder at ~/workspace/<folder>/<repo>
         for grandchild in sorted(child.iterdir()):
-            if not grandchild.is_dir() or grandchild.name.startswith("."):
+            if grandchild.name.startswith("."):
+                continue
+            if grandchild.is_symlink():
+                symlinks.setdefault(grandchild.name, []).append(grandchild)
+                continue
+            if not grandchild.is_dir():
                 continue
             if (grandchild / ".git").exists():
                 found.setdefault(grandchild.name, []).append(grandchild)
 
-    return found
+    return found, symlinks
 
 
 def clone_repo(repo: dict[str, str], target_path: Path, dry_run: bool = False) -> bool:
@@ -124,14 +137,23 @@ def sync_workspace(
     managed_repos = load_csv_repos(csv_path)
     workspace.mkdir(parents=True, exist_ok=True)
 
-    existing_repos = find_existing_cloned_repos(workspace)
+    existing_repos, repo_symlinks = find_existing_cloned_repos(workspace)
 
     already_in_place = 0
     moved_count = 0
     cloned_count = 0
     failed_count = 0
 
-    # Step 1: Organize already-cloned repos that are described in the CSV.
+    # Clean up any symlinks for managed repositories so moves/clones use real directories only.
+    for name in managed_repos:
+        for link_path in repo_symlinks.get(name, []):
+            if dry_run:
+                print(f"[dry-run] Would remove symlink {link_path}")
+            else:
+                link_path.unlink(missing_ok=True)
+                print(f"[unlink] Removed symlink {link_path}")
+
+    # Step 1: Organize already-cloned repos that are described in the CSV (move directly, never symlink).
     for name, repo in managed_repos.items():
         target_dir = workspace / repo["folder"] / name
         locations = existing_repos.get(name, [])
@@ -144,7 +166,12 @@ def sync_workspace(
             continue
 
         source_dir = locations[0]
-        if target_dir.exists():
+        if target_dir.is_symlink():
+            if dry_run:
+                print(f"[dry-run] Would remove symlink {target_dir}")
+            else:
+                target_dir.unlink(missing_ok=True)
+        elif target_dir.exists():
             print(
                 f"[skip] Target {target_dir} already exists; leaving {source_dir} as is."
             )
@@ -161,7 +188,7 @@ def sync_workspace(
 
     # Refresh existing locations after moves.
     if not dry_run:
-        existing_repos = find_existing_cloned_repos(workspace)
+        existing_repos, _ = find_existing_cloned_repos(workspace)
 
     # Step 2: Clone missing repos that have a target folder in the CSV.
     to_clone: list[tuple[dict[str, str], Path]] = []

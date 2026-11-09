@@ -179,6 +179,29 @@ def load_candidate_repos(
     return candidates
 
 
+def _resolve_github_token() -> str | None:
+    for key in ("GITHUB_TOKEN", "METRICS_TOKEN"):
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            return val
+    for env_path in (REPO_ROOT.parent / ".env", REPO_ROOT / ".env"):
+        if not env_path.exists():
+            continue
+        try:
+            for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export ") :].strip()
+                k, v = line.split("=", 1)
+                if k.strip() in ("GITHUB_TOKEN", "METRICS_TOKEN") and v.strip():
+                    return v.strip().strip("'").strip('"')
+        except OSError:
+            continue
+    return None
+
+
 def fetch_github_descriptions(user: str, token: str | None) -> dict[str, dict[str, object]]:
     """Fetches optional GitHub repository descriptions and topics, falling back gracefully on error."""
     metadata: dict[str, dict[str, object]] = {}
@@ -533,7 +556,7 @@ def enroll_projects(
         print("[ok] No matching repositories found in repo_stats.csv to enroll.")
         return 0
 
-    gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("METRICS_TOKEN")
+    gh_token = _resolve_github_token()
     gh_metadata: dict[str, dict[str, object]] = {}
     if fetch_descriptions and not dry_run:
         gh_metadata = fetch_github_descriptions(USER, gh_token)

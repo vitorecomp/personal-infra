@@ -95,7 +95,7 @@ def find_git_repos(root: Path) -> list[Path]:
             return
 
         for child in children:
-            if not child.is_dir():
+            if child.is_symlink() or not child.is_dir():
                 continue
             if child.name.startswith(".") or child.name in SKIP_DIRS:
                 continue
