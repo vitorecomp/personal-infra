@@ -36,7 +36,7 @@ personal-infra/
 │       └── scripts/
 │           └── taiga_cli.py                # Canonical CLI for Taiga projects, sprints, stories, tasks, issues & wiki
 ├── .github/workflows/
-│   ├── ci.yml                              # Python syntax/dry-run checks & Terraform fmt/validate
+│   ├── ci.yml                              # Secret scan, Python syntax/dry-run checks & Terraform fmt/validate
 │   ├── terraform-cloud.yml                 # Terraform plan/apply for cloud/infra/envs/prod
 │   ├── build-website.yml                   # Fetches nobuffer-site and submits Cloud Build
 │   ├── build-portfolio.yml                 # Fetches personal-portifolio and submits Cloud Build
@@ -77,6 +77,7 @@ personal-infra/
         ├── update_repo_stats.py            # Syncs GitHub repo metadata into repo_stats.csv
         ├── sync_workspace_repos.py         # Moves/clones repos into ~/workspace/<folder>/<name>
         ├── validate_repos_pushed.py        # Validates whether git repos in a folder are clean and pushed
+        ├── scan_repo_secrets.py            # Scans repos/history for leaked keys/secrets & installs pre-commit hook
         ├── enroll_taiga_projects.py        # Idempotently enrolls GitHub repos from repo_stats.csv as Taiga projects
         └── taiga_cli.py                    # Wrapper CLI delegating to .agents/skills/taiga/scripts/taiga_cli.py
 ```
@@ -134,6 +135,11 @@ python3 workspace/scripts/sync_workspace_repos.py --jobs 4
 # Validate whether all git repositories in ~/workspace (or a specific folder) are clean and pushed
 python3 workspace/scripts/validate_repos_pushed.py
 python3 workspace/scripts/validate_repos_pushed.py personal
+
+# Scan repository & git history for committed keys/secrets and install the pre-commit hook
+python3 workspace/scripts/scan_repo_secrets.py --history
+python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
+python3 workspace/scripts/scan_repo_secrets.py --install-hook
 
 # Preview or enroll GitHub repositories from repo_stats.csv as projects on Taiga
 python3 workspace/scripts/enroll_taiga_projects.py --dry-run
