@@ -31,7 +31,7 @@ personal-infra/
 │   ├── pipeline-setup.md                   # GitHub Actions, Cloud Build, SSH deploys & secrets/variables guide
 │   ├── migration-runbook.md                # GCP -> Vercel + compose VMs: phases, cutover checklists, rollback
 │   ├── vm-provisioning.md                  # Manual Terraform runbook for the VM roots (+ legacy prod destroy)
-│   ├── backup-restore.md                   # restic backups of the compose stacks (cross-cloud) & restores
+│   ├── backup-restore.md                   # restic backups of the compose stacks (GCS bucket) & restores
 │   └── workspace-setup.md                  # Local ~/workspace inventory & sync documentation
 ├── .agents/skills/
 │   └── taiga/
@@ -54,8 +54,8 @@ personal-infra/
 │   │   ├── modules/gce-vm/                 # GCE VM + dedicated VPC/firewall + static IP + runtime SA
 │   │   ├── modules/oci-vm/                 # OCI A1 VM + VCN/security list + reserved IP
 │   │   ├── modules/load-balancer/          # LEGACY GCP LB/CDN/Cloud Run/Cloud SQL (destroyed in Phase 5)
-│   │   ├── envs/gcp-taiga/                 # Taiga VM (personal-project-514501) + blog backup bucket; applied by hand
-│   │   ├── envs/oci-blog/                  # Blog VM (compartment vitorecomp) + Taiga backup bucket; applied by hand
+│   │   ├── envs/gcp-taiga/                 # Taiga VM (personal-project-514501) + shared backup bucket; applied by hand
+│   │   ├── envs/oci-blog/                  # Blog VM (compartment vitorecomp); applied by hand
 │   │   └── envs/prod/                      # LEGACY compute-bench stack (frozen)
 │   ├── nobuffer-site/
 │   │   ├── cloudbuild.yaml                 # LEGACY Cloud Build pipeline (site moves to Vercel)
@@ -78,7 +78,7 @@ personal-infra/
 │   └── scripts/
 │       ├── bootstrap_vm.py                 # Idempotent host setup over SSH (Docker, deploy user, swap, sshd, firewall, backup timers)
 │       ├── deploy_stack.py                 # rsync + remote .env preflight + compose up --wait + HTTPS check (CI & local)
-│       ├── backup_stack.py                 # Runs on the VM: DB dump + volumes -> restic in the other cloud
+│       ├── backup_stack.py                 # Runs on the VM: DB dump + volumes -> restic in gs://vitorx86-backups
 │       ├── migrate_gcp_data.py             # TEMPORARY: Cloud SQL/GCS -> VMs (archive/export/import/verify/copy-secrets)
 │       ├── tf_apply_retry.sh               # Retries plan+apply on OCI 'Out of host capacity' (refuses destructive plans)
 │       ├── download_nobuffer_site.py       # LEGACY: clones nobuffer-site and optionally deploys via Cloud Build

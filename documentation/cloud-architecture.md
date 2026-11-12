@@ -10,8 +10,8 @@
 > | `blog.` | OCI A1 VM: Caddy → Ghost 5.130 → MySQL 8.0 (docker compose) | [`cloud/infra/envs/oci-blog`](../cloud/infra/envs/oci-blog), [`cloud/personal-blog`](../cloud/personal-blog) |
 > | `taiga.` | GCE e2-micro VM: Caddy → Taiga → Postgres 15 (docker compose) | [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga), [`cloud/taiga`](../cloud/taiga) |
 >
-> DNS stays in Cloud DNS zone `vitorx86-dev` (project `study-deploys`) and is managed by hand. Backups go
-> cross-cloud with restic ([backup-restore.md](./backup-restore.md)).
+> DNS stays in Cloud DNS zone `vitorx86-dev` (project `study-deploys`) and is managed by hand. Both stacks back
+> up with restic to the GCS bucket `vitorx86-backups` ([backup-restore.md](./backup-restore.md)).
 
 This document describes the Google Cloud Platform (GCP) and reverse-proxy architecture provisioned and managed under [`cloud/`](../cloud).
 

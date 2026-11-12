@@ -38,8 +38,8 @@ variable "enable_snapshots" {
   default     = false
 }
 
-variable "blog_backup_bucket_name" {
-  description = "Globally unique GCS bucket that receives the Oracle blog VM's restic backups"
+variable "backup_bucket_name" {
+  description = "Globally unique GCS bucket that receives the restic backups of every compose stack"
   type        = string
-  default     = "vitorx86-blog-backups"
+  default     = "vitorx86-backups"
 }

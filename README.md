@@ -50,7 +50,7 @@ Manages cloud infrastructure and deployments for hosted sites and services.
 - **Scripts** (stdlib Python, all with `--dry-run`):
   [`bootstrap_vm.py`](./cloud/scripts/bootstrap_vm.py) (Docker, deploy user, swap, sshd, firewall, backup timers; `--check` for drift),
   [`deploy_stack.py`](./cloud/scripts/deploy_stack.py) (rsync + `docker compose up --wait` + HTTPS check; used by CI and locally),
-  [`backup_stack.py`](./cloud/scripts/backup_stack.py) (DB dump + volumes → restic in the other cloud),
+  [`backup_stack.py`](./cloud/scripts/backup_stack.py) (DB dump + volumes → restic in the `vitorx86-backups` GCS bucket),
   [`migrate_gcp_data.py`](./cloud/scripts/migrate_gcp_data.py) (temporary: Cloud SQL/GCS → VMs).
 
 ```bash

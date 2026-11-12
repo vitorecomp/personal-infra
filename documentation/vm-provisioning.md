@@ -5,15 +5,15 @@ The two compose VMs are created with Terraform **run by hand from your workstati
 
 | Root | Cloud | Creates | State (GCS) |
 | :--- | :--- | :--- | :--- |
-| [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga) | GCP project `personal-project-514501` | `taiga-vpc` + subnet + firewall (22, 80/443, ICMP), static IP `taiga-ip`, **e2-micro** VM `taiga` (30 GB pd-standard, Ubuntu 24.04 amd64), SA `taiga-vm`, bucket `vitorx86-blog-backups` + SA `blog-backup-writer` | `gs://personal-project-514501-tfstate/vms/gcp-taiga` |
-| [`cloud/infra/envs/oci-blog`](../cloud/infra/envs/oci-blog) | OCI compartment `vitorecomp` | VCN + IGW + route table + security list + public subnet, **A1.Flex 1 OCPU / 6 GB** VM `blog` (50 GB boot, Ubuntu 24.04 aarch64), reserved public IP, bucket `taiga-backups` | `gs://personal-project-514501-tfstate/vms/oci-blog` |
+| [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga) | GCP project `personal-project-514501` | `taiga-vpc` + subnet + firewall (22, 80/443, ICMP), static IP `taiga-ip`, **e2-micro** VM `taiga` (30 GB pd-standard, Ubuntu 24.04 amd64), SA `taiga-vm`, backup bucket `vitorx86-backups` + SA `stack-backup-writer` | `gs://personal-project-514501-tfstate/vms/gcp-taiga` |
+| [`cloud/infra/envs/oci-blog`](../cloud/infra/envs/oci-blog) | OCI compartment `vitorecomp` | VCN + IGW + route table + security list + public subnet, **A1.Flex 1 OCPU / 6 GB** VM `blog` (50 GB boot, Ubuntu 24.04 aarch64), reserved public IP (+ an empty `taiga-backups` bucket from the old cross-cloud design, removed once the VM exists) | `gs://personal-project-514501-tfstate/vms/oci-blog` |
 | [`cloud/infra/envs/prod`](../cloud/infra/envs/prod) | GCP project `compute-bench` | **Legacy** LB/CDN/Cloud Run/Cloud SQL stack. Only touched again for the final destroy ([§7](#7-decommission-the-legacy-compute-bench-stack-phase-5)). | `gs://compute-bench_cloudbuild/terraform/state/personal-infra-prod` |
 
-Backups always go to the *other* cloud: the blog (OCI) backs up to GCS, Taiga (GCP) backs up to OCI.
+Both stacks back up with restic to the GCS bucket `vitorx86-backups` ([backup-restore.md](./backup-restore.md)).
 
 **Expected cost:** GCP e2-micro + 30 GB pd-standard are free tier; the in-use static IPv4 is billed
 (~US$3.60/month). OCI A1 (≤ 2 OCPU / 12 GB per tenancy), 200 GB block storage and 20 GB object
-storage are Always Free in your home region.
+storage are Always Free in your home region. The backup bucket stays within GCS's 5 GB free tier.
 
 **Safety guards in the code:** `prevent_destroy` on both instances and IPs, GCE `deletion_protection`,
 and `ignore_changes` on boot images/metadata so a new Ubuntu release never plans a replacement.
@@ -103,7 +103,7 @@ cd cloud/infra/envs/oci-blog        # or gcp-taiga
 terraform init
 terraform plan -out tfplan          # review (see §3)
 terraform apply tfplan
-terraform output                    # public_ip, admin_ssh, backup bucket/repository
+terraform output                    # public_ip, admin_ssh, backup bucket/repositories
 ```
 
 Then bootstrap the host ([`cloud/scripts/bootstrap_vm.py`](../cloud/scripts/bootstrap_vm.py)):
@@ -160,8 +160,7 @@ guard to "make the plan pass". In-place updates (`~`) of firewall rules, labels 
 | **Blog VM size** | `ocpus` / `memory_in_gbs` (stay ≤ 2 / 12 for Always Free). Flex shape changes are in-place (reboot). |
 | **Disk snapshots (GCE)** | `enable_snapshots = true` → daily snapshots kept 7 days (billed per GB). restic backups remain the primary safety net. |
 | **Rotate the admin key** | Instance metadata keys are ignored after creation on OCI. Edit `~ubuntu/.ssh/authorized_keys` over SSH, or for GCE change `admin_ssh_public_key` (in-place metadata update). Deploy keys are managed by `bootstrap_vm.py`. |
-| **Blog backup credentials** | `gcloud storage hmac create $(terraform -chdir=cloud/infra/envs/gcp-taiga output -raw blog_backup_writer_email) --project personal-project-514501` → put the access ID/secret in the blog VM `.env` as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. |
-| **Taiga backup credentials** | OCI Console → Profile → *Customer secret keys* → *Generate secret key* → put it in the Taiga VM `.env` (`AWS_ACCESS_KEY_ID` = key's Access Key, `AWS_SECRET_ACCESS_KEY` = secret, `AWS_DEFAULT_REGION` = home region, `RESTIC_REPOSITORY` = `terraform -chdir=cloud/infra/envs/oci-blog output -raw taiga_backup_repository`). |
+| **Backup credentials (per VM)** | `gcloud storage hmac create $(terraform -chdir=cloud/infra/envs/gcp-taiga output -raw backup_writer_email) --project personal-project-514501` → put the access ID/secret in that VM's `.env` as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. Create one key per VM so either can be revoked on its own (`gcloud storage hmac update <ACCESS_ID> --deactivate`). |
 | **Deliberately rebuild a VM** | Restore from restic onto a new VM: comment out `prevent_destroy` *in a dedicated commit*, `terraform apply -replace=module.<vm>.<resource>`, restore `prevent_destroy`, bootstrap, deploy, `backup_stack.py` restore (see [backup-restore.md](./backup-restore.md)). The reserved/static IP is kept, so DNS does not change. |
 
 ---

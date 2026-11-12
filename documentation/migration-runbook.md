@@ -210,7 +210,7 @@ After ~7 days without rollback:
 | A manual apply replaces a VM holding data | `prevent_destroy`, `deletion_protection`, `ignore_changes`, plan review ([vm-provisioning §3](./vm-provisioning.md#3-every-change-plan-review-apply)) |
 | e2-micro (1 GB) too small for Taiga + Postgres | 3 GB swap, 1 gunicorn worker, tuned Postgres; `machine_type = "e2-small"` in place |
 | A1 capacity / halved Always Free limits | 1 OCPU / 6 GB; `availability_domain_index`; PAYG |
-| Oracle reclaims an idle Always Free VM | PAYG upgrade, cross-cloud restic backups, external uptime check |
+| Oracle reclaims an idle Always Free VM | PAYG upgrade, restic backups in GCS (off Oracle), external uptime check |
 | ACME failures / rate limits at cutover | `tls internal` rehearsal, Caddy restart after the flip, persistent `caddy-data` volume |
 | `TAIGA_SECRET_KEY` mismatch logs everyone out | `migrate_gcp_data.py copy-secrets` before Taiga's first boot |
 | Deleting unrelated GCP resources | Only `terraform destroy` on the legacy state; never delete projects or zones |

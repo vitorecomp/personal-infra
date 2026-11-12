@@ -11,5 +11,5 @@ Centralized technical documentation for provisioning, operating, and maintaining
 | **[Pipeline & CI/CD Setup](./pipeline-setup.md)** | Reference for all GitHub Actions workflows, Google Cloud Build pipelines, cross-repository `repository_dispatch` triggers, required GitHub Secrets/Variables, and local deployment scripts. |
 | **[Migration Runbook](./migration-runbook.md)** | Phase-by-phase plan to move off GCP: Vercel for the static sites, Ghost on an OCI A1 VM, Taiga on a GCE e2-micro VM, with cutover checklists, rollback and decommissioning. |
 | **[VM Provisioning (manual Terraform)](./vm-provisioning.md)** | Prerequisites, plan/review/apply procedure and day-2 operations for `cloud/infra/envs/{gcp-taiga,oci-blog}`, plus the legacy `prod` destroy. |
-| **[Backup & Restore](./backup-restore.md)** | restic backups of each compose stack to the other cloud, restore tests and full-restore procedure. |
+| **[Backup & Restore](./backup-restore.md)** | restic backups of each compose stack to the shared GCS bucket, restore tests and full-restore procedure. |
 | **[Workspace Management](./workspace-setup.md)** | Guide to maintaining the GitHub repository inventory (`repo_stats.csv`) and synchronizing local `~/workspace` checkouts. |
