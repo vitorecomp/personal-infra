@@ -1,0 +1,16 @@
+{
+  "name": "taiga",
+  "domain": "taiga.vitorx86.dev",
+  "health_path": "/api/v1/project-templates",
+  "required_files": ["compose.yml", "Caddyfile", ".env.example", "stack.json", "Dockerfile", "nginx.conf", "docker-entrypoint.sh"],
+  "app_repo": null,
+  "pre_build": null,
+  "post_deploy": {
+    "script": "seed_taiga_admin.py",
+    "url_flag": "--taiga-url"
+  },
+  "backup": {
+    "db": {"engine": "postgres", "service": "db", "database": "taiga"},
+    "volumes": ["taiga_media", "taiga_caddy-data"]
+  }
+}

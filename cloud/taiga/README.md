@@ -1,27 +1,35 @@
 # Taiga Project Manager (`cloud/taiga`)
 
-Self-contained container and Cloud Build deployment configuration for hosting **Taiga Project Manager** (`https://taiga.vitorx86.dev`) on **Google Cloud Run v2**, backed by **Cloud SQL for PostgreSQL 15** and a private **Google Cloud Storage** bucket via GCS FUSE behind the shared Global External HTTPS Load Balancer.
+Container + docker compose stack for **Taiga** (`https://taiga.vitorx86.dev`).
 
-## Architecture
+> **Migration in progress** ([runbook](../../documentation/migration-runbook.md)): production still runs on
+> Cloud Run + Cloud SQL (`compute-bench`) until the Phase 4 cutover; the target is the GCE e2-micro VM
+> created by [`cloud/infra/envs/gcp-taiga`](../infra/envs/gcp-taiga).
 
-- **`Dockerfile`**: Multi-stage unified container combining:
-  - `taigaio/taiga-front:latest` (Angular SPA served at `/`)
-  - `taigaio/taiga-back:latest` (Django/Gunicorn REST API & Admin on `127.0.0.1:8000`)
-  - `nginx` gateway listening on port `8080` (`PORT=8080`) routing `/`, `/api`, `/admin`, `/static/`, and `/media/`
-- **`docker-entrypoint.sh`**: Idempotent startup script that:
-  - Links `/taiga-back/media` to `/mnt/taiga-storage/media` when a GCS FUSE bucket is mounted (`TAIGA_STORAGE_SYNC_DIR`)
-  - Renders `/taiga-front/conf.json` dynamically from `TAIGA_URL` and `PUBLIC_REGISTER_ENABLED`
-  - Runs `python manage.py migrate --noinput`
-  - Seeds Scrum & Kanban `initial_project_templates` once and reconciles the initial superuser account (`TAIGA_ADMIN_USER`, `TAIGA_ADMIN_EMAIL`, `TAIGA_ADMIN_PASSWORD`)
-- **`cloudbuild.yaml`**: Builds and pushes the container image to Artifact Registry (`${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_SERVICE_NAME}`).
-- **`docker-compose.yml`**: Local development stack (`postgres:15-alpine` + `taiga` on `http://localhost:8080`).
+## Files
 
-## Deployment Commands
+| File | Purpose |
+| :--- | :--- |
+| `Dockerfile` | One image: `taigaio/taiga-front` SPA + `taigaio/taiga-back` (gunicorn on `127.0.0.1:8000`) + nginx on `:8080`. Base versions pinned with `ARG TAIGA_BACK_VERSION=6.10.2` / `TAIGA_FRONT_VERSION=6.10.3` (the versions production runs; migrations are forward-only, bump deliberately). |
+| `nginx.conf` | Routes `/`, `/api`, `/admin`, `/static/`, `/media/`; honours `X-Forwarded-Proto` from Caddy. |
+| `docker-entrypoint.sh` | Links `/taiga-back/media` to `$TAIGA_STORAGE_SYNC_DIR/media`, renders `conf.json`, runs migrations, seeds templates once, reconciles the superuser from `TAIGA_ADMIN_*`, starts gunicorn + nginx. |
+| `compose.yml` | **Production stack** on the VM: `caddy` (TLS, only service publishing 80/443) → `taiga` (built on the VM) → `postgres:15.19-alpine`. Named volumes `taiga_media`, `taiga_postgres-data`, `taiga_caddy-data`. |
+| `Caddyfile` | `{$STACK_DOMAIN}` → `taiga:8080`; `CADDY_TLS=internal` for rehearsals, ACME email after DNS cutover. |
+| `.env.example` | Keys for `/opt/stacks/taiga/.env` on the VM (mode 0600, never committed, never written by CI). `TAIGA_SECRET_KEY` must be copied from Cloud Run (`migrate_gcp_data.py copy-secrets`). |
+| `stack.json` | Metadata for `deploy_stack.py` / `backup_stack.py` (domain, health path, backup volumes). |
+| `compose.local.yml` | Local development stack (`http://127.0.0.1:8080`). |
+| `cloudbuild.yaml` | Legacy Cloud Run build (removed after the Taiga cutover). |
+
+## Commands
 
 ```bash
-# Preview Cloud Build and Cloud Run deployment commands (safe, read-only)
-python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
+# Deploy / redeploy to the VM (CI does the same via .github/workflows/deploy-taiga.yml)
+python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<taiga-ip> --dry-run
+python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<taiga-ip>
 
-# Build and deploy Taiga to Cloud Run
-python3 cloud/scripts/deploy_taiga.py --deploy
+# Backups (on the VM)
+python3 /opt/stacks/.ops/backup_stack.py --stack taiga --restore-test
+
+# Local development
+docker compose -f cloud/taiga/compose.local.yml up --build
 ```
