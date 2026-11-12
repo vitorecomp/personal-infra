@@ -8,7 +8,7 @@ Instructions and context for AI coding agents working in `personal-infra`.
 
 The repository is organized into four top-level domains:
 
-1. **`cloud/`** — `nobuffer-site` + `personal-portifolio` on Vercel (Git integration on their repos); `personal-blog` (Ghost + local MySQL) on the GCE free-tier e2-micro VM `personal-host` behind a shared Caddy (`cloud/edge`); `taiga` on Cloud Run free tier (built and deployed from GitHub Actions by `cloud/taiga/deploy-cloudrun.sh` as `github-deployer` via Workload Identity Federation, database on Neon Postgres 15, media in GCS). The VM never builds images: the Ghost image is built in CI and pulled from GHCR. Terraform in `cloud/infra/envs/{gcp-taiga,oci-blog}` is applied from a workstation, never in CI (`documentation/vm-provisioning.md`); `oci-blog` is a spare OCI A1 VM still being acquired by `tf_apply_retry.sh`, run every 10 min by the `oci-blog-retry.service` unit on the VM (`documentation/vm-provisioning.md`). DNS is on Cloudflare. Also holds reverse-proxy configs for a separate Nginx server.
+1. **`cloud/`** — `nobuffer-site` + `personal-portifolio` on Vercel (Git integration on their repos); `personal-blog` (Ghost + local MySQL) on the GCE free-tier e2-micro VM `personal-host` behind a shared Caddy (`cloud/edge`); `taiga` on Cloud Run free tier (built and deployed from GitHub Actions by `cloud/taiga/deploy-cloudrun.sh` as `github-deployer` via Workload Identity Federation, database on Neon Postgres 15, media in GCS). The VM never builds images: the Ghost image is built in CI and pulled from GHCR. Terraform in `cloud/infra/envs/{gcp-taiga,oci-blog}` is applied from a workstation, never in CI (`documentation/vm-provisioning.md`); `oci-blog` is a spare OCI A1 VM still being acquired by `tf_apply_retry.sh`, run every 10 min by the `oci-blog-retry.service` unit on the VM (`documentation/vm-provisioning.md`). DNS is on Cloudflare.
 2. **`home-server/`** — Home server workloads, self-hosted services, networking, and maintenance _(specification pending)_.
 3. **`linux/`** — Linux system bootstrap, package installation, dotfiles, and OS configuration _(specification pending)_.
 4. **`workspace/`** — Local `~/workspace` directory orchestration and GitHub repository synchronization.
@@ -40,9 +40,8 @@ personal-infra/
 │           └── taiga_cli.py                # Canonical CLI for Taiga projects, sprints, stories, tasks, issues & wiki
 ├── .github/workflows/
 │   ├── ci.yml                              # Secret scan, Python syntax/dry-run checks, Terraform fmt/validate (no apply), compose/Caddy validation
-│   ├── deploy-blog.yml                     # Runner builds Ghost -> GHCR; SSH: edge + blog pull/restart on the GCP VM (gated by BLOG_DEPLOY_ENABLED)
-│   ├── deploy-taiga.yml                    # Runner (WIF): Taiga build/migrate/Cloud Run; SSH: edge + Taiga backup .env (gated by TAIGA_DEPLOY_ENABLED)
-│   ├── deploy-nginx-sites.yml              # Deploys reverse-proxy vhosts to server via SSH
+│   ├── deploy-blog.yml                     # Runner builds Ghost -> GHCR; SSH: edge + blog pull/restart on the GCP VM
+│   ├── deploy-taiga.yml                    # Runner (WIF): Taiga build/migrate/Cloud Run; SSH: edge + Taiga backup .env
 │   └── update-repo-stats.yml               # Scheduled/manual sync of repo_stats.csv
 ├── mise.toml                               # Workstation tool pins (terraform)
 ├── cloud/                                  # Cloud infrastructure and deployment automation
@@ -53,8 +52,7 @@ personal-infra/
 │   │   ├── envs/gcp-taiga/                 # VM + Taiga Cloud Run/AR/secrets/media bucket + backup bucket (personal-project-514501); applied by hand
 │   │   └── envs/oci-blog/                  # Spare OCI A1 VM (capacity retry loop); applied by hand, not used yet
 │   ├── nobuffer-site/                      # The site itself deploys to Vercel from its own repo
-│   │   ├── maintenance/                    # Containerized static maintenance page
-│   │   └── reverse-proxy/                  # Nginx vhost configs (*.vitorx86.dev)
+│   │   └── maintenance/                    # Containerized static maintenance page
 │   ├── personal-blog/
 │   │   ├── compose.yml                     # Ghost (CI-built image from GHCR, digest in GHOST_IMAGE) + local MySQL 8.0; joins the edge network
 │   │   └── .env.example, stack.json        # VM .env template & deploy/backup metadata

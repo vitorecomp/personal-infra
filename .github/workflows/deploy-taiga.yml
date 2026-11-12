@@ -4,8 +4,7 @@ name: Deploy Taiga (Cloud Run)
 #    Identity Federation (no keys stored anywhere). The e2-micro VM does none of this work.
 # 2. vm: refreshes the shared edge proxy and Taiga's backup .env on the VM over SSH (rsync + a
 #    Caddy `compose up`), then checks https://taiga.vitorx86.dev end to end through the VM.
-# Gated by the repository variable TAIGA_DEPLOY_ENABLED. Secrets/variables live in the GitHub
-# Environment "taiga-prod"; GCP_WIF_PROVIDER / GCP_DEPLOY_SA are repository variables
+# Secrets/variables live in the GitHub Environment "taiga-prod"; GCP_WIF_PROVIDER / GCP_DEPLOY_SA are repository variables
 # (terraform output in cloud/infra/envs/gcp-taiga; see documentation/pipeline-setup.md).
 on:
   workflow_dispatch:
@@ -31,7 +30,6 @@ permissions:
 jobs:
   cloud-run:
     name: Build, migrate and deploy to Cloud Run
-    if: vars.TAIGA_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     environment:
       name: taiga-prod
