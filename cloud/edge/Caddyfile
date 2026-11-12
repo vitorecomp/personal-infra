@@ -1,0 +1,20 @@
+# One site block per stack. Upstreams are the aliases the app stacks register on the
+# `edge` network (taiga-app, blog-ghost); unknown hostnames get no certificate.
+{
+	email {$ACME_EMAIL}
+	servers {
+		protocols h1 h2
+	}
+}
+
+taiga.vitorx86.dev {
+	tls {$TAIGA_TLS}
+	encode zstd gzip
+	reverse_proxy taiga-app:8080
+}
+
+blog.vitorx86.dev {
+	tls {$BLOG_TLS}
+	encode zstd gzip
+	reverse_proxy blog-ghost:2368
+}

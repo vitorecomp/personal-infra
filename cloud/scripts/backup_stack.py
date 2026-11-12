@@ -106,7 +106,9 @@ class Backup:
             print("[skip] stack.json has no backup.db section")
             return None
         stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        engine, service = db["engine"], db["service"]
+        engine, service = db["engine"], db.get("service", "db")
+        if db.get("mode") == "remote":
+            return self.dump_remote_database(db, stamp)
         if engine == "mysql":
             target = self.dump_dir / f"{self.name}-db-{stamp}.sql.gz"
             inner = ('MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump -uroot --single-transaction --quick '
@@ -144,6 +146,58 @@ class Backup:
             return None
         os.replace(tmp, target)
         print(f"[ok] Dumped {engine} database -> {target} ({target.stat().st_size} bytes)")
+        return target
+
+    def dump_remote_database(self, db: dict[str, str], stamp: str) -> Path | None:
+        """Dumps a managed database (e.g. Neon) with a client container; the password stays in the env."""
+        prefix, engine = db["env_prefix"], db["engine"]
+        cfg = {k: self.env.get(prefix + k, "") for k in ("HOST", "PORT", "NAME", "USER", "PASSWORD", "SSLMODE")}
+        missing = [prefix + k for k in ("HOST", "NAME", "USER", "PASSWORD") if cfg[k] in PLACEHOLDERS]
+        if missing and not self.dry_run:
+            print(f"[error] {self.env_file} lacks remote DB settings: {', '.join(missing)}", file=sys.stderr)
+            return None
+        if engine == "postgres":
+            target = self.dump_dir / f"{self.name}-db-{stamp}.dump"
+            image = db.get("client_image", "postgres:18-alpine")
+            env_keys = {"PGPASSWORD": cfg["PASSWORD"], "PGSSLMODE": cfg["SSLMODE"] or "require"}
+            cmd = ["docker", "run", "--rm", "-e", "PGPASSWORD", "-e", "PGSSLMODE", image,
+                   "pg_dump", "-h", cfg["HOST"], "-p", cfg["PORT"] or "5432", "-U", cfg["USER"], "-d", cfg["NAME"],
+                   "-Fc", "--no-owner", "--no-acl"]
+        elif engine == "mysql":
+            target = self.dump_dir / f"{self.name}-db-{stamp}.sql.gz"
+            image = db.get("client_image", "mysql:8.0.46")
+            env_keys = {"MYSQL_PWD": cfg["PASSWORD"]}
+            cmd = ["docker", "run", "--rm", "-e", "MYSQL_PWD", image, "mysqldump", "-h", cfg["HOST"], "-P", cfg["PORT"] or "3306",
+                   "-u", cfg["USER"], "--single-transaction", "--quick", "--no-tablespaces", "--set-gtid-purged=OFF",
+                   "--default-character-set=utf8mb4", cfg["NAME"]]
+        else:
+            print(f"[error] unsupported db engine {engine!r}", file=sys.stderr)
+            return None
+        if self.dry_run:
+            self.say_cmd(cmd)
+            print(f"[dry-run] Would write {target} (mode 0600)")
+            return target
+        return self._stream_dump(cmd, target, compress=(engine == "mysql"), env={**os.environ, **env_keys}, label=f"remote {engine}")
+
+    def _stream_dump(self, cmd: list[str], target: Path, compress: bool, env: dict[str, str] | None, label: str) -> Path | None:
+        self.dump_dir.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".partial")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as raw:
+            sink = gzip.GzipFile(fileobj=raw, mode="wb") if compress else raw
+            proc = subprocess.Popen(cmd, cwd=self.stack_dir, stdout=subprocess.PIPE, env=env)
+            assert proc.stdout is not None
+            for chunk in iter(lambda: proc.stdout.read(1 << 20), b""):
+                sink.write(chunk)
+            if sink is not raw:
+                sink.close()
+            rc = proc.wait()
+        if rc != 0 or tmp.stat().st_size == 0:
+            tmp.unlink(missing_ok=True)
+            print(f"[error] {label} dump failed (exit {rc})", file=sys.stderr)
+            return None
+        os.replace(tmp, target)
+        print(f"[ok] Dumped {label} database -> {target} ({target.stat().st_size} bytes)")
         return target
 
     def prune_local(self, keep: int) -> None:

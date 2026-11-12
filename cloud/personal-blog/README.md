@@ -1,10 +1,8 @@
 # Personal Blog (`cloud/personal-blog`)
 
-docker compose stack for the **Ghost 5** blog (`https://blog.vitorx86.dev`) on the OCI Always Free A1 VM
-created by [`cloud/infra/envs/oci-blog`](../infra/envs/oci-blog).
-
-> **Migration in progress** ([runbook](../../documentation/migration-runbook.md)): production still runs on
-> Cloud Run + Cloud SQL MySQL (`compute-bench`) until the Phase 3 cutover.
+docker compose stack for the **Ghost 5** blog (`https://blog.vitorx86.dev`) on the GCE e2-micro VM
+(`cloud/infra/envs/gcp-taiga`), next to Taiga. TLS and routing come from the shared edge proxy
+([`cloud/edge`](../edge)); Ghost joins the `edge` network as `blog-ghost` and publishes no ports.
 
 The Ghost image (Ghost + `vitorx86-garage` theme + entrypoint) comes from
 [`vitorecomp/personal-blog`](https://github.com/vitorecomp/personal-blog), which `deploy_stack.py` checks out
@@ -13,14 +11,15 @@ on the VM into `/opt/stacks/personal-blog/app` at the requested ref. Pushes to t
 
 | File | Purpose |
 | :--- | :--- |
-| `compose.yml` | `caddy` (TLS, only service publishing 80/443) → `ghost` (built from `./app`, `GHOST_VERSION` build arg, content on volume `personal-blog_ghost-content`) → `mysql:8.0.46` (tuned for a small VM, binlog off). |
-| `Caddyfile` | `{$STACK_DOMAIN}` → `ghost:2368`; `CADDY_TLS=internal` for rehearsals, ACME email after DNS cutover. |
+| `compose.yml` | `ghost` (built from `./app`, `GHOST_VERSION` build arg, heap capped, content on volume `personal-blog_ghost-content`) + local `mysql:8.0.46` (tuned for a shared 1 GB VM, binlog off, private network). |
 | `.env.example` | Keys for `/opt/stacks/personal-blog/.env` on the VM (mode 0600, never committed, never written by CI). |
-| `stack.json` | Metadata for `deploy_stack.py` / `backup_stack.py` (app repo, theme-validation `pre_build`, backup volumes). |
-| `cloudbuild.yaml` | Legacy Cloud Run build (removed after the blog cutover). |
+| `stack.json` | Metadata for `deploy_stack.py` / `backup_stack.py` (app repo, theme-validation `pre_build`, `edge_tls_key: BLOG_TLS`, backup). |
+| `cloudbuild.yaml` | Legacy Cloud Run build (removed with the old GCP stack). |
+
+The final data of the old GCP blog is restored from the saved export
+(`gs://vitorx86-backups/migration/personal-blog/`, see the migration runbook).
 
 ```bash
-python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@<blog-ip> --app-ref main --dry-run
-python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@<blog-ip> --app-ref main
-ssh deploy@<blog-ip> 'cd /opt/stacks/personal-blog && docker compose ps && docker compose logs --tail 50 ghost'
+python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@<vm> --identity-file ~/.ssh/blog_deploy --dry-run
+ssh -i ~/.ssh/blog_deploy deploy@<vm> 'cd /opt/stacks/personal-blog && docker compose ps && docker compose logs --tail 50 ghost'
 ```

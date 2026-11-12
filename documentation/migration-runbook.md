@@ -7,8 +7,8 @@ Cloud SQL, Cloud Build) to:
 | :--- | :--- | :--- | :--- |
 | `nobuffer-site` | Vercel (Git integration) | `vitorx86.dev`, `www.vitorx86.dev` | none |
 | `personal-portifolio` | Vercel (Git integration) | `me.vitorx86.dev`, `cases.vitorx86.dev` | none |
-| `personal-blog` (Ghost 5.130) | OCI A1 VM, [`cloud/personal-blog`](../cloud/personal-blog) | `blog.vitorx86.dev` | MySQL `ghost` + `blog-content-compute-bench` |
-| `taiga` (back 6.10.2 / front 6.10.3) | GCE e2-micro VM, [`cloud/taiga`](../cloud/taiga) | `taiga.vitorx86.dev` | Postgres `taiga` + `taiga-content-compute-bench` |
+| `personal-blog` (Ghost 5.130) | GCE e2-micro VM (same as Taiga) + local MySQL, [`cloud/personal-blog`](../cloud/personal-blog) | `blog.vitorx86.dev` | MySQL `ghost` + `blog-content-compute-bench` |
+| `taiga` (back 6.10.2 / front 6.10.3) | GCE e2-micro VM, database on Neon Postgres 15, [`cloud/taiga`](../cloud/taiga) | `taiga.vitorx86.dev` | Postgres `taiga` + `taiga-content-compute-bench` |
 
 DNS records live in Cloud DNS zone `vitorx86-dev` in project **`study-deploys`** and are changed **by hand**.
 Rollback for every step is "point the record back at the old LB IP `34.110.226.37`" until Phase 5.
@@ -93,9 +93,13 @@ by Vercel; the GCS pipeline (`build-website.yml`, `build-portfolio.yml`, Cloud B
    `cloud/personal-portifolio/`, `download_nobuffer_site.py`, `download_personal_portifolio.py` and their
    `ci.yml` dry-run lines.
 
-## Phase 3: Blog to Oracle
+## Phase 3: Blog to the GCP VM
 
-Do the blog first: it has the least data at risk and tests the riskiest provider (iptables, ARM, reclamation).
+**Change of plan (2026-11-12):** the blog runs on the same GCE e2-micro as Taiga (Ghost + a small local MySQL),
+behind the shared edge Caddy (`cloud/edge`). Taiga's Postgres moved to Neon to free the memory MySQL needs.
+The Oracle A1 VM is still being acquired by the capacity retry loop but no stack depends on it.
+The original Oracle steps below stay for reference; for the GCP VM, skip the Terraform/bootstrap part,
+deploy with `--identity-file ~/.ssh/blog_deploy`, and switch `BLOG_TLS` in `/opt/stacks/edge/.env` at cutover.
 
 **Build-out**
 
@@ -193,6 +197,22 @@ Same flow as Phase 3, with these differences:
    `python3 workspace/scripts/enroll_taiga_projects.py --dry-run` work against the VM.
 6. Follow-up PR: delete `build-taiga.yml`, `cloud/taiga/cloudbuild.yaml`, `deploy_taiga.py`; switch
    `_resolve_password_from_cloud_run()` in `taiga_cli.py`/`enroll_taiga_projects.py` to env-only; update `ci.yml`.
+
+## Taiga database on Neon (2026-11-12)
+
+Taiga's data moved from the VM's local Postgres to **Neon** (managed Postgres **15**, AWS us-east-2, ~24 ms
+from the VM) to free memory for the blog's MySQL on the same e2-micro. Exact row counts matched after the move.
+
+- Taiga 6.10 needs Postgres **≤ 15**: its `json_object_delete_keys(json json, ...)` function is a syntax error on
+  16+ (`json` became a keyword), so the Neon project must stay on 15.
+- Connection settings live in `/opt/stacks/taiga/.env` (`TAIGA_DB_*`, direct endpoint, not `-pooler`) and in the
+  `taiga-prod` GitHub environment, from which `deploy-taiga.yml` syncs them (`deploy_stack.py --sync-env`).
+  Taiga's settings read `POSTGRES_SSLMODE` (default `disable`), so the compose file sets it to `require`.
+- The container health check never touches the database, so Neon's compute can scale to zero (free plan:
+  100 CU-hours/month per project).
+- Backups dump Neon remotely with a `postgres:15` client (`backup_stack.py`, `mode: remote`).
+- The old local Postgres volume `taiga_postgres-data` is kept on the VM for rollback; delete it once Neon has
+  run a while (`docker volume rm taiga_postgres-data`).
 
 ## Phase 5: Decommission `compute-bench`
 

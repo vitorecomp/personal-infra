@@ -1,8 +1,9 @@
 {
   "name": "personal-blog",
   "domain": "blog.vitorx86.dev",
+  "edge_tls_key": "BLOG_TLS",
   "health_path": "/ghost/api/admin/site/",
-  "required_files": ["compose.yml", "Caddyfile", ".env.example", "stack.json"],
+  "required_files": ["compose.yml", ".env.example", "stack.json"],
   "app_repo": {
     "url": "https://github.com/vitorecomp/personal-blog.git",
     "default_ref": "main",
@@ -18,6 +19,6 @@
   },
   "backup": {
     "db": {"engine": "mysql", "service": "db", "database": "ghost"},
-    "volumes": ["personal-blog_ghost-content", "personal-blog_caddy-data"]
+    "volumes": ["personal-blog_ghost-content"]
   }
 }

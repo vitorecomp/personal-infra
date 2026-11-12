@@ -1,0 +1,41 @@
+# Shared TLS edge for every stack on the GCP VM (35.255.9.34).
+#
+# One Caddy owns ports 80/443 and routes each hostname to its app container over the
+# `edge` docker network (app stacks join it as an external network with a fixed alias).
+# Deployed by cloud/scripts/deploy_stack.py --stack edge; `.env` holds the per-site TLS mode.
+name: edge
+
+services:
+  caddy:
+    image: caddy:2.11.9-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:-vitor.ecomp@gmail.com}
+      # Per site: the ACME email => Let's Encrypt; "internal" => local CA while DNS points elsewhere.
+      TAIGA_TLS: ${TAIGA_TLS:-vitor.ecomp@gmail.com}
+      BLOG_TLS: ${BLOG_TLS:-vitor.ecomp@gmail.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2019/config/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  edge:
+    name: edge
+    external: true # created by deploy_stack.py (shared with every app stack)
+
+volumes:
+  caddy-data:
+    name: edge_caddy-data
+  caddy-config:
+    name: edge_caddy-config
