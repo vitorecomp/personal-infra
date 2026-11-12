@@ -86,7 +86,9 @@ resource "google_storage_bucket_iam_member" "backup_writer" {
 # image version kept in Artifact Registry, 3 secret versions.
 
 locals {
-  taiga_secrets = toset(["taiga-secret-key", "taiga-db-password"])
+  taiga_runtime_secrets = toset(["taiga-secret-key", "taiga-db-password"]) # mounted into Cloud Run
+  # taiga-admin-password is only for the migrate step on the VM and local tooling (taiga_cli.py).
+  taiga_secrets = setunion(local.taiga_runtime_secrets, toset(["taiga-admin-password"]))
   vm_sa_member  = "serviceAccount:${module.taiga_vm.service_account_email}"
 }
 
@@ -160,7 +162,7 @@ resource "google_secret_manager_secret" "taiga" {
 }
 
 resource "google_secret_manager_secret_iam_member" "taiga_run_access" {
-  for_each  = local.taiga_secrets
+  for_each  = local.taiga_runtime_secrets
   secret_id = google_secret_manager_secret.taiga[each.value].id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.taiga_run.email}"
