@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """Deploys a docker compose stack from cloud/<stack>/ to a VM over SSH (one path for local and CI).
 
+The VM never builds anything: images are built on the GitHub runner (or are pinned upstream
+images) and only pulled here, so a deploy costs the e2-micro a pull and a container restart.
+
 Steps (all idempotent, re-running converges):
 1. Validates cloud/<stack>/stack.json and its required files locally.
 2. rsyncs the stack directory to <remote-root>/<stack>/ (never touching .env, app/, .migration/)
    and ships backup_stack.py to <remote-root>/.ops/.
 3. Optionally creates the remote .env from .env.example (--init-env): `__generate__` values are
    generated ON THE VM, `__required__` values must be filled in by hand. Existing files are kept.
+   --sync-env writes named values from this process' environment (e.g. GitHub secrets) into it.
 4. Preflights the remote .env: exists, mode 0600, every key from .env.example present and filled.
    Only key names are ever printed, never values.
-5. Clones/fetches the app repo (if stack.json has one) at --app-ref.
-6. Under flock: pre_build hook, `compose pull`, `compose build --pull`, `compose up -d --wait`, prune.
-7. HTTPS health check against the VM IP with the real SNI/Host (never through public DNS).
-8. Runs the stack's post-deploy seed script and records a .deployed marker.
+5. Under flock: `compose pull` (with a throwaway registry login when $REGISTRY_TOKEN is set),
+   `compose up -d --wait`, recreate drifted services, prune. Stacks without compose.yml (Taiga runs
+   on Cloud Run) only keep their .env + backup metadata on the VM.
+6. HTTPS health check against the VM IP with the real SNI/Host (never through public DNS).
+7. Runs the stack's post-deploy seed script and records a .deployed marker.
 
 `--dry-run` prints every command without opening any network connection.
 """
@@ -39,7 +44,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 CLOUD_ROOT = SCRIPT_DIR.parent
 REPO_ROOT = CLOUD_ROOT.parent
 DEFAULT_REMOTE_ROOT = "/opt/stacks"
-APP_REF_PATTERN = re.compile(r"^(?:[0-9a-f]{7,40}|[A-Za-z0-9._/-]{1,100})$")
+REGISTRY_PATTERN = re.compile(r"^[a-z0-9.-]+(?::[0-9]+)?$")
 RSYNC_EXCLUDES = (".env", "app/", ".migration/", ".deployed", ".deploy.lock", "compose.local.yml", "repo/")
 PLACEHOLDERS = ("__generate__", "__required__")
 
@@ -51,11 +56,13 @@ class Stack:
     domain: str
     health_path: str
     required_files: list[str]
-    app_repo: dict[str, str] | None
-    pre_build: list[str] | None
     post_deploy: dict[str, str] | None
     edge_tls_key: str | None
-    up_script: str | None
+    registry: str | None
+
+    @property
+    def has_compose(self) -> bool:
+        return (self.path / "compose.yml").is_file()
 
 
 def available_stacks() -> list[str]:
@@ -74,11 +81,9 @@ def load_stack(name: str) -> Stack:
         domain=meta.get("domain"),
         health_path=meta.get("health_path"),
         required_files=list(meta.get("required_files", [])),
-        app_repo=meta.get("app_repo"),
-        pre_build=meta.get("pre_build"),
         post_deploy=meta.get("post_deploy"),
         edge_tls_key=meta.get("edge_tls_key"),
-        up_script=meta.get("up_script"),
+        registry=meta.get("registry"),
     )
 
 
@@ -88,13 +93,6 @@ def validate_stack_files(stack: Stack) -> bool:
         print(f"[error] {stack.path} is missing required files: {', '.join(missing)}", file=sys.stderr)
         return False
     print(f"[ok] {stack.name}: required files present ({len(stack.required_files)})")
-    return True
-
-
-def validate_app_ref(ref: str) -> bool:
-    if not APP_REF_PATTERN.match(ref) or ".." in ref or ref.startswith("-"):
-        print(f"[error] Refusing suspicious --app-ref {ref!r}", file=sys.stderr)
-        return False
     return True
 
 
@@ -230,7 +228,7 @@ if mode == "check":
     compose_text = open(compose_path).read() if os.path.exists(compose_path) else None
     # Keys interpolated by compose.yml block the deploy; the rest (e.g. backup credentials)
     # only warn, because nothing at runtime depends on them. Stacks without compose.yml
-    # (custom up_script) treat every key as required.
+    # (the .env only feeds backups) treat every key as required.
     used = lambda k: compose_text is None or ("${" + k + "}" in compose_text) or ("${" + k + ":" in compose_text)
     bad = [k for k in example if k not in env or env[k] in ("", "__generate__", "__required__")]
     blocking = [k for k in bad if used(k)]
@@ -397,7 +395,9 @@ print(" ".join(stale))
 """
 
 
-def build_up_script(stack: Stack, stack_dir: str, skip_build: bool) -> str:
+def up_script(stack: Stack, stack_dir: str, skip_pull: bool, registry_user: str | None) -> str:
+    """Remote script: pull + up --wait. With registry_user, the token arrives on stdin (first line)
+    and lives only in a throwaway DOCKER_CONFIG for the duration of the pull."""
     compose = f"docker compose -p {shlex.quote(stack.name)} -f compose.yml"
     lines = [
         f"cd {shlex.quote(stack_dir)}",
@@ -406,28 +406,28 @@ def build_up_script(stack: Stack, stack_dir: str, skip_build: bool) -> str:
         # Shared network for the edge proxy and every app stack (declared external everywhere).
         "docker network inspect edge >/dev/null 2>&1 || docker network create edge >/dev/null",
     ]
-    if stack.pre_build:
-        app_dir = f"{stack_dir}/{(stack.app_repo or {}).get('path', 'app')}"
-        hook = [part.replace("{app}", app_dir) for part in stack.pre_build]
-        lines += ["echo '[deploy] pre_build hook'", shlex.join(hook)]
-    if stack.up_script:
-        # The stack deploys itself (e.g. Taiga -> Cloud Run); the VM only provides build/run tooling.
-        lines += [f"bash ./{shlex.quote(stack.up_script)}", "docker builder prune -f --filter until=168h >/dev/null"]
-        return "\n".join(lines)
-    lines.append(f"{compose} pull --ignore-buildable --quiet")
-    if not skip_build:
-        # No provenance/SBOM attestations: unchanged sources then rebuild to the same image ID.
-        lines.append(f"BUILDX_NO_DEFAULT_ATTESTATIONS=1 {compose} build --pull")
+    if not skip_pull and registry_user and stack.registry:
+        lines += [
+            'cfg="$(mktemp -d)"',
+            "trap 'rm -rf \"$cfg\"' EXIT",
+            "IFS= read -r registry_token",
+            f'printf \'%s\' "$registry_token" | docker --config "$cfg" login {shlex.quote(stack.registry)} '
+            f"-u {shlex.quote(registry_user)} --password-stdin >/dev/null",
+            "unset registry_token",
+            f'DOCKER_CONFIG="$cfg" {compose} pull --quiet',
+            'rm -rf "$cfg"',
+        ]
+    elif not skip_pull:
+        lines.append(f"{compose} pull --quiet")
     lines += [
         f"{compose} up -d --remove-orphans --wait --wait-timeout 900",
-        # `up` compares service config, not the image behind a tag, so a rebuilt `app:local` or a
-        # re-pulled tag would keep the old container. Recreate exactly the services that drifted.
+        # `up` compares service config, not the image behind a tag, so a re-pulled tag would keep
+        # the old container. Recreate exactly the services that drifted.
         f"stale=$({compose} config --format json | python3 -c {shlex.quote(_STALE_SERVICES)})",
         f'if [ -n "$stale" ]; then echo "[deploy] recreating services on a new image: $stale"; '
         f"{compose} up -d --no-deps --force-recreate --wait --wait-timeout 900 $stale; fi",
         f"{compose} ps",
         "docker image prune -f >/dev/null",
-        "docker builder prune -f --filter until=168h >/dev/null",
     ]
     return "\n".join(lines)
 
@@ -437,8 +437,10 @@ def deploy(args: argparse.Namespace) -> int:
     if not validate_stack_files(stack):
         return 1
 
-    app_ref = args.app_ref or (stack.app_repo or {}).get("default_ref", "")
-    if stack.app_repo and not validate_app_ref(app_ref):
+    registry_token = os.environ.get("REGISTRY_TOKEN", "")
+    registry_user = os.environ.get("REGISTRY_USER", "") or None
+    if stack.registry and not REGISTRY_PATTERN.match(stack.registry):
+        print(f"[error] stack.json registry {stack.registry!r} is not a registry host", file=sys.stderr)
         return 1
 
     remote_root = args.remote_root.rstrip("/")
@@ -476,36 +478,24 @@ def deploy(args: argparse.Namespace) -> int:
             print("[error] Fix the remote .env (see .env.example) and re-run.", file=sys.stderr)
             return 1
 
-        # 4. App repo
-        app_sha = ""
-        if stack.app_repo:
-            app_dir = f"{stack_dir}/{stack.app_repo.get('path', 'app')}"
-            result = remote.run(
-                f"if [ ! -d {shlex.quote(app_dir)}/.git ]; then git clone --quiet --depth 1 "
-                f"{shlex.quote(stack.app_repo['url'])} {shlex.quote(app_dir)}; fi\n"
-                f"git -C {shlex.quote(app_dir)} fetch --quiet --depth 1 origin {shlex.quote(app_ref)}\n"
-                f"git -C {shlex.quote(app_dir)} checkout --quiet --force --detach FETCH_HEAD\n"
-                f"git -C {shlex.quote(app_dir)} rev-parse HEAD",
-                capture=True,
-                describe=f"clone/fetch {stack.app_repo['url']}@{app_ref} into {app_dir}",
-            )
+        # 4. Pull + up (nothing is built on the VM)
+        if not stack.has_compose:
+            print(f"[ok] {stack.name} has no compose.yml: the VM only keeps its .env + backup metadata")
+        else:
+            # Throwaway login only for stacks with a private-capable registry (e.g. GHCR + the job's GITHUB_TOKEN).
+            login = bool(stack.registry and registry_user and registry_token)
+            print(f"[deploy] Pulling and starting {stack.name} on {args.host}"
+                  f"{f' (temporary {stack.registry} login)' if login else ''} ...")
+            result = remote.run(up_script(stack, stack_dir, args.skip_pull, registry_user if login else None),
+                                input_text=(registry_token + "\n") if login else None,
+                                describe="compose pull/up --wait + prune")
             if result.returncode != 0:
-                print(f"[error] Could not check out {app_ref}: {result.stderr.strip()}", file=sys.stderr)
+                print(f"[error] docker compose up failed ({result.returncode}); inspect with: "
+                      f"ssh {args.host} 'cd {stack_dir} && docker compose ps && docker compose logs --tail 100'",
+                      file=sys.stderr)
                 return 1
-            app_sha = (result.stdout or "").strip().splitlines()[-1] if result.stdout else app_ref
-            print(f"[ok] App repo at {app_sha or app_ref}")
 
-        # 5. Build + up
-        print(f"[deploy] Building and starting {stack.name} on {args.host} ...")
-        result = remote.run(build_up_script(stack, stack_dir, args.skip_build),
-                            describe=f"run {stack.up_script}" if stack.up_script else "compose pull/build/up --wait + prune")
-        if result.returncode != 0:
-            print(f"[error] docker compose up failed ({result.returncode}); inspect with: "
-                  f"ssh {args.host} 'cd {stack_dir} && docker compose ps && docker compose logs --tail 100'",
-                  file=sys.stderr)
-            return 1
-
-        # 6. Health check against the VM itself (through the edge proxy)
+        # 5. Health check against the VM itself (through the edge proxy)
         insecure = args.insecure_health_check or edge_tls_mode(remote, remote_root, stack) == "internal"
         connect_ip = args.connect_ip or ("<vm-ip>" if args.dry_run else remote.resolve_ip())
         if not (stack.domain and stack.health_path):
@@ -519,7 +509,7 @@ def deploy(args: argparse.Namespace) -> int:
             if not args.skip_health_check and not https_check(connect_ip, stack.domain, stack.health_path, insecure):
                 return 1
 
-        # 7. Post-deploy seed/verification
+        # 6. Post-deploy seed/verification
         if stack.post_deploy and not args.skip_seed:
             seed_cmd = [
                 sys.executable, str(SCRIPT_DIR / stack.post_deploy["script"]),
@@ -535,12 +525,10 @@ def deploy(args: argparse.Namespace) -> int:
                 print("[error] Post-deploy seed/verification failed", file=sys.stderr)
                 return 1
 
-        # 8. Marker (no secrets)
+        # 7. Marker (no secrets)
         marker = json.dumps({
             "stack": stack.name,
             "infra_sha": local_git_sha(),
-            "app_ref": app_ref,
-            "app_sha": app_sha,
             "deployed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "actor": os.environ.get("GITHUB_ACTOR") or os.environ.get("USER", "unknown"),
             "run_id": os.environ.get("GITHUB_RUN_ID", ""),
@@ -563,12 +551,11 @@ def main() -> None:
         ),
         help="SSH target (user@host or ~/.ssh/config alias). Defaults to $DEPLOY_USER@$DEPLOY_HOST.",
     )
-    parser.add_argument("--app-ref", default=os.environ.get("APP_REF", ""), help="App repo ref/SHA (default: stack.json default_ref or $APP_REF)")
     parser.add_argument("--remote-root", default=os.environ.get("DEPLOY_REMOTE_ROOT", DEFAULT_REMOTE_ROOT), help=f"Remote stacks root (default: {DEFAULT_REMOTE_ROOT})")
     parser.add_argument("--identity-file", type=Path, default=Path(os.environ["DEPLOY_SSH_IDENTITY"]).expanduser() if os.environ.get("DEPLOY_SSH_IDENTITY") else None, help="SSH private key (default: ssh-agent / $DEPLOY_SSH_IDENTITY)")
     parser.add_argument("--connect-ip", default=os.environ.get("DEPLOY_CONNECT_IP", ""), help="IP for the HTTPS check (default: resolved from --host)")
     parser.add_argument("--init-env", action="store_true", help="Create the remote .env from .env.example if missing (secrets generated on the VM)")
-    parser.add_argument("--skip-build", action="store_true", help="Skip `docker compose build` (restart with existing images)")
+    parser.add_argument("--skip-pull", action="store_true", help="Skip `docker compose pull` (restart with the images already on the VM)")
     parser.add_argument("--skip-health-check", action="store_true", help="Skip the HTTPS health check")
     parser.add_argument("--skip-seed", action="store_true", help="Skip the post-deploy seed/verification script")
     parser.add_argument("--sync-env", default=os.environ.get("DEPLOY_SYNC_ENV", ""), help="Comma-separated env var names whose values (from this process' environment, e.g. GitHub secrets) are written into the remote .env")

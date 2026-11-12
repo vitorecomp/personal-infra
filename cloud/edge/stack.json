@@ -2,9 +2,12 @@
   "name": "edge",
   "domain": null,
   "health_path": null,
-  "required_files": ["compose.yml", "Caddyfile", ".env.example", "stack.json"],
-  "app_repo": null,
-  "pre_build": null,
+  "required_files": [
+    "compose.yml",
+    "Caddyfile",
+    ".env.example",
+    "stack.json"
+  ],
   "post_deploy": null,
   "backup": null
 }
