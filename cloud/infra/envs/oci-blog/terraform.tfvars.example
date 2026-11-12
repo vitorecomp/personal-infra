@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+# oci_profile = "DEFAULT"
+region           = "sa-saopaulo-1"                    # your tenancy HOME region
+tenancy_ocid     = "ocid1.tenancy.oc1..aaaaexample"   # 'tenancy' from ~/.oci/config
+compartment_ocid = "ocid1.compartment.oc1..aaaaexample" # vitorecomp (tenancy OCID if it is the root)
+
+# ocpus                     = 1
+# memory_in_gbs             = 6
+# availability_domain_index = 0   # bump on "Out of host capacity"
+
+admin_ssh_public_key = "ssh-ed25519 AAAA... you@workstation"
+
+# Your public IP until DNS cutover (curl -s https://api.ipify.org), then ["0.0.0.0/0"].
+web_source_cidrs = ["203.0.113.10/32"]
