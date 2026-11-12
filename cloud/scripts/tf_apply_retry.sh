@@ -27,6 +27,8 @@ USE_ADC=false
 DRY_RUN=false
 MAX_PLAN_FAILURES=3
 CAPACITY_PATTERN='out of host capacity|outofcapacity|out of capacity|insufficient capacity|does not have enough resources|zone_resource_pool_exhausted'
+# Transient failures worth retrying (seen on a CPU-starved host: the provider plugin failed to start in time).
+TRANSIENT_PATTERN='timeout while waiting for plugin to start|error acquiring the state lock|i/o timeout|tls handshake timeout|connection reset by peer|too many requests|429'
 
 usage() {
   sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -127,6 +129,11 @@ while :; do
     notify "terraform $ENV_NAME: no changes left"
     exit 0
   fi
+  if [[ $plan_rc -ne 2 ]] && grep -qiE "$TRANSIENT_PATTERN" "$OUT"; then
+    log "[wait] transient plan error ($(grep -oiE "$TRANSIENT_PATTERN" "$OUT" | head -1)); retrying in ${INTERVAL}s"
+    sleep "$INTERVAL"
+    continue
+  fi
   if [[ $plan_rc -ne 2 ]]; then
     plan_failures=$((plan_failures + 1))
     log "[warn] plan failed (${plan_failures}/${MAX_PLAN_FAILURES}):"
@@ -140,15 +147,26 @@ while :; do
   fi
   plan_failures=0
 
-  destructive="$("${TF[@]}" show -json "$PLAN" | jq -r '
-    [.resource_changes[]? | select(.change.actions | index("delete")) | .address] | join(", ")')"
+  if ! plan_json="$("${TF[@]}" show -json "$PLAN" 2>"$OUT")"; then
+    plan_failures=$((plan_failures + 1))
+    log "[warn] could not read the saved plan (${plan_failures}/${MAX_PLAN_FAILURES}):"
+    tail -n 5 "$OUT"
+    if [[ $plan_failures -ge $MAX_PLAN_FAILURES ]]; then
+      log "[error] terraform show keeps failing; stopping"
+      exit 1
+    fi
+    sleep "$INTERVAL"
+    continue
+  fi
+  destructive="$(jq -r '
+    [.resource_changes[]? | select(.change.actions | index("delete")) | .address] | join(", ")' <<<"$plan_json")"
   if [[ -n "$destructive" ]]; then
     log "[refuse] the plan would delete/replace: $destructive"
     log "[refuse] review it by hand: terraform -chdir=$ENV_DIR plan"
     exit 2
   fi
-  creates="$("${TF[@]}" show -json "$PLAN" | jq -r '
-    [.resource_changes[]? | select(.change.actions != ["no-op"]) | "\(.change.actions | join("/")) \(.address)"] | join("; ")')"
+  creates="$(jq -r '
+    [.resource_changes[]? | select(.change.actions != ["no-op"]) | "\(.change.actions | join("/")) \(.address)"] | join("; ")' <<<"$plan_json")"
   log "[attempt $attempt] applying: $creates"
 
   set +e
@@ -164,6 +182,11 @@ while :; do
 
   if grep -qiE "$CAPACITY_PATTERN" "$OUT"; then
     log "[wait] no capacity yet; retrying in ${INTERVAL}s"
+    sleep "$INTERVAL"
+    continue
+  fi
+  if grep -qiE "$TRANSIENT_PATTERN" "$OUT"; then
+    log "[wait] transient error ($(grep -oiE "$TRANSIENT_PATTERN" "$OUT" | head -1)); retrying in ${INTERVAL}s"
     sleep "$INTERVAL"
     continue
   fi
