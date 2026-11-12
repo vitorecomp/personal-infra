@@ -72,6 +72,9 @@ jobs:
         python3 cloud/scripts/migrate_gcp_data.py archive --stack taiga --dry-run
         python3 cloud/scripts/migrate_gcp_data.py all --stack personal-blog --host deploy@example.invalid --confirm-overwrite --dry-run
         python3 cloud/scripts/migrate_gcp_data.py copy-secrets --stack taiga --host deploy@example.invalid --dry-run
+        python3 cloud/scripts/migrate_gcp_data.py import --stack personal-blog --host deploy@example.invalid --local-export /tmp/ci-export --confirm-overwrite --dry-run
+        python3 cloud/scripts/migrate_gcp_data.py verify --stack personal-blog --host deploy@example.invalid --offline --dry-run
+        python3 cloud/scripts/migrate_gcp_data.py export --stack taiga --host deploy@example.invalid --upload-to gs://ci-bucket/migration --dry-run
         bash -n cloud/scripts/tf_apply_retry.sh && cloud/scripts/tf_apply_retry.sh --env oci-blog --dry-run
         BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --connect-ip 192.0.2.10 --insecure --dry-run
 
