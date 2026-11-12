@@ -20,8 +20,10 @@ import urllib.parse
 
 DEFAULT_TAIGA_URL = "https://taiga.vitorx86.dev"
 DEFAULT_ADMIN_USER = "admin"
-DEFAULT_ADMIN_EMAIL = "vitor.ecomp@gmail.com"
-DEFAULT_FALLBACK_SNI = "vitorx86.dev"
+DEFAULT_ADMIN_EMAIL = ""  # optional login fallback; set TAIGA_ADMIN_EMAIL in the skill .env
+DEFAULT_FALLBACK_SNI = ""  # opt-in only: a second SNI weakens hostname verification
+SKILL_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_ENV_FILE = SKILL_DIR / ".env"  # gitignored; template: .env.example next to SKILL.md
 TOKEN_CACHE_PATH = Path.home() / ".cache" / "taiga_cli" / "token.json"
 
 
@@ -49,11 +51,47 @@ def slugify_name(name: str) -> str:
     return slug or name.lower()
 
 
+def load_env_file(path: Path) -> list[str]:
+    """Loads KEY=VALUE lines from a .env file into os.environ.
+
+    Variables already set in the environment win; empty values are skipped. Only key names are
+    returned (never values). Warns when the file is readable by group/others.
+    """
+    if not path.is_file():
+        return []
+    if path.stat().st_mode & 0o077:
+        print(f"[warn] {path} is readable by other users; run: chmod 600 {path}", file=sys.stderr)
+    loaded: list[str] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, value = (part.strip() for part in line.split("=", 1))
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if value and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) and key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
+
+
+def resolve_env_file(argv: list[str]) -> Path:
+    """--env-file PATH (pre-parsed so argparse defaults can read it), else $TAIGA_ENV_FILE, else the skill .env."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--env-file")
+    known, _ = pre.parse_known_args(argv)
+    return Path(known.env_file or os.environ.get("TAIGA_ENV_FILE") or DEFAULT_ENV_FILE).expanduser()
+
+
 def _resolve_password_from_secret_manager(
-    project_id: str = "personal-project-514501",
-    secret: str = "taiga-admin-password",
+    project_id: str = "",
+    secret: str = "",
 ) -> str:
     """Falls back to the Taiga admin password stored in Secret Manager (gcloud must be authenticated)."""
+    project_id = project_id or os.environ.get("TAIGA_SECRET_PROJECT", "personal-project-514501")
+    secret = secret or os.environ.get("TAIGA_SECRET_NAME", "taiga-admin-password")
     try:
         res = subprocess.run(
             ["gcloud", "secrets", "versions", "access", "latest", f"--secret={secret}", f"--project={project_id}"],
@@ -88,7 +126,7 @@ def _save_cached_token(
     taiga_url: str, username: str, auth_token: str, user_id: int | None
 ) -> None:
     try:
-        TOKEN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        TOKEN_CACHE_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         data: dict[str, Any] = {}
         if TOKEN_CACHE_PATH.exists():
             try:
@@ -97,8 +135,11 @@ def _save_cached_token(
                 data = {}
         key = f"{taiga_url.rstrip('/')}|{username}"
         data[key] = {"auth_token": auth_token, "user_id": user_id}
-        TOKEN_CACHE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.chmod(TOKEN_CACHE_PATH, 0o600)
+        # Create with 0600 up front (no window where the token is world-readable).
+        fd = os.open(TOKEN_CACHE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2))
+        os.chmod(TOKEN_CACHE_PATH, 0o600)  # tighten files created by older versions
     except Exception:
         pass
 
@@ -205,7 +246,8 @@ class TaigaClient:
         password = self.password or _resolve_password_from_secret_manager()
         if not password:
             sys.exit(
-                "[error] Set TAIGA_ADMIN_PASSWORD or TAIGA_AUTH_TOKEN (or authenticate gcloud to personal-project-514501)."
+                f"[error] No Taiga credentials: set TAIGA_ADMIN_PASSWORD (or TAIGA_AUTH_TOKEN) in {DEFAULT_ENV_FILE} "
+                "(see .env.example) or the environment, or log gcloud in to read the taiga-admin-password secret."
             )
 
         for login_id in (self.username, self.email):
@@ -1264,6 +1306,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="CLI for managing Taiga projects, sprints, user stories, tasks, issues, epics, and wiki pages."
     )
     parser.add_argument(
+        "--env-file",
+        help=f"KEY=VALUE file with TAIGA_* settings (default: $TAIGA_ENV_FILE or {DEFAULT_ENV_FILE}).",
+    )
+    parser.add_argument(
         "--taiga-url",
         default=os.environ.get("TAIGA_URL", DEFAULT_TAIGA_URL),
         help=f"Base URL of the Taiga server (default: {DEFAULT_TAIGA_URL}).",
@@ -1276,7 +1322,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--email",
         default=os.environ.get("TAIGA_ADMIN_EMAIL", DEFAULT_ADMIN_EMAIL),
-        help=f"Taiga email fallback (default: {DEFAULT_ADMIN_EMAIL}).",
+        help="Taiga email, tried as a second login id (default: $TAIGA_ADMIN_EMAIL, else none).",
     )
     parser.add_argument(
         "--auth-token",
@@ -1285,8 +1331,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--fallback-sni",
-        default=DEFAULT_FALLBACK_SNI,
-        help=f"Fallback TLS SNI hostname (default: {DEFAULT_FALLBACK_SNI}).",
+        default=os.environ.get("TAIGA_FALLBACK_SNI", DEFAULT_FALLBACK_SNI),
+        help="Retry the TLS handshake with this SNI hostname (default: none).",
     )
 
     subparsers = parser.add_subparsers(dest="resource", required=True)
@@ -1581,6 +1627,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # Load the skill .env before building the parser: argparse defaults read os.environ.
+    load_env_file(resolve_env_file(sys.argv[1:]))
     parser = build_parser()
     args = parser.parse_args()
 

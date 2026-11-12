@@ -1,11 +1,12 @@
 # VM Provisioning Runbook (manual Terraform)
 
-The two compose VMs are created with Terraform **run by hand from your workstation**. CI only runs
-`terraform fmt -check` and `terraform validate`; it never plans or applies, and holds no cloud credentials.
+The GCE VM (and the spare OCI VM) are created with Terraform **run by hand from your workstation**. CI only runs
+`terraform fmt -check` and `terraform validate`; it never plans or applies, and holds no cloud keys (deploys use
+Workload Identity Federation, created by the `gcp-taiga` root).
 
 | Root | Cloud | Creates | State (GCS) |
 | :--- | :--- | :--- | :--- |
-| [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga) | GCP project `personal-project-514501` | `taiga-vpc` + subnet + firewall (22, 80/443, ICMP), static IP `taiga-ip`, **e2-micro** VM `personal-host` (hosts the blog + edge Caddy; builds/deploys Taiga), **Cloud Run** `taiga` + Artifact Registry `taiga` + Secret Manager + bucket `vitorx86-taiga-media` (30 GB pd-standard, Ubuntu 24.04 amd64), SA `taiga-vm`, backup bucket `vitorx86-backups` + SA `stack-backup-writer` | `gs://personal-project-514501-tfstate/vms/gcp-taiga` |
+| [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga) | GCP project `personal-project-514501` | `taiga-vpc` + subnet + firewall (22, 80/443, ICMP), static IP `taiga-ip`, **e2-micro** VM `personal-host` (30 GB pd-standard, Ubuntu 24.04 amd64, SA `taiga-vm`; hosts the blog + edge Caddy and runs both stacks' backups), **Cloud Run** `taiga` (SA `taiga-run`) + Artifact Registry `taiga` + Secret Manager + bucket `vitorx86-taiga-media`, Workload Identity pool `github` / provider `personal-infra` + SA `github-deployer` (CI deploys), backup bucket `vitorx86-backups` + SA `stack-backup-writer` | `gs://personal-project-514501-tfstate/vms/gcp-taiga` |
 | [`cloud/infra/envs/oci-blog`](../cloud/infra/envs/oci-blog) (spare, not used by any stack yet) | OCI compartment `vitorecomp` | VCN + IGW + route table + security list + public subnet, **A1.Flex 1 OCPU / 6 GB** VM `blog` (50 GB boot, Ubuntu 24.04 aarch64), reserved public IP (+ an empty `taiga-backups` bucket from the old cross-cloud design, removed once the VM exists) | `gs://personal-project-514501-tfstate/vms/oci-blog` |
 
 Both stacks back up with restic to the GCS bucket `vitorx86-backups` ([backup-restore.md](./backup-restore.md)).
@@ -26,7 +27,7 @@ You still review every plan ([§3](#3-every-change-plan-review-apply)).
 
 ```bash
 cd ~/workspace/personal/personal-infra
-mise trust && mise install          # terraform 1.17.1 + cloud-sql-proxy from mise.toml
+mise trust && mise install          # terraform 1.17.1 from mise.toml
 terraform version                   # if mise is not activated in your shell: mise exec -- terraform version
 ```
 
@@ -75,8 +76,8 @@ gcloud storage buckets update gs://personal-project-514501-tfstate --versioning
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/infra_admin   -C "infra admin"      # initial 'ubuntu' admin user (Terraform)
-ssh-keygen -t ed25519 -f ~/.ssh/blog_deploy   -C "blog deploy"      # CI/CD 'deploy' user on the blog VM
-ssh-keygen -t ed25519 -f ~/.ssh/taiga_deploy  -C "taiga deploy"     # CI/CD 'deploy' user on the Taiga VM
+ssh-keygen -t ed25519 -f ~/.ssh/blog_deploy   -C "blog deploy"      # CI/CD 'deploy' user (blog-prod environment)
+ssh-keygen -t ed25519 -f ~/.ssh/taiga_deploy  -C "taiga deploy"     # CI/CD 'deploy' user (taiga-prod environment)
 ```
 
 ### 1.5 Variables
@@ -95,10 +96,8 @@ OCI `region` (home region), `tenancy_ocid`, `compartment_ocid`.
 
 ## 2. First apply
 
-Do the blog first (Phase 3 of the [migration runbook](./migration-runbook.md)), then Taiga.
-
 ```bash
-cd cloud/infra/envs/oci-blog        # or gcp-taiga
+cd cloud/infra/envs/gcp-taiga       # or oci-blog (spare)
 terraform init
 terraform plan -out tfplan          # review (see §3)
 terraform apply tfplan
@@ -111,9 +110,10 @@ Then bootstrap the host ([`cloud/scripts/bootstrap_vm.py`](../cloud/scripts/boot
 IP=$(terraform output -raw public_ip)
 cd ../../../..
 python3 cloud/scripts/bootstrap_vm.py --host ubuntu@$IP --identity-file ~/.ssh/infra_admin \
-  --provider oracle --deploy-pubkey-file ~/.ssh/blog_deploy.pub --backup-stack personal-blog --dry-run
+  --provider gce --deploy-pubkey-file ~/.ssh/taiga_deploy.pub --swap-gb 3 \
+  --backup-stack personal-blog --backup-stack taiga --dry-run
 # repeat without --dry-run, then once more with --check (expect "no drift")
-# Taiga: --provider gce --deploy-pubkey-file ~/.ssh/taiga_deploy.pub --swap-gb 3 --backup-stack taiga
+# the spare OCI VM would use --provider oracle (no swap flag)
 ```
 
 `bootstrap_vm.py` prints the VM's SSH host-key fingerprint. Compare it with
@@ -121,14 +121,44 @@ python3 cloud/scripts/bootstrap_vm.py --host ubuntu@$IP --identity-file ~/.ssh/i
 
 **OCI "Out of host capacity"** (common for Always Free A1): Always Free only exists in the home region, and
 `sa-saopaulo-1` has a single availability domain, so the fix is retrying until capacity frees up (hours to
-days). Leave the retry loop running in a terminal:
+days). Run the retry loop by hand (`cloud/scripts/tf_apply_retry.sh --env oci-blog`, every 5 min by default;
+`--interval 600`, `--max-attempts N`) or as the systemd unit below.
 
-```bash
-cloud/scripts/tf_apply_retry.sh --env oci-blog              # every 5 min; --interval 600, --max-attempts N
+It retries on capacity errors and on transient errors (plugin start timeouts, state lock, network resets, 429s),
+tolerates up to 3 consecutive plan failures, refuses any plan that deletes or replaces something, stops on any
+other error, sends a desktop notification on success and prints the outputs (including `public_ip`).
+
+#### OCI capacity retry loop on the VM
+
+The loop currently runs on `personal-host` as `oci-blog-retry.service` (outside CI, low priority). It uses a clone of
+this repo in `~ubuntu/personal-infra` (`git pull` to update), your OCI API key in `~ubuntu/.oci/`, a
+`terraform.tfvars` in `envs/oci-blog`, and the VM service account (`--adc`), which may only read/write the
+`vms/oci-blog/` state prefix. After every attempt it times one request to the blog into `~ubuntu/blog-timing.log`.
+
+```ini
+# /etc/systemd/system/oci-blog-retry.service   (then: systemctl daemon-reload && systemctl enable --now oci-blog-retry)
+[Unit]
+Description=Retry OCI A1 capacity for the spare blog VM (cloud/infra/envs/oci-blog)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Environment=HOME=/home/ubuntu
+WorkingDirectory=/home/ubuntu/personal-infra
+ExecStart=/home/ubuntu/personal-infra/cloud/scripts/tf_apply_retry.sh --env oci-blog --adc --interval 600 --probe-url https://blog.vitorx86.dev/ --probe-log /home/ubuntu/blog-timing.log
+Restart=on-failure
+RestartSec=600
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-It retries only on capacity errors, refuses any plan that deletes or replaces something, stops on any
-other error, sends a desktop notification on success and prints the outputs (including `public_ip`).
+Logs: `journalctl -u oci-blog-retry -f`; stop it with `sudo systemctl disable --now oci-blog-retry` once the VM exists.
 In regions with several ADs you can also try `availability_domain_index = 1` (or 2).
 
 ---
@@ -155,8 +185,8 @@ guard to "make the plan pass". In-place updates (`~`) of firewall rules, labels 
 | Task | How |
 | :--- | :--- |
 | **Open 80/443 at DNS cutover** | `web_source_cidrs = ["0.0.0.0/0"]` → plan → apply (in-place firewall/security-list update). Let's Encrypt validates from many IPs, so it must be open to the world. |
-| **Taiga VM too small** | `machine_type = "e2-small"` in `gcp-taiga/terraform.tfvars` → plan → apply. In-place stop/start (`allow_stopping_for_update`); the static IP is kept. e2-small is not free tier (~US$13/month). |
-| **Blog VM size** | `ocpus` / `memory_in_gbs` (stay ≤ 2 / 12 for Always Free). Flex shape changes are in-place (reboot). |
+| **VM too small** | `machine_type = "e2-small"` in `gcp-taiga/terraform.tfvars` → plan → apply. In-place stop/start (`allow_stopping_for_update`); the static IP is kept. e2-small is not free tier (~US$13/month). |
+| **Spare OCI VM size** | `ocpus` / `memory_in_gbs` (stay ≤ 2 / 12 for Always Free). Flex shape changes are in-place (reboot). |
 | **CPU limits (e2-micro)** | The VM sustains only ~25% of its 2 vCPUs, so it never builds images or runs Taiga migrations (both happen on GitHub runners); deploys there are just `compose pull`/`up`. Restores and the OCI retry loop's Terraform runs are still slow and must not overlap (`deploy_stack.py` deploys are serialized by the `deploy-gcp-vm` concurrency group). If deploys become painful, `machine_type = "e2-small"` is an in-place change. |
 | **Rename the VM** | GCE names change only while stopped and Terraform would replace the instance, so: `gcloud compute instances stop <vm>`, `gcloud compute instances set-name <vm> --new-name=<new>`, `gcloud compute instances start <new>`, then set `instance_name` in `envs/gcp-taiga/main.tf`, `terraform state rm module.taiga_vm.google_compute_instance.this` and `terraform import module.taiga_vm.google_compute_instance.this projects/personal-project-514501/zones/us-central1-a/instances/<new>`; the next plan must show no replacement. |
 | **Disk snapshots (GCE)** | `enable_snapshots = true` → daily snapshots kept 7 days (billed per GB). restic backups remain the primary safety net. |
@@ -169,7 +199,7 @@ guard to "make the plan pass". In-place updates (`~`) of firewall rules, labels 
 ## 5. Hand-off to CI/CD
 
 After the first apply and bootstrap, configure the GitHub Environment for the stack
-(`blog-prod` or `taiga-prod`). Details: [pipeline-setup.md](./pipeline-setup.md#5-vm-deploy-workflows-ssh).
+(`blog-prod` or `taiga-prod`). Details: [pipeline-setup.md](./pipeline-setup.md#3-secrets-and-variables).
 
 ```bash
 gh secret set DEPLOY_HOST    --env blog-prod --body "$IP"

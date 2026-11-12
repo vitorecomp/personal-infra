@@ -1,4 +1,4 @@
-# Shared TLS edge for every stack on the GCP VM (35.255.9.34).
+# Shared TLS edge for every stack on the GCP VM (static IP: terraform output public_ip in envs/gcp-taiga).
 #
 # One Caddy owns ports 80/443 and routes each hostname to its app container over the
 # `edge` docker network (app stacks join it as an external network with a fixed alias).

@@ -8,7 +8,7 @@ Instructions and context for AI coding agents working in `personal-infra`.
 
 The repository is organized into four top-level domains:
 
-1. **`cloud/`** — `nobuffer-site` + `personal-portifolio` on Vercel (Git integration on their repos); `personal-blog` (Ghost + local MySQL) on the GCE free-tier e2-micro VM `personal-host` behind a shared Caddy (`cloud/edge`); `taiga` on Cloud Run free tier (built and deployed from GitHub Actions by `cloud/taiga/deploy-cloudrun.sh` as `github-deployer` via Workload Identity Federation, database on Neon Postgres 15, media in GCS). The VM never builds images: the Ghost image is built in CI and pulled from GHCR. Terraform in `cloud/infra/envs/{gcp-taiga,oci-blog}` is applied from a workstation, never in CI (`documentation/vm-provisioning.md`); `oci-blog` is a spare OCI A1 VM still being acquired by `tf_apply_retry.sh` on the VM. DNS is on Cloudflare. Also holds reverse-proxy configs for a separate Nginx server.
+1. **`cloud/`** — `nobuffer-site` + `personal-portifolio` on Vercel (Git integration on their repos); `personal-blog` (Ghost + local MySQL) on the GCE free-tier e2-micro VM `personal-host` behind a shared Caddy (`cloud/edge`); `taiga` on Cloud Run free tier (built and deployed from GitHub Actions by `cloud/taiga/deploy-cloudrun.sh` as `github-deployer` via Workload Identity Federation, database on Neon Postgres 15, media in GCS). The VM never builds images: the Ghost image is built in CI and pulled from GHCR. Terraform in `cloud/infra/envs/{gcp-taiga,oci-blog}` is applied from a workstation, never in CI (`documentation/vm-provisioning.md`); `oci-blog` is a spare OCI A1 VM still being acquired by `tf_apply_retry.sh`, run every 10 min by the `oci-blog-retry.service` unit on the VM (`documentation/vm-provisioning.md`). DNS is on Cloudflare. Also holds reverse-proxy configs for a separate Nginx server.
 2. **`home-server/`** — Home server workloads, self-hosted services, networking, and maintenance _(specification pending)_.
 3. **`linux/`** — Linux system bootstrap, package installation, dotfiles, and OS configuration _(specification pending)_.
 4. **`workspace/`** — Local `~/workspace` directory orchestration and GitHub repository synchronization.
@@ -26,7 +26,7 @@ personal-infra/
 ├── LICENSE
 ├── documentation/
 │   ├── README.md                           # Documentation index
-│   ├── cloud-architecture.md               # GCP LB, CDN, GCS, Cloud Run & Cloud SQL architecture
+│   ├── cloud-architecture.md               # Vercel, the GCE VM + edge Caddy, Taiga on Cloud Run + Neon, deploys & backups
 │   ├── pipeline-setup.md                   # GitHub Actions, SSH deploys & secrets/variables guide
 │   ├── migration-runbook.md                # History: the 2026-11 move off the compute-bench GCP stack (completed)
 │   ├── vm-provisioning.md                  # Manual Terraform runbook for the VM roots
@@ -35,6 +35,7 @@ personal-infra/
 ├── .agents/skills/
 │   └── taiga/
 │       ├── SKILL.md                        # Agent skill definition for Taiga REST API management
+│       ├── .env.example                    # Template for the gitignored .env (TAIGA_URL, admin user/password; mode 0600)
 │       └── scripts/
 │           └── taiga_cli.py                # Canonical CLI for Taiga projects, sprints, stories, tasks, issues & wiki
 ├── .github/workflows/
@@ -43,7 +44,7 @@ personal-infra/
 │   ├── deploy-taiga.yml                    # Runner (WIF): Taiga build/migrate/Cloud Run; SSH: edge + Taiga backup .env (gated by TAIGA_DEPLOY_ENABLED)
 │   ├── deploy-nginx-sites.yml              # Deploys reverse-proxy vhosts to server via SSH
 │   └── update-repo-stats.yml               # Scheduled/manual sync of repo_stats.csv
-├── mise.toml                               # Workstation tool pins (terraform, cloud-sql-proxy)
+├── mise.toml                               # Workstation tool pins (terraform)
 ├── cloud/                                  # Cloud infrastructure and deployment automation
 │   ├── edge/                               # Shared Caddy (TLS + routing) for every stack on the GCP VM
 │   ├── infra/
@@ -96,17 +97,17 @@ personal-infra/
 - Always test state-changing scripts with `--dry-run` before running them for real.
 
 ### 2. Preserve User-Curated State
-- When updating partially automated data files (such as `documentation/repo_stats.csv`), never overwrite manual columns (`folder`, `is-custom`, `is-template`); rows in `repo_stats.csv` are sorted by `last updated` descending.
+- When updating partially automated data files (such as `workspace/documentation/repo_stats.csv`), never overwrite manual columns (`folder`, `is-custom`, `is-template`); rows in `repo_stats.csv` are sorted by `last updated` descending.
 - When moving or syncing local directories (such as `~/workspace`), never delete or overwrite existing repositories or untracked local folders that are omitted from configuration.
 
 ### 3. Secrets & Credentials
 - **Never** hardcode or commit API tokens, SSH keys, passwords, `.env` files, `.tfvars` files, `.tfstate` files, or sensitive host/IP details.
-- Read credentials exclusively from environment variables (e.g., `GITHUB_TOKEN`, `METRICS_TOKEN`, `DEPLOY_HOST`, `APP_REF`, `BLOG_URL`) or external secret stores, with graceful fallbacks when unauthenticated execution is possible.
+- Read credentials exclusively from environment variables (e.g., `GITHUB_TOKEN`, `METRICS_TOKEN`, `DEPLOY_HOST`, `TAIGA_ADMIN_PASSWORD`), gitignored `.env` files such as `.agents/skills/taiga/.env`, or external secret stores (Secret Manager), with graceful fallbacks when unauthenticated execution is possible.
 
 ### 4. Terraform & VM Stacks
 - **Never add a CI workflow that runs `terraform plan/apply`** or stores cloud keys in GitHub (CI reaches GCP only through Workload Identity Federation as `github-deployer`, limited to this repo on `main` in `taiga-prod`); VM roots are applied by hand (`documentation/vm-provisioning.md`), CI only runs `fmt`/`validate`. Keep `prevent_destroy`, `deletion_protection` and the image `ignore_changes` guards.
 - Compose stacks: only Caddy publishes ports; every volume has an explicit `name:`; never `docker compose down -v`; pin image tags.
-- VM app secrets live only in `/opt/stacks/<stack>/.env` (mode 0600). CI never writes it; `deploy_stack.py` only checks key names. Add new keys to `.env.example` (`__generate__` / `__required__` placeholders).
+- VM app secrets live only in `/opt/stacks/<stack>/.env` (mode 0600). CI writes only the keys it passes with `deploy_stack.py --sync-env` (`GHOST_IMAGE`, Taiga's `TAIGA_DB_*`); the preflight prints key names, never values. Add new keys to `.env.example` (`__generate__` / `__required__` placeholders).
 - New or renamed scripts in `cloud/scripts/` need a matching `--dry-run` line in `.github/workflows/ci.yml`.
 
 ### 5. Code Style & Dependencies

@@ -28,15 +28,36 @@ When the user invokes `/taiga ...`, interpret their arguments as follows:
 ## Helper Scripts
 
 1. **General Taiga API CLI**:
-   - Canonical skill script: [`taiga_cli.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.agents/skills/taiga/scripts/taiga_cli.py)
-   - Workspace wrapper: [`workspace/scripts/taiga_cli.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/taiga_cli.py)
+   - Canonical skill script: [`scripts/taiga_cli.py`](./scripts/taiga_cli.py)
+   - Workspace wrapper: [`workspace/scripts/taiga_cli.py`](../../../workspace/scripts/taiga_cli.py)
 2. **GitHub -> Taiga Repository Enrollment & Ordering**:
-   - [`workspace/scripts/enroll_taiga_projects.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/enroll_taiga_projects.py)
+   - [`workspace/scripts/enroll_taiga_projects.py`](../../../workspace/scripts/enroll_taiga_projects.py)
 
 > [!IMPORTANT]
-> - Always run the checked-in CLI scripts (`taiga_cli.py` or `enroll_taiga_projects.py`) via `run_command` rather than inline `python3 -c` socket/HTTP snippets.
-> - Authentication is automatic: `taiga_cli.py` checks `TAIGA_AUTH_TOKEN`, `~/.cache/taiga_cli/token.json`, `TAIGA_ADMIN_PASSWORD`, and automatically falls back to the `taiga-admin-password` secret in Secret Manager (GCP project `personal-project-514501`) via `gcloud secrets versions access`.
-> - All mutating commands support `--dry-run`.
+> - Always run the checked-in CLI scripts (`taiga_cli.py` or `enroll_taiga_projects.py`) from the shell rather than inline `python3 -c` socket/HTTP snippets.
+> - All mutating commands support `--dry-run`; preview before changing anything.
+> - Never print, echo, or paste the admin password or auth tokens.
+
+## Configuration (`.env`)
+
+Both scripts read [`.agents/skills/taiga/.env`](./.env.example) (gitignored, mode `0600`) at startup. Create it
+from the template once:
+
+```bash
+cp .agents/skills/taiga/.env.example .agents/skills/taiga/.env && chmod 600 .agents/skills/taiga/.env
+# then fill in TAIGA_ADMIN_PASSWORD (or leave it empty to use the Secret Manager fallback)
+```
+
+| Key | Purpose |
+| :--- | :--- |
+| `TAIGA_URL` | Taiga base URL (default `https://taiga.vitorx86.dev`). |
+| `TAIGA_ADMIN_USER` / `TAIGA_ADMIN_EMAIL` | Login id, and an optional second login id. |
+| `TAIGA_ADMIN_PASSWORD` / `TAIGA_AUTH_TOKEN` | Credentials (a token skips the login). |
+| `TAIGA_SECRET_PROJECT` / `TAIGA_SECRET_NAME` | Secret Manager fallback (`personal-project-514501` / `taiga-admin-password`, read with `gcloud`). |
+
+Precedence: CLI flags > real environment variables > `.env` > Secret Manager. Use `--env-file PATH` (or
+`TAIGA_ENV_FILE`) for another file. Auth tokens are cached in `~/.cache/taiga_cli/token.json` (mode `0600`) and
+refreshed automatically on a 401. The scripts warn when the `.env` is readable by other users.
 
 ---
 
@@ -87,8 +108,8 @@ python3 "$CLI" stories list personal-infra --sprint backlog
 
 # Create a user story in the backlog or assigned to a sprint
 python3 "$CLI" stories create personal-infra \
-  --subject "Automate Cloud SQL backups" \
-  --description "Configure automated daily backups and retention in Terraform" \
+  --subject "Automate restic restore tests" \
+  --description "Run backup_stack.py --restore-test weekly and alert on failure" \
   --status "Ready" --points "3" --tags terraform,cloud --assign-to-me
 
 # Bulk-create multiple backlog user stories at once

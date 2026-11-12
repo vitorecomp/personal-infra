@@ -213,7 +213,7 @@ from the VM) to free memory for the blog's MySQL on the same e2-micro. Exact row
   16+ (`json` became a keyword), so the Neon project must stay on 15.
 - Connection settings live in `/opt/stacks/taiga/.env` (`TAIGA_DB_*`, direct endpoint, not `-pooler`) and in the
   `taiga-prod` GitHub environment, from which `deploy-taiga.yml` syncs them (`deploy_stack.py --sync-env`).
-  Taiga's settings read `POSTGRES_SSLMODE` (default `disable`), so the compose file sets it to `require`.
+  Taiga's settings read `POSTGRES_SSLMODE` (default `disable`), so `cloud/taiga/deploy-cloudrun.sh` sets it to `require`.
 - The container health check never touches the database, so Neon's compute can scale to zero (free plan:
   100 CU-hours/month per project).
 - Backups dump Neon remotely with a `postgres:15` client (`backup_stack.py`, `mode: remote`).
@@ -224,9 +224,9 @@ from the VM) to free memory for the blog's MySQL on the same e2-micro. Exact row
 
 The e2-micro could not hold Ghost + MySQL + Taiga without swapping, so the Taiga **app** moved to Cloud Run
 (free tier: 1 vCPU / 512 MiB, 0..1 instances, request-based CPU) while the VM keeps the blog and the edge Caddy.
-Resources come from `cloud/infra/envs/gcp-taiga`; `deploy_stack.py --stack taiga` runs
-`cloud/taiga/deploy-cloudrun.sh` on the VM (build, migrations against Neon, Secret Manager sync, revision rollout)
-with the VM's service account. Uploads live in `gs://vitorx86-taiga-media`; the edge Caddy proxies
+Resources come from `cloud/infra/envs/gcp-taiga`; `cloud/taiga/deploy-cloudrun.sh` (build, migrations against
+Neon, Secret Manager sync, revision rollout) ran on the VM at first and now runs on the GitHub runner as
+`github-deployer` via Workload Identity Federation (`deploy-taiga.yml`). Uploads live in `gs://vitorx86-taiga-media`; the edge Caddy proxies
 `taiga.vitorx86.dev` to the `run.app` URL (`TAIGA_UPSTREAM`). Optional later: a Cloud Run domain mapping
 (needs domain verification) would take Taiga's traffic off the VM's 1 GB/month free egress.
 
@@ -237,7 +237,7 @@ of both apps are in `gs://vitorx86-backups/migration/` (done 2026-11-12 for both
 stack: Phase 3 restores it from the saved export. Then:
 
 1. Final archives: `migrate_gcp_data.py archive --stack personal-blog` and `--stack taiga`.
-2. Destroy the legacy Terraform state: [vm-provisioning.md §7](./vm-provisioning.md#7-decommission-the-legacy-compute-bench-stack-phase-5).
+2. Destroy the legacy Terraform state: [vm-provisioning.md §7](./vm-provisioning.md#7-legacy-stack-done).
 3. Clean up:
 
    ```bash

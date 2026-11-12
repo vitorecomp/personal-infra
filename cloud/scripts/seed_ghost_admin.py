@@ -25,7 +25,7 @@ DEFAULT_BLOG_URL = "https://blog.vitorx86.dev"
 DEFAULT_ADMIN_NAME = "Vitor Vieira"
 DEFAULT_BLOG_TITLE = "vitorx86.dev // blog"
 DEFAULT_THEME_NAME = "vitorx86-garage"
-DEFAULT_FALLBACK_SNI = "vitorx86.dev"
+DEFAULT_FALLBACK_SNI = ""  # opt-in only: a second SNI weakens hostname verification
 SETUP_ENDPOINT = "/ghost/api/admin/authentication/setup/"
 SESSION_ENDPOINT = "/ghost/api/admin/session/"
 
@@ -352,7 +352,7 @@ def main() -> None:
         "--fallback-sni",
         type=str,
         default=DEFAULT_FALLBACK_SNI,
-        help=f"Fallback TLS SNI hostname on the shared Load Balancer while subdomain SSL provisions (default: {DEFAULT_FALLBACK_SNI}).",
+        help="Retry the TLS handshake with this SNI hostname (default: none).",
     )
     parser.add_argument(
         "--retries",

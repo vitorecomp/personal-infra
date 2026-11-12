@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 DEFAULT_TAIGA_URL = "https://taiga.vitorx86.dev"
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_EMAIL = "vitor.ecomp@gmail.com"
-DEFAULT_FALLBACK_SNI = "vitorx86.dev"
+DEFAULT_FALLBACK_SNI = ""  # opt-in only: a second SNI weakens hostname verification
 TEMPLATES_ENDPOINT = "/api/v1/project-templates"
 AUTH_ENDPOINT = "/api/v1/auth"
 
@@ -235,7 +235,7 @@ def main() -> None:
         "--fallback-sni",
         type=str,
         default=DEFAULT_FALLBACK_SNI,
-        help=f"Fallback TLS SNI hostname on the shared Load Balancer while subdomain SSL provisions (default: {DEFAULT_FALLBACK_SNI}).",
+        help="Retry the TLS handshake with this SNI hostname (default: none).",
     )
     parser.add_argument(
         "--retries",

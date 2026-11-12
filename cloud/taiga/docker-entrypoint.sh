@@ -66,7 +66,7 @@ echo "[entrypoint] Rendered /taiga-front/conf.json for ${TAIGA_URL}"
 # 3. Run database migrations & idempotent initial seed
 #    TAIGA_SKIP_MIGRATIONS=true  -> serve only (Cloud Run: migrations already ran at deploy time,
 #                                   which keeps cold starts short)
-#    TAIGA_ENTRYPOINT_MODE=migrate -> run migrations + seed, then exit (deploy step on the VM)
+#    TAIGA_ENTRYPOINT_MODE=migrate -> run migrations + seed, then exit (deploy step on the CI runner)
 cd /taiga-back
 SKIP_MIGRATIONS="${TAIGA_SKIP_MIGRATIONS:-false}"
 if [[ "${SKIP_MIGRATIONS,,}" == "true" && "${TAIGA_ENTRYPOINT_MODE:-serve}" != "migrate" ]]; then

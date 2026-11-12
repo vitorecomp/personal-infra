@@ -17,6 +17,7 @@ Behavior:
 
 import argparse
 import csv
+import importlib.util
 import http.client
 import json
 import os
@@ -35,8 +36,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CSV_PATH = REPO_ROOT / "documentation" / "repo_stats.csv"
 DEFAULT_TAIGA_URL = "https://taiga.vitorx86.dev"
 DEFAULT_ADMIN_USER = "admin"
-DEFAULT_ADMIN_EMAIL = "vitor.ecomp@gmail.com"
-DEFAULT_FALLBACK_SNI = "vitorx86.dev"
+DEFAULT_ADMIN_EMAIL = ""  # optional login fallback; set TAIGA_ADMIN_EMAIL in the Taiga skill .env
+DEFAULT_FALLBACK_SNI = ""  # opt-in only: a second SNI weakens hostname verification
+TAIGA_SKILL_CLI = REPO_ROOT.parent / ".agents" / "skills" / "taiga" / "scripts" / "taiga_cli.py"
 DEFAULT_TEMPLATE = "scrum"
 
 
@@ -311,11 +313,24 @@ def build_project_payload(
     return payload
 
 
+def _load_taiga_env(argv: list[str]) -> None:
+    """Loads the Taiga skill .env (same file and rules as taiga_cli.py: --env-file, $TAIGA_ENV_FILE,
+    else .agents/skills/taiga/.env; real environment variables win)."""
+    spec = importlib.util.spec_from_file_location("taiga_skill_cli", TAIGA_SKILL_CLI)
+    if spec is None or spec.loader is None:
+        return
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    cli.load_env_file(cli.resolve_env_file(argv))
+
+
 def _resolve_password_from_secret_manager(
-    project_id: str = "personal-project-514501",
-    secret: str = "taiga-admin-password",
+    project_id: str = "",
+    secret: str = "",
 ) -> str:
     """Falls back to the Taiga admin password stored in Secret Manager (gcloud must be authenticated)."""
+    project_id = project_id or os.environ.get("TAIGA_SECRET_PROJECT", "personal-project-514501")
+    secret = secret or os.environ.get("TAIGA_SECRET_NAME", "taiga-admin-password")
     try:
         res = subprocess.run(
             ["gcloud", "secrets", "versions", "access", "latest", f"--secret={secret}", f"--project={project_id}"],
@@ -345,7 +360,8 @@ def authenticate_taiga(
 
     if not password:
         sys.exit(
-            "[error] Set TAIGA_ADMIN_PASSWORD (or TAIGA_AUTH_TOKEN) in your environment to enroll projects on Taiga."
+            "[error] Set TAIGA_ADMIN_PASSWORD (or TAIGA_AUTH_TOKEN) in .agents/skills/taiga/.env (see .env.example) "
+            "or the environment, or log gcloud in to read the taiga-admin-password secret."
         )
 
     for login_id in (username, email):
@@ -673,6 +689,7 @@ def enroll_projects(
 
 
 def main() -> None:
+    _load_taiga_env(sys.argv[1:])  # before argparse: its defaults read os.environ
     parser = argparse.ArgumentParser(
         description="Idempotently enroll GitHub repositories from repo_stats.csv as projects on the Taiga server."
     )
@@ -749,13 +766,17 @@ def main() -> None:
         "--email",
         type=str,
         default=os.environ.get("TAIGA_ADMIN_EMAIL", DEFAULT_ADMIN_EMAIL),
-        help=f"Taiga admin email fallback (default: {DEFAULT_ADMIN_EMAIL}).",
+        help="Taiga admin email, tried as a second login id (default: $TAIGA_ADMIN_EMAIL, else none).",
     )
     parser.add_argument(
         "--fallback-sni",
         type=str,
-        default=DEFAULT_FALLBACK_SNI,
-        help=f"Fallback TLS SNI hostname while subdomain SSL provisions (default: {DEFAULT_FALLBACK_SNI}).",
+        default=os.environ.get("TAIGA_FALLBACK_SNI", DEFAULT_FALLBACK_SNI),
+        help="Retry the TLS handshake with this SNI hostname (default: none).",
+    )
+    parser.add_argument(
+        "--env-file",
+        help="KEY=VALUE file with TAIGA_* settings (default: $TAIGA_ENV_FILE or .agents/skills/taiga/.env).",
     )
     parser.add_argument(
         "--dry-run",

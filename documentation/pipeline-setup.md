@@ -12,8 +12,8 @@ workstation ([vm-provisioning.md](./vm-provisioning.md)).
 | :--- | :--- |
 | `vitorecomp/nobuffer-site`, `vitorecomp/personal-portifolio` | Vercel Git integration builds and deploys every push to the production branch. Nothing in this repo. |
 | `vitorecomp/personal-blog` (Ghost theme/image) | Its `trigger-deploy.yml` sends `repository_dispatch: deploy-personal-blog` with `client_payload.sha` → [`deploy-blog.yml`](../.github/workflows/deploy-blog.yml) |
-| `cloud/personal-blog/**`, `cloud/edge/**` here | push to `main` → `deploy-blog.yml` |
-| `cloud/taiga/**`, `cloud/edge/**` here | push to `main` → [`deploy-taiga.yml`](../.github/workflows/deploy-taiga.yml) |
+| `cloud/personal-blog/**`, `cloud/edge/**`, `cloud/scripts/{deploy_stack,backup_stack,seed_ghost_admin}.py`, the workflow | push to `main` → `deploy-blog.yml` |
+| `cloud/taiga/**`, `cloud/edge/**`, `cloud/scripts/{deploy_stack,backup_stack,seed_taiga_admin}.py`, the workflow | push to `main` → [`deploy-taiga.yml`](../.github/workflows/deploy-taiga.yml) |
 | `cloud/infra/**` | CI validates only; apply by hand |
 
 Both deploy workflows share the `deploy-gcp-vm` concurrency group (one VM) and refresh the edge stack in their VM job.
@@ -42,7 +42,7 @@ They run only when the repository variables `BLOG_DEPLOY_ENABLED` / `TAIGA_DEPLO
 | `blog-prod`, `taiga-prod` | `DEPLOY_KNOWN_HOSTS`, `DEPLOY_USER` | variable | pinned VM host key, `deploy` |
 | `blog-prod` | `BLOG_ADMIN_EMAIL` | variable | Ghost owner check |
 | `taiga-prod` | `TAIGA_DB_HOST`, `TAIGA_DB_USER`, `TAIGA_DB_PASSWORD`, `TAIGA_ADMIN_PASSWORD` | secret | Neon credentials (migrations, Secret Manager, the VM's backup `.env`); admin password (Secret Manager + login check) |
-| `taiga-prod` | `TAIGA_DB_NAME`, `TAIGA_ADMIN_EMAIL` | variable | Neon database name; admin email |
+| `taiga-prod` | `TAIGA_DB_NAME`, `TAIGA_ADMIN_EMAIL`, optional `TAIGA_ADMIN_USER` (default `admin`) | variable | Neon database name; admin email / user |
 
 `TAIGA_SECRET_KEY` lives only in Secret Manager (`taiga-secret-key`, read by the deploy job). Other app secrets
 live only on the VM in `/opt/stacks/<stack>/.env` (mode 0600, created by `deploy_stack.py --init-env`, included in

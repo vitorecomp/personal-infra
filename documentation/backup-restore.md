@@ -1,6 +1,6 @@
-# Backup & Restore (compose VMs)
+# Backup & Restore
 
-Each VM backs up its own stack with [`cloud/scripts/backup_stack.py`](../cloud/scripts/backup_stack.py),
+The GCE VM `personal-host` backs up both stacks with [`cloud/scripts/backup_stack.py`](../cloud/scripts/backup_stack.py),
 shipped to `/opt/stacks/.ops/` by `deploy_stack.py` and run daily (03:17 UTC ± 15 min) by the
 `stack-backup@<stack>.timer` unit that `bootstrap_vm.py` installs.
 
@@ -54,17 +54,20 @@ gunzip -c /var/backups/stacks/personal-blog/personal-blog-db-<ts>.sql.gz \
   | docker compose exec -T db sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot ghost'
 docker compose up -d --wait
 
-cd /opt/stacks/taiga
-docker compose stop taiga
-docker compose exec -T db sh -c 'exec pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner --no-acl' \
-  < /var/backups/stacks/taiga/taiga-db-<ts>.dump
-docker compose up -d --wait
+# Taiga's database is on Neon (no compose stack on the VM): restore with a postgres:15 client using the
+# TAIGA_DB_* values from /opt/stacks/taiga/.env. Cloud Run keeps serving; requests may fail during the restore.
+cd /opt/stacks/taiga && set -a && . ./.env && set +a
+docker run --rm -i -e PGPASSWORD="$TAIGA_DB_PASSWORD" -e PGSSLMODE="${TAIGA_DB_SSLMODE:-require}" postgres:15.19-alpine \
+  pg_restore -h "$TAIGA_DB_HOST" -p "${TAIGA_DB_PORT:-5432}" -U "$TAIGA_DB_USER" -d "$TAIGA_DB_NAME" \
+  --clean --if-exists --no-owner --no-acl < /var/backups/stacks/taiga/taiga-db-<ts>.dump
+# media: gcloud storage rsync <restored taiga-media dir> gs://vitorx86-taiga-media   (from a workstation)
 ```
 
 ### Full restore from restic (new VM or lost disk)
 
-The old `.env` must be in place **before** the stack starts for the first time: MySQL/Postgres store the
-passwords from the first boot inside their data volume, and the dump only matches the old credentials.
+For the blog, the old `.env` must be in place **before** the stack starts for the first time: MySQL stores the
+passwords from the first boot inside its data volume, and the dump only matches the old credentials. Taiga's
+database lives on Neon, so a new VM only needs its `.env` back for the nightly backups.
 
 1. `terraform apply` (the reserved/static IP is kept) and `bootstrap_vm.py`.
 2. On the VM, restore the newest snapshot. `RESTIC_PASSWORD` comes from your password manager; the bucket
@@ -85,7 +88,7 @@ passwords from the first boot inside their data volume, and the dump only matche
 
    ```bash
    cd /opt/stacks/<stack>
-   docker compose stop ghost            # or: taiga
+   docker compose stop ghost            # blog only; Taiga's DB restore is the Neon command above
    for vol in /tmp/restore/backup/volumes/*; do
      docker run --rm -v "$vol":/src:ro -v "$(basename "$vol")":/dst alpine:3.24.4 sh -c 'cp -a /src/. /dst/'
    done
