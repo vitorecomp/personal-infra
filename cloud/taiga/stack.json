@@ -3,7 +3,16 @@
   "domain": "taiga.vitorx86.dev",
   "edge_tls_key": "TAIGA_TLS",
   "health_path": "/api/v1/project-templates",
-  "required_files": ["compose.yml", ".env.example", "stack.json", "Dockerfile", "nginx.conf", "docker-entrypoint.sh"],
+  "required_files": [
+    ".env.example",
+    "stack.json",
+    "Dockerfile",
+    "nginx.conf",
+    "docker-entrypoint.sh",
+    "deploy-cloudrun.sh",
+    "cloudrun.env"
+  ],
+  "up_script": "deploy-cloudrun.sh",
   "app_repo": null,
   "pre_build": null,
   "post_deploy": {
@@ -11,7 +20,17 @@
     "url_flag": "--taiga-url"
   },
   "backup": {
-    "db": {"engine": "postgres", "mode": "remote", "env_prefix": "TAIGA_DB_", "client_image": "postgres:15.19-alpine"},
-    "volumes": ["taiga_media", "edge_caddy-data"]
+    "db": {
+      "engine": "postgres",
+      "mode": "remote",
+      "env_prefix": "TAIGA_DB_",
+      "client_image": "postgres:15.19-alpine"
+    },
+    "volumes": [
+      "edge_caddy-data"
+    ],
+    "gcs": [
+      "gs://vitorx86-taiga-media"
+    ]
   }
 }

@@ -37,3 +37,18 @@ output "blog_restic_repository" {
   description = "RESTIC_REPOSITORY for the blog VM .env"
   value       = "s3:https://storage.googleapis.com/${google_storage_bucket.backups.name}/personal-blog"
 }
+
+output "taiga_run_url" {
+  description = "Cloud Run URL of the taiga service (edge Caddy proxies taiga.vitorx86.dev here)"
+  value       = google_cloud_run_v2_service.taiga.uri
+}
+
+output "taiga_image_repository" {
+  description = "Artifact Registry repository for Taiga images"
+  value       = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.taiga.repository_id}/taiga"
+}
+
+output "taiga_media_bucket" {
+  description = "GCS bucket mounted at /mnt/taiga-storage in the Taiga container"
+  value       = google_storage_bucket.taiga_media.name
+}

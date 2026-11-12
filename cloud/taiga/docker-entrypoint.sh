@@ -64,7 +64,13 @@ EOF
 echo "[entrypoint] Rendered /taiga-front/conf.json for ${TAIGA_URL}"
 
 # 3. Run database migrations & idempotent initial seed
+#    TAIGA_SKIP_MIGRATIONS=true  -> serve only (Cloud Run: migrations already ran at deploy time,
+#                                   which keeps cold starts short)
+#    TAIGA_ENTRYPOINT_MODE=migrate -> run migrations + seed, then exit (deploy step on the VM)
 cd /taiga-back
+if [[ "${TAIGA_SKIP_MIGRATIONS,,}" == "true" && "${TAIGA_ENTRYPOINT_MODE:-serve}" != "migrate" ]]; then
+    echo "[entrypoint] TAIGA_SKIP_MIGRATIONS=true: skipping migrations and seed"
+else
 echo "[entrypoint] Running database migrations..."
 python manage.py migrate --noinput
 
@@ -124,6 +130,12 @@ if admin_email and admin_password:
         else:
             print(f"[entrypoint] Taiga superuser '{ user.username }' already up to date.")
 PYEOF
+fi
+
+if [[ "${TAIGA_ENTRYPOINT_MODE:-serve}" == "migrate" ]]; then
+    echo "[entrypoint] TAIGA_ENTRYPOINT_MODE=migrate: migrations and seed done, exiting"
+    exit 0
+fi
 
 # 4. Start Gunicorn backend on 127.0.0.1:8000 and Nginx on 0.0.0.0:8080
 echo "[entrypoint] Starting Gunicorn (taiga-back) on 127.0.0.1:8000 ..."

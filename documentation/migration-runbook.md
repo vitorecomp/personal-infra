@@ -214,6 +214,16 @@ from the VM) to free memory for the blog's MySQL on the same e2-micro. Exact row
 - The old local Postgres volume `taiga_postgres-data` is kept on the VM for rollback; delete it once Neon has
   run a while (`docker volume rm taiga_postgres-data`).
 
+## Taiga on Cloud Run (2026-11-12)
+
+The e2-micro could not hold Ghost + MySQL + Taiga without swapping, so the Taiga **app** moved to Cloud Run
+(free tier: 1 vCPU / 512 MiB, 0..1 instances, request-based CPU) while the VM keeps the blog and the edge Caddy.
+Resources come from `cloud/infra/envs/gcp-taiga`; `deploy_stack.py --stack taiga` runs
+`cloud/taiga/deploy-cloudrun.sh` on the VM (build, migrations against Neon, Secret Manager sync, revision rollout)
+with the VM's service account. Uploads live in `gs://vitorx86-taiga-media`; the edge Caddy proxies
+`taiga.vitorx86.dev` to the `run.app` URL (`TAIGA_UPSTREAM`). Optional later: a Cloud Run domain mapping
+(needs domain verification) would take Taiga's traffic off the VM's 1 GB/month free egress.
+
 ## Phase 5: Decommission `compute-bench`
 
 Prerequisites: Taiga is live on its VM, `vitorx86.dev`/`www`/`me`/`cases` resolve to Vercel, and the final exports

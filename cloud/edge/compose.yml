@@ -17,6 +17,8 @@ services:
       # Per site: the ACME email => Let's Encrypt; "internal" => local CA while DNS points elsewhere.
       TAIGA_TLS: ${TAIGA_TLS:-vitor.ecomp@gmail.com}
       BLOG_TLS: ${BLOG_TLS:-vitor.ecomp@gmail.com}
+      # Taiga's Cloud Run URL (terraform -chdir=cloud/infra/envs/gcp-taiga output taiga_run_url).
+      TAIGA_UPSTREAM: ${TAIGA_UPSTREAM:-https://taiga-826587210831.us-central1.run.app}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

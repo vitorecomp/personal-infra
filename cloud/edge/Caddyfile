@@ -1,5 +1,5 @@
 # One site block per stack. Upstreams are the aliases the app stacks register on the
-# `edge` network (taiga-app, blog-ghost); unknown hostnames get no certificate.
+# `edge` network (blog-ghost) or external URLs (Taiga on Cloud Run); unknown hostnames get no certificate.
 {
 	email {$ACME_EMAIL}
 	servers {
@@ -7,10 +7,15 @@
 	}
 }
 
+# Taiga runs on Cloud Run (free tier); Caddy terminates TLS for the custom domain and
+# forwards to the run.app URL with the Host Cloud Run expects (X-Forwarded-Host keeps the
+# public name for Django).
 taiga.vitorx86.dev {
 	tls {$TAIGA_TLS}
 	encode zstd gzip
-	reverse_proxy taiga-app:8080
+	reverse_proxy {$TAIGA_UPSTREAM} {
+		header_up Host {upstream_hostport}
+	}
 }
 
 blog.vitorx86.dev {

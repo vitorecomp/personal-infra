@@ -1,35 +1,34 @@
 # Taiga Project Manager (`cloud/taiga`)
 
-Container + docker compose stack for **Taiga** (`https://taiga.vitorx86.dev`).
+**Taiga** (`https://taiga.vitorx86.dev`) runs on **Cloud Run** (free tier, project `personal-project-514501`,
+us-central1) with its database on **Neon** (managed Postgres 15) and uploads in the GCS bucket
+`vitorx86-taiga-media` (mounted at `/mnt/taiga-storage`). The edge Caddy on the VM terminates TLS for the
+custom domain and proxies to the `run.app` URL ([`cloud/edge`](../edge)).
 
-Runs on the GCE e2-micro VM ([`cloud/infra/envs/gcp-taiga`](../infra/envs/gcp-taiga)) next to the blog.
-TLS and routing come from the shared edge proxy ([`cloud/edge`](../edge)); the container joins the `edge`
-network as `taiga-app`. The database is **Neon** managed Postgres 15 (Taiga 6.10 cannot run on Postgres 16+:
-its `json_object_delete_keys(json json, ...)` function hits the new `json` keyword).
+Taiga 6.10 cannot use Postgres 16+ (its `json_object_delete_keys(json json, ...)` function hits the `json`
+keyword), so the Neon project must stay on 15.
 
 ## Files
 
 | File | Purpose |
 | :--- | :--- |
-| `Dockerfile` | One image: `taigaio/taiga-front` SPA + `taigaio/taiga-back` (gunicorn on `127.0.0.1:8000`) + nginx on `:8080`. Base versions pinned with `ARG TAIGA_BACK_VERSION=6.10.2` / `TAIGA_FRONT_VERSION=6.10.3` (the versions production runs; migrations are forward-only, bump deliberately). |
-| `nginx.conf` | Routes `/`, `/api`, `/admin`, `/static/`, `/media/`; honours `X-Forwarded-Proto` from Caddy. |
-| `docker-entrypoint.sh` | Links `/taiga-back/media` to `$TAIGA_STORAGE_SYNC_DIR/media`, renders `conf.json`, runs migrations, seeds templates once, reconciles the superuser from `TAIGA_ADMIN_*`, starts gunicorn + nginx. |
-| `compose.yml` | **Production stack** on the VM: `taiga` (built on the VM) on the `edge` network, `TAIGA_DB_*` pointing at Neon (TLS). Health check uses a static file so it never keeps Neon's compute awake. Named volume `taiga_media`. |
-| `.env.example` | Keys for `/opt/stacks/taiga/.env` on the VM (mode 0600, never committed, never written by CI). `TAIGA_DB_*` are synced from the `taiga-prod` GitHub environment by the deploy workflow. |
-| `stack.json` | Metadata for `deploy_stack.py` / `backup_stack.py` (domain, health path, backup volumes). |
-| `compose.local.yml` | Local development stack (`http://127.0.0.1:8080`). |
-| `cloudbuild.yaml` | Legacy Cloud Run build (removed after the Taiga cutover). |
+| `Dockerfile` | One image: `taiga-front` SPA + `taiga-back` (gunicorn on `127.0.0.1:8000`) + nginx on `:8080`; bases pinned to 6.10.2 / 6.10.3. |
+| `docker-entrypoint.sh` | Links media to `$TAIGA_STORAGE_SYNC_DIR`, renders `conf.json`, runs migrations + admin reconcile (skipped with `TAIGA_SKIP_MIGRATIONS=true`; `TAIGA_ENTRYPOINT_MODE=migrate` runs them and exits), starts gunicorn + nginx. |
+| `deploy-cloudrun.sh` | Runs **on the VM** (keyless, VM service account): builds the image (skipped if this build context is already in Artifact Registry), runs migrations against Neon, syncs `TAIGA_SECRET_KEY` / DB password into Secret Manager, rolls out a Cloud Run revision. |
+| `cloudrun.env` | Non-secret Cloud Run settings (project, region, sizing: 1 vCPU / 512 MiB, 0..1 instances). |
+| `.env.example` | Keys for `/opt/stacks/taiga/.env` on the VM (Neon `TAIGA_DB_*`, secret key, admin). `TAIGA_DB_*` are synced from the `taiga-prod` GitHub environment. |
+| `stack.json` | `deploy_stack.py` / `backup_stack.py` metadata (`up_script`, health path, Neon + media-bucket backups). |
+| `nginx.conf`, `compose.local.yml` | Container gateway; local development stack. |
 
 ## Commands
 
 ```bash
-# Deploy / redeploy to the VM (CI does the same via .github/workflows/deploy-taiga.yml)
-python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<taiga-ip> --dry-run
-python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<taiga-ip>
-
-# Backups (on the VM)
-python3 /opt/stacks/.ops/backup_stack.py --stack taiga --restore-test
-
-# Local development
-docker compose -f cloud/taiga/compose.local.yml up --build
+python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<vm> --identity-file ~/.ssh/taiga_deploy --dry-run
+python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<vm> --identity-file ~/.ssh/taiga_deploy
+gcloud run services describe taiga --project personal-project-514501 --region us-central1 --format='value(status.url)'
+docker compose -f cloud/taiga/compose.local.yml up --build   # local development
 ```
+
+Free-tier notes: scale to zero means the first request after ~15 min idle cold-starts the container
+(no migrations at boot, so it is mostly Django import time). Requests are capped at 32 MiB by Cloud Run,
+which also caps attachment uploads.

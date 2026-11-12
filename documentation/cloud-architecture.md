@@ -8,7 +8,7 @@
 > | `vitorx86.dev`, `www` | Vercel (`nobuffer-site` repo, Git integration) | Vercel project settings / `vercel.json` |
 > | `me.`, `cases.` | Vercel (`personal-portifolio` repo, Git integration) | Vercel project settings / `vercel.json` |
 > | `blog.` | GCE e2-micro VM: edge Caddy → Ghost 5.130 → local MySQL 8.0 (docker compose) | [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga), [`cloud/edge`](../cloud/edge), [`cloud/personal-blog`](../cloud/personal-blog) |
-> | `taiga.` | Same VM: edge Caddy → Taiga; database on **Neon** (managed Postgres 15, AWS us-east-2) | [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga), [`cloud/edge`](../cloud/edge), [`cloud/taiga`](../cloud/taiga) |
+> | `taiga.` | Edge Caddy on the VM → **Cloud Run** `taiga` (free tier, 0..1 instances); database on **Neon** (Postgres 15, AWS us-east-2); uploads in GCS `vitorx86-taiga-media` | [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga), [`cloud/edge`](../cloud/edge), [`cloud/taiga`](../cloud/taiga) |
 >
 > DNS stays in Cloud DNS zone `vitorx86-dev` (project `study-deploys`) and is managed by hand. Both stacks back
 > up with restic to the GCS bucket `vitorx86-backups` ([backup-restore.md](./backup-restore.md)).

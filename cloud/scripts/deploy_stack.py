@@ -55,6 +55,7 @@ class Stack:
     pre_build: list[str] | None
     post_deploy: dict[str, str] | None
     edge_tls_key: str | None
+    up_script: str | None
 
 
 def available_stacks() -> list[str]:
@@ -77,6 +78,7 @@ def load_stack(name: str) -> Stack:
         pre_build=meta.get("pre_build"),
         post_deploy=meta.get("post_deploy"),
         edge_tls_key=meta.get("edge_tls_key"),
+        up_script=meta.get("up_script"),
     )
 
 
@@ -224,11 +226,12 @@ if mode == "check":
         print(f"[error] .env mode is {perms:o}; run: chmod 600 {env_path}")
         sys.exit(4)
     env, example = parse(env_path), parse(example_path)
-    with open(os.path.join(stack_dir, "compose.yml")) as fh:
-        compose_text = fh.read()
+    compose_path = os.path.join(stack_dir, "compose.yml")
+    compose_text = open(compose_path).read() if os.path.exists(compose_path) else None
     # Keys interpolated by compose.yml block the deploy; the rest (e.g. backup credentials)
-    # only warn, because nothing at runtime depends on them.
-    used = lambda k: ("${" + k + "}" in compose_text) or ("${" + k + ":" in compose_text)
+    # only warn, because nothing at runtime depends on them. Stacks without compose.yml
+    # (custom up_script) treat every key as required.
+    used = lambda k: compose_text is None or ("${" + k + "}" in compose_text) or ("${" + k + ":" in compose_text)
     bad = [k for k in example if k not in env or env[k] in ("", "__generate__", "__required__")]
     blocking = [k for k in bad if used(k)]
     optional = [k for k in bad if not used(k)]
@@ -407,6 +410,10 @@ def build_up_script(stack: Stack, stack_dir: str, skip_build: bool) -> str:
         app_dir = f"{stack_dir}/{(stack.app_repo or {}).get('path', 'app')}"
         hook = [part.replace("{app}", app_dir) for part in stack.pre_build]
         lines += ["echo '[deploy] pre_build hook'", shlex.join(hook)]
+    if stack.up_script:
+        # The stack deploys itself (e.g. Taiga -> Cloud Run); the VM only provides build/run tooling.
+        lines += [f"bash ./{shlex.quote(stack.up_script)}", "docker builder prune -f --filter until=168h >/dev/null"]
+        return "\n".join(lines)
     lines.append(f"{compose} pull --ignore-buildable --quiet")
     if not skip_build:
         # No provenance/SBOM attestations: unchanged sources then rebuild to the same image ID.
@@ -490,7 +497,8 @@ def deploy(args: argparse.Namespace) -> int:
 
         # 5. Build + up
         print(f"[deploy] Building and starting {stack.name} on {args.host} ...")
-        result = remote.run(build_up_script(stack, stack_dir, args.skip_build), describe="compose pull/build/up --wait + prune")
+        result = remote.run(build_up_script(stack, stack_dir, args.skip_build),
+                            describe=f"run {stack.up_script}" if stack.up_script else "compose pull/build/up --wait + prune")
         if result.returncode != 0:
             print(f"[error] docker compose up failed ({result.returncode}); inspect with: "
                   f"ssh {args.host} 'cd {stack_dir} && docker compose ps && docker compose logs --tail 100'",

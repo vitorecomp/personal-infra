@@ -8,7 +8,7 @@ Instructions and context for AI coding agents working in `personal-infra`.
 
 The repository is organized into four top-level domains:
 
-1. **`cloud/`** — **Migrating** (see `documentation/migration-runbook.md`) from the legacy GCP stack (Global HTTPS LB, Cloud CDN, GCS static buckets, Cloud Run + Cloud SQL, Cloud Build; `cloud/infra/envs/prod`) to: `nobuffer-site` + `personal-portifolio` on Vercel, `personal-blog` (Ghost + local MySQL) and `taiga` on one GCE free-tier e2-micro VM (Taiga's database on Neon Postgres 15). The VM is created by Terraform applied **by hand** (`cloud/infra/envs/gcp-taiga`; `envs/oci-blog` is a spare OCI VM still being acquired; see `documentation/vm-provisioning.md`), configured by `bootstrap_vm.py`, and runs docker compose stacks (`cloud/{edge,personal-blog,taiga}/compose.yml`, one shared Caddy in `cloud/edge`) deployed over SSH by `deploy_stack.py` (locally and from GitHub Actions). Also holds reverse-proxy configs.
+1. **`cloud/`** — **Migrating** (see `documentation/migration-runbook.md`) from the legacy GCP stack (Global HTTPS LB, Cloud CDN, GCS static buckets, Cloud Run + Cloud SQL, Cloud Build; `cloud/infra/envs/prod`) to: `nobuffer-site` + `personal-portifolio` on Vercel, `personal-blog` (Ghost + local MySQL) on a GCE free-tier e2-micro VM, `taiga` on Cloud Run free tier (built and deployed from the VM by `cloud/taiga/deploy-cloudrun.sh`, database on Neon Postgres 15, media in GCS). The VM is created by Terraform applied **by hand** (`cloud/infra/envs/gcp-taiga`; `envs/oci-blog` is a spare OCI VM still being acquired; see `documentation/vm-provisioning.md`), configured by `bootstrap_vm.py`, and runs docker compose stacks (`cloud/{edge,personal-blog,taiga}/compose.yml`, one shared Caddy in `cloud/edge`) deployed over SSH by `deploy_stack.py` (locally and from GitHub Actions). Also holds reverse-proxy configs.
 2. **`home-server/`** — Home server workloads, self-hosted services, networking, and maintenance _(specification pending)_.
 3. **`linux/`** — Linux system bootstrap, package installation, dotfiles, and OS configuration _(specification pending)_.
 4. **`workspace/`** — Local `~/workspace` directory orchestration and GitHub repository synchronization.
@@ -41,7 +41,7 @@ personal-infra/
 ├── .github/workflows/
 │   ├── ci.yml                              # Secret scan, Python syntax/dry-run checks, Terraform fmt/validate (no apply), compose/Caddy validation
 │   ├── deploy-blog.yml                     # SSH deploy of cloud/edge + cloud/personal-blog to the GCP VM (gated by BLOG_DEPLOY_ENABLED)
-│   ├── deploy-taiga.yml                    # SSH deploy of cloud/edge + cloud/taiga to the GCP VM, syncing Neon creds (gated by TAIGA_DEPLOY_ENABLED)
+│   ├── deploy-taiga.yml                    # SSH to the VM: edge + Taiga build/migrate/Cloud Run deploy, syncing Neon creds (gated by TAIGA_DEPLOY_ENABLED)
 │   ├── build-blog.yml                      # LEGACY: personal-blog Cloud Build -> Cloud Run (no push trigger)
 │   ├── build-taiga.yml                     # LEGACY: cloud/taiga Cloud Build -> Cloud Run (no push trigger)
 │   ├── deploy-nginx-sites.yml              # Deploys reverse-proxy vhosts to server via SSH
@@ -53,7 +53,7 @@ personal-infra/
 │   │   ├── modules/gce-vm/                 # GCE VM + dedicated VPC/firewall + static IP + runtime SA
 │   │   ├── modules/oci-vm/                 # OCI A1 VM + VCN/security list + reserved IP
 │   │   ├── modules/load-balancer/          # LEGACY GCP LB/CDN/Cloud Run/Cloud SQL (destroyed in Phase 5)
-│   │   ├── envs/gcp-taiga/                 # Taiga VM (personal-project-514501) + shared backup bucket; applied by hand
+│   │   ├── envs/gcp-taiga/                 # VM + Taiga Cloud Run/AR/secrets/media bucket + backup bucket (personal-project-514501); applied by hand
 │   │   ├── envs/oci-blog/                  # Spare OCI A1 VM (capacity retry loop); applied by hand, not used yet
 │   │   └── envs/prod/                      # LEGACY compute-bench stack (frozen)
 │   ├── nobuffer-site/                      # The site itself deploys to Vercel from its own repo
@@ -67,7 +67,7 @@ personal-infra/
 │   │   ├── Dockerfile                      # taiga-front + taiga-back (pinned 6.10.3 / 6.10.2) + nginx container
 │   │   ├── nginx.conf                      # Nginx gateway routing /, /api, /admin, /static, /media on :8080
 │   │   ├── docker-entrypoint.sh            # Idempotent DB migrations, template load & superuser seed
-│   │   ├── compose.yml                     # Taiga on the GCP VM (joins the edge network); database on Neon Postgres 15
+│   │   ├── deploy-cloudrun.sh, cloudrun.env # Build on the VM -> Artifact Registry -> Cloud Run (migrations from the VM; Neon DB; GCS media)
 │   │   ├── .env.example, stack.json        # VM .env template & deploy/backup metadata
 │   │   ├── compose.local.yml               # Local dev compose stack (127.0.0.1:8080)
 │   │   └── cloudbuild.yaml                 # LEGACY Cloud Run pipeline

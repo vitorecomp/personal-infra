@@ -11,7 +11,7 @@ of the `stack-backup-writer` service account (S3-compatible API), one key per VM
 | Stack | VM | What is backed up | restic repository |
 | :--- | :--- | :--- | :--- |
 | `personal-blog` | GCE e2-micro | `mysqldump` of the local `ghost` MySQL, volume `personal-blog_ghost-content`, `.env` | `s3:https://storage.googleapis.com/vitorx86-backups/personal-blog` |
-| `taiga` | GCE e2-micro | `pg_dump -Fc` of the **Neon** `taiga` database (remote, `postgres:15` client), volumes `taiga_media` + `edge_caddy-data`, `.env` | `s3:https://storage.googleapis.com/vitorx86-backups/taiga` |
+| `taiga` | runs on Cloud Run; backed up from the VM | `pg_dump -Fc` of the **Neon** `taiga` database (`postgres:15` client), mirror of `gs://vitorx86-taiga-media`, volume `edge_caddy-data`, `.env` | `s3:https://storage.googleapis.com/vitorx86-backups/taiga` |
 
 - restic encrypts everything client-side with `RESTIC_PASSWORD`, which lives in the VM `.env` **and in your
   password manager** (the `.env` copy inside the snapshots is useless without it).
