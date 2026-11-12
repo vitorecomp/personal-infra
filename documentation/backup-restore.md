@@ -4,10 +4,14 @@ Each VM backs up its own stack with [`cloud/scripts/backup_stack.py`](../cloud/s
 shipped to `/opt/stacks/.ops/` by `deploy_stack.py` and run daily (03:17 UTC ± 15 min) by the
 `stack-backup@<stack>.timer` unit that `bootstrap_vm.py` installs.
 
-| Stack | VM | What is backed up | restic repository (other cloud) |
+All stacks write to one GCS bucket, **`gs://vitorx86-backups`** (project `personal-project-514501`,
+us-central1, inside the 5 GB free tier), one restic repository per stack. VMs authenticate with HMAC keys
+of the `stack-backup-writer` service account (S3-compatible API), one key per VM.
+
+| Stack | VM | What is backed up | restic repository |
 | :--- | :--- | :--- | :--- |
-| `personal-blog` | OCI A1 | `mysqldump` of `ghost`, volumes `personal-blog_ghost-content` + `personal-blog_caddy-data`, `.env` | GCS `vitorx86-blog-backups/personal-blog` (S3 interop, HMAC key of `blog-backup-writer`) |
-| `taiga` | GCE e2-micro | `pg_dump -Fc` of `taiga`, volumes `taiga_media` + `taiga_caddy-data`, `.env` | OCI Object Storage `taiga-backups/taiga` (S3 compatibility, Customer Secret Key) |
+| `personal-blog` | OCI A1 | `mysqldump` of `ghost`, volumes `personal-blog_ghost-content` + `personal-blog_caddy-data`, `.env` | `s3:https://storage.googleapis.com/vitorx86-backups/personal-blog` |
+| `taiga` | GCE e2-micro | `pg_dump -Fc` of `taiga`, volumes `taiga_media` + `taiga_caddy-data`, `.env` | `s3:https://storage.googleapis.com/vitorx86-backups/taiga` |
 
 - restic encrypts everything client-side with `RESTIC_PASSWORD`, which lives in the VM `.env` **and in your
   password manager** (the `.env` copy inside the snapshots is useless without it).
@@ -17,8 +21,13 @@ shipped to `/opt/stacks/.ops/` by `deploy_stack.py` and run daily (03:17 UTC ± 
 
 ## Setup (once per VM)
 
-1. Create the bucket credentials ([vm-provisioning.md §4](./vm-provisioning.md#4-day-2-operations)) and set
-   `RESTIC_REPOSITORY`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION` in `/opt/stacks/<stack>/.env`.
+1. Create an HMAC key for the VM and set `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in `/opt/stacks/<stack>/.env`
+   (`RESTIC_REPOSITORY` and `AWS_DEFAULT_REGION=us-central1` already come from `.env.example`):
+
+   ```bash
+   gcloud storage hmac create stack-backup-writer@personal-project-514501.iam.gserviceaccount.com \
+     --project personal-project-514501      # prints the access ID and the secret ONCE
+   ```
 2. Initialise and test:
 
    ```bash

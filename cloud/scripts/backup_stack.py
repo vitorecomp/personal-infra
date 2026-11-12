@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backs up one docker compose stack on its VM: database dump + volumes -> restic (other cloud).
+"""Backs up one docker compose stack on its VM: database dump + volumes -> restic (GCS bucket).
 
 Runs ON THE VM (shipped to /opt/stacks/.ops/ by deploy_stack.py, scheduled daily by the
 stack-backup@<stack>.timer unit that bootstrap_vm.py installs). Standalone, stdlib only.

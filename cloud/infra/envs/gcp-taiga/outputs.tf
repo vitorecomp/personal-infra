@@ -18,12 +18,22 @@ output "zone" {
   value       = module.taiga_vm.zone
 }
 
-output "blog_backup_bucket" {
-  description = "restic repository URL for the blog VM (.env RESTIC_REPOSITORY)"
-  value       = "s3:https://storage.googleapis.com/${google_storage_bucket.blog_backups.name}/personal-blog"
+output "backup_bucket" {
+  description = "GCS bucket holding every stack's restic repository"
+  value       = google_storage_bucket.backups.name
 }
 
-output "blog_backup_writer_email" {
-  description = "Service account to create the blog restic HMAC key for"
-  value       = google_service_account.blog_backup_writer.email
+output "backup_writer_email" {
+  description = "Service account to create the restic HMAC keys for (one per VM)"
+  value       = google_service_account.backup_writer.email
+}
+
+output "taiga_restic_repository" {
+  description = "RESTIC_REPOSITORY for the Taiga VM .env"
+  value       = "s3:https://storage.googleapis.com/${google_storage_bucket.backups.name}/taiga"
+}
+
+output "blog_restic_repository" {
+  description = "RESTIC_REPOSITORY for the blog VM .env"
+  value       = "s3:https://storage.googleapis.com/${google_storage_bucket.backups.name}/personal-blog"
 }
