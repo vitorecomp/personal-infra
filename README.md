@@ -10,9 +10,10 @@ personal-infra/
 ├── .github/workflows/        # CI/CD workflows (CI validation, SSH stack deploys, legacy Cloud Build, Nginx deploy)
 ├── documentation/            # Project, architecture, cloud setup, and pipeline documentation
 ├── cloud/                    # Cloud infrastructure provisioning and workload deployments
-│   ├── infra/                # Terraform: VM roots (gcp-taiga, oci-blog; applied by hand) + legacy GCP LB stack (prod)
+│   ├── infra/                # Terraform (applied by hand): GCP VM (gcp-taiga), spare OCI VM (oci-blog), legacy GCP LB (prod)
+│   ├── edge/                 # Shared Caddy on the GCP VM: TLS + routing for taiga. and blog.
 │   ├── nobuffer-site/        # Nginx reverse-proxy & maintenance page (the site itself is on Vercel)
-│   ├── personal-blog/        # Ghost compose stack for the OCI VM (+ legacy Cloud Build)
+│   ├── personal-blog/        # Ghost + local MySQL compose stack for the GCP VM (+ legacy Cloud Build)
 │   ├── taiga/                # Taiga image + compose stack for the GCE VM (+ legacy Cloud Build)
 │   └── scripts/              # bootstrap/deploy/backup/migration scripts + legacy Cloud Build helpers
 ├── home-server/              # Home server / self-hosted services and maintenance (TBD)
@@ -36,16 +37,16 @@ personal-infra/
 Manages cloud infrastructure and deployments for hosted sites and services.
 
 > **Migration in progress**: see the [migration runbook](./documentation/migration-runbook.md). Target layout:
-> `nobuffer-site` + `personal-portifolio` on **Vercel** (done: Git integration on the app repos, no workflow here), `personal-blog` (Ghost) on an **OCI Always Free A1 VM**,
-> `taiga` on a **GCE free-tier e2-micro VM**, both VMs running docker compose behind Caddy and deployed over SSH.
+> `nobuffer-site` + `personal-portifolio` on **Vercel** (done: Git integration on the app repos, no workflow here), `personal-blog` (Ghost + local MySQL) and `taiga` on one **GCE free-tier e2-micro VM** behind a shared Caddy
+> (`cloud/edge`), Taiga's database on **Neon** (managed Postgres 15), all deployed over SSH.
 > The legacy GCP stack described further below keeps serving until each cutover.
 
 - **VM Terraform (applied by hand, [runbook](./documentation/vm-provisioning.md))**:
   [`cloud/infra/envs/gcp-taiga`](./cloud/infra/envs/gcp-taiga) ([`modules/gce-vm`](./cloud/infra/modules/gce-vm)) and
-  [`cloud/infra/envs/oci-blog`](./cloud/infra/envs/oci-blog) ([`modules/oci-vm`](./cloud/infra/modules/oci-vm)).
+  [`cloud/infra/envs/oci-blog`](./cloud/infra/envs/oci-blog) ([`modules/oci-vm`](./cloud/infra/modules/oci-vm), spare OCI VM still being acquired).
   CI only runs `fmt`/`validate`.
-- **Compose stacks**: [`cloud/personal-blog`](./cloud/personal-blog) and [`cloud/taiga`](./cloud/taiga)
-  (`compose.yml`, `Caddyfile`, `.env.example`, `stack.json`). Secrets live only in `/opt/stacks/<stack>/.env` on each VM.
+- **Compose stacks**: [`cloud/edge`](./cloud/edge) (shared Caddy), [`cloud/personal-blog`](./cloud/personal-blog) and [`cloud/taiga`](./cloud/taiga)
+  (`compose.yml`, `.env.example`, `stack.json`). Secrets live in `/opt/stacks/<stack>/.env` on the VM; Taiga's Neon credentials are synced there from the `taiga-prod` GitHub environment.
 - **Scripts** (stdlib Python, all with `--dry-run`):
   [`bootstrap_vm.py`](./cloud/scripts/bootstrap_vm.py) (Docker, deploy user, swap, sshd, firewall, backup timers; `--check` for drift),
   [`deploy_stack.py`](./cloud/scripts/deploy_stack.py) (rsync + `docker compose up --wait` + HTTPS check; used by CI and locally),
@@ -145,7 +146,7 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
 | Workflow | File | Trigger | Description |
 | :--- | :--- | :--- | :--- |
 | **CI Validation** | [`.github/workflows/ci.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/ci.yml) | Push, PR, manual | Scans tracked files and Git history for secrets, validates Python script syntax, runs `--dry-run` checks across `workspace/` and `cloud/` scripts, runs `terraform fmt -check` & `terraform validate` for every Terraform root (no plan/apply), and validates the compose stacks (`docker compose config`, `caddy validate`). |
-| **Deploy the Personal Blog (Oracle VM)** | [`.github/workflows/deploy-blog.yml`](./.github/workflows/deploy-blog.yml) | Push on `cloud/personal-blog/**`, `repository_dispatch` (`deploy-personal-blog`), manual | SSH deploy via `deploy_stack.py` to the OCI VM. Gated by `BLOG_DEPLOY_ENABLED`; environment `blog-prod`. |
+| **Deploy the Personal Blog (GCP VM)** | [`.github/workflows/deploy-blog.yml`](./.github/workflows/deploy-blog.yml) | Push on `cloud/personal-blog/**`, `repository_dispatch` (`deploy-personal-blog`), manual | SSH deploy (edge + blog) via `deploy_stack.py` to the GCP VM. Gated by `BLOG_DEPLOY_ENABLED`; environment `blog-prod`. |
 | **Deploy Taiga (GCE VM)** | [`.github/workflows/deploy-taiga.yml`](./.github/workflows/deploy-taiga.yml) | Push on `cloud/taiga/**`, `repository_dispatch` (`deploy-taiga`), manual | SSH deploy via `deploy_stack.py` to the GCE VM. Gated by `TAIGA_DEPLOY_ENABLED`; environment `taiga-prod`. |
 | **Build and Deploy the Personal Blog** _(legacy)_ | [`.github/workflows/build-blog.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/build-blog.yml) | `repository_dispatch` (`deploy-personal-blog`), manual | Clones `personal-blog` via [`download_personal_blog.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/scripts/download_personal_blog.py) and submits [`cloud/personal-blog/cloudbuild.yaml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/personal-blog/cloudbuild.yaml) to Cloud Build & Cloud Run. |
 | **Deploy the Nginx** | [`.github/workflows/deploy-nginx-sites.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/deploy-nginx-sites.yml) | Push on `cloud/nobuffer-site/reverse-proxy/**`, manual | Copies Nginx reverse-proxy configs over SSH, validates with `nginx -t`, reloads Nginx, and issues Certbot certificates. |
