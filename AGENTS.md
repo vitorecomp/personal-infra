@@ -80,6 +80,7 @@ personal-infra/
 │       ├── deploy_stack.py                 # rsync + remote .env preflight + compose up --wait + HTTPS check (CI & local)
 │       ├── backup_stack.py                 # Runs on the VM: DB dump + volumes -> restic in the other cloud
 │       ├── migrate_gcp_data.py             # TEMPORARY: Cloud SQL/GCS -> VMs (archive/export/import/verify/copy-secrets)
+│       ├── tf_apply_retry.sh               # Retries plan+apply on OCI 'Out of host capacity' (refuses destructive plans)
 │       ├── download_nobuffer_site.py       # LEGACY: clones nobuffer-site and optionally deploys via Cloud Build
 │       ├── download_personal_portifolio.py # LEGACY: clones personal-portifolio and optionally deploys via Cloud Build
 │       ├── download_personal_blog.py       # LEGACY: clones personal-blog and optionally deploys via Cloud Build
@@ -150,6 +151,7 @@ python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@<ip> -
 python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<ip> --init-env
 python3 cloud/scripts/backup_stack.py --stack-dir cloud/taiga --dry-run
 python3 cloud/scripts/migrate_gcp_data.py all --stack personal-blog --host deploy@<ip> --confirm-overwrite --dry-run
+cloud/scripts/tf_apply_retry.sh --env oci-blog --dry-run
 docker compose -f cloud/taiga/compose.yml --env-file cloud/taiga/.env.example config -q
 terraform -chdir=cloud/infra/envs/gcp-taiga init -backend=false && terraform -chdir=cloud/infra/envs/gcp-taiga validate
 

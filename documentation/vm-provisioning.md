@@ -120,8 +120,17 @@ python3 cloud/scripts/bootstrap_vm.py --host ubuntu@$IP --identity-file ~/.ssh/i
 `bootstrap_vm.py` prints the VM's SSH host-key fingerprint. Compare it with
 `ssh-keyscan -t ed25519 $IP | ssh-keygen -lf -` before storing the keyscan output as `DEPLOY_KNOWN_HOSTS`.
 
-**OCI "Out of host capacity":** set `availability_domain_index = 1` (or 2) in `terraform.tfvars`, re-plan,
-re-apply. A1 capacity in popular regions comes and goes; retrying later also works.
+**OCI "Out of host capacity"** (common for Always Free A1): Always Free only exists in the home region, and
+`sa-saopaulo-1` has a single availability domain, so the fix is retrying until capacity frees up (hours to
+days). Leave the retry loop running in a terminal:
+
+```bash
+cloud/scripts/tf_apply_retry.sh --env oci-blog              # every 5 min; --interval 600, --max-attempts N
+```
+
+It retries only on capacity errors, refuses any plan that deletes or replaces something, stops on any
+other error, sends a desktop notification on success and prints the outputs (including `public_ip`).
+In regions with several ADs you can also try `availability_domain_index = 1` (or 2).
 
 ---
 
@@ -177,6 +186,7 @@ gh variable set BLOG_DEPLOY_ENABLED --body true      # repository-level gate
 | Symptom | Fix |
 | :--- | :--- |
 | `Error 403: Billing account for project ... is not found` / `billing is disabled` | §1.2: link an open billing account. |
+| `<other-account> does not have storage.objects.list access to ... personal-project-514501-tfstate` | Terraform's GCS backend uses Application Default Credentials, which can belong to a different Google account than the `gcloud` CLI. Either `gcloud auth application-default login` with `vitor.ecomp@gmail.com` (+ `gcloud auth application-default set-quota-project personal-project-514501`), or prefix commands with `GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)`. `tf_apply_retry.sh` does the latter automatically. |
 | `storage: bucket doesn't exist` on `terraform init` | Create the state bucket (§1.2). |
 | `Error acquiring the state lock` | Another apply is running, or one crashed: `terraform force-unlock <ID>` only if you are sure. |
 | OCI `401 NotAuthenticated` | Wrong `fingerprint`/`key_file` in `~/.oci/config`, or the key was not added to your user. |
