@@ -17,7 +17,7 @@ of the `stack-backup-writer` service account (S3-compatible API), one key per VM
   password manager** (the `.env` copy inside the snapshots is useless without it).
 - Retention: 7 daily, 4 weekly, 6 monthly; `restic check` every Sunday.
 - The newest 7 dumps also stay on the VM in `/var/backups/stacks/<stack>/` for quick restores.
-- The one-off migration exports (final Cloud SQL dumps + content of the old GCP stack) are kept under
+- The one-off migration exports and archives (final dumps + content of the old GCP stack, restorable with `mysql` / `pg_restore`) are kept under
   `gs://vitorx86-backups/migration/<stack>/export-<timestamp>/` (outside the restic repositories).
 - Optional: set `BACKUP_PING_URL` (e.g. healthchecks.io) in the `.env` to get alerted when a daily run is missed.
 

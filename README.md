@@ -7,15 +7,15 @@ Central repository for automatically provisioning, configuring, and maintaining 
 ```text
 personal-infra/
 ├── .agents/skills/           # Agent skills (e.g., taiga REST API skill & CLI)
-├── .github/workflows/        # CI/CD workflows (CI validation, SSH stack deploys, legacy Cloud Build, Nginx deploy)
-├── documentation/            # Project, architecture, cloud setup, and pipeline documentation
-├── cloud/                    # Cloud infrastructure provisioning and workload deployments
-│   ├── infra/                # Terraform (applied by hand): GCP VM (gcp-taiga), spare OCI VM (oci-blog), legacy GCP LB (prod)
-│   ├── edge/                 # Shared Caddy on the GCP VM: TLS for blog. and taiga. (proxied to Cloud Run)
+├── .github/workflows/        # CI validation, SSH deploys (blog, Taiga via the VM), Nginx deploy, repo stats
+├── documentation/            # Architecture, provisioning, pipeline, backup and workspace docs
+├── cloud/                    # Cloud infrastructure and workload deployments
+│   ├── infra/                # Terraform, applied by hand: gcp-taiga (VM + Taiga Cloud Run), oci-blog (spare OCI VM)
+│   ├── edge/                 # Shared Caddy on the VM: TLS for blog. and taiga. (Taiga proxied to Cloud Run)
 │   ├── nobuffer-site/        # Nginx reverse-proxy & maintenance page (the site itself is on Vercel)
-│   ├── personal-blog/        # Ghost + local MySQL compose stack for the GCP VM (+ legacy Cloud Build)
+│   ├── personal-blog/        # Ghost + local MySQL compose stack for the VM
 │   ├── taiga/                # Taiga image + Cloud Run deploy script (built/deployed from the VM)
-│   └── scripts/              # bootstrap/deploy/backup/migration scripts + legacy Cloud Build helpers
+│   └── scripts/              # bootstrap / deploy / backup / OCI retry scripts, Ghost & Taiga seeders
 ├── home-server/              # Home server / self-hosted services and maintenance (TBD)
 ├── linux/                    # Linux OS bootstrap, packages, and system configuration (TBD)
 └── workspace/                # Local ~/workspace repository inventory and synchronization
@@ -23,7 +23,7 @@ personal-infra/
 
 | Directory | Responsibility | Status |
 | :--- | :--- | :--- |
-| **[`documentation/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation)** | Detailed guides for [Cloud Architecture](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/cloud-architecture.md), [Cloud Setup](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/cloud-setup.md), [Pipeline Setup](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/pipeline-setup.md), and [Workspace Management](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation/workspace-setup.md). | Active |
+| **[`documentation/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/documentation)** | Guides: [Cloud Architecture](./documentation/cloud-architecture.md), [VM Provisioning](./documentation/vm-provisioning.md), [Pipeline Setup](./documentation/pipeline-setup.md), [Backup & Restore](./documentation/backup-restore.md), [Workspace Management](./documentation/workspace-setup.md). | Active |
 | **`cloud/`** | Provisioning and maintaining cloud resources, networking, and hosted workloads (`nobuffer-site`, `personal-portifolio`, `personal-blog`, `taiga`). | Active |
 | **`home-server/`** | Self-hosted services, container stacks, backups, and home lab automation. | _Planned (to be defined)_ |
 | **`linux/`** | Workstation/system setup, packages, dotfiles, and OS-level maintenance scripts. | _Planned (to be defined)_ |
@@ -34,57 +34,31 @@ personal-infra/
 ## Modules
 
 ### 1. `cloud/`
-Manages cloud infrastructure and deployments for hosted sites and services.
 
-> **Migration in progress**: see the [migration runbook](./documentation/migration-runbook.md). Target layout:
-> `nobuffer-site` + `personal-portifolio` on **Vercel** (done: Git integration on the app repos, no workflow here), `personal-blog` (Ghost + local MySQL) on a **GCE free-tier e2-micro VM** behind a shared Caddy (`cloud/edge`),
-> `taiga` on **Cloud Run** (free tier, deployed from the VM) with its database on **Neon** (managed Postgres 15).
-> The legacy GCP stack described further below keeps serving until each cutover.
+| Site | Runs on | Defined in |
+| :--- | :--- | :--- |
+| `vitorx86.dev`, `www` | Vercel (Git integration on `vitorecomp/nobuffer-site`) | app repo (`vercel.json`) |
+| `me.`, `cases.` | Vercel (Git integration on `vitorecomp/personal-portifolio`) | app repo (`vercel.json`) |
+| `blog.` | GCE e2-micro VM `personal-host` (free tier): edge Caddy → Ghost 5.130 → local MySQL 8.0 | [`cloud/edge`](./cloud/edge), [`cloud/personal-blog`](./cloud/personal-blog) |
+| `taiga.` | Cloud Run `taiga` (free tier) via the edge Caddy; database on Neon (Postgres 15); uploads in GCS | [`cloud/taiga`](./cloud/taiga) |
 
-- **VM Terraform (applied by hand, [runbook](./documentation/vm-provisioning.md))**:
-  [`cloud/infra/envs/gcp-taiga`](./cloud/infra/envs/gcp-taiga) ([`modules/gce-vm`](./cloud/infra/modules/gce-vm)) and
-  [`cloud/infra/envs/oci-blog`](./cloud/infra/envs/oci-blog) ([`modules/oci-vm`](./cloud/infra/modules/oci-vm), spare OCI VM still being acquired).
-  CI only runs `fmt`/`validate`.
-- **Compose stacks**: [`cloud/edge`](./cloud/edge) (shared Caddy), [`cloud/personal-blog`](./cloud/personal-blog) and [`cloud/taiga`](./cloud/taiga)
-  (`compose.yml`, `.env.example`, `stack.json`). Secrets live in `/opt/stacks/<stack>/.env` on the VM; Taiga's Neon credentials are synced there from the `taiga-prod` GitHub environment.
-- **Scripts** (stdlib Python, all with `--dry-run`):
-  [`bootstrap_vm.py`](./cloud/scripts/bootstrap_vm.py) (Docker, deploy user, swap, sshd, firewall, backup timers; `--check` for drift),
-  [`deploy_stack.py`](./cloud/scripts/deploy_stack.py) (rsync + `docker compose up --wait` + HTTPS check; used by CI and locally),
-  [`backup_stack.py`](./cloud/scripts/backup_stack.py) (DB dump + volumes → restic in the `vitorx86-backups` GCS bucket),
-  [`migrate_gcp_data.py`](./cloud/scripts/migrate_gcp_data.py) (temporary: Cloud SQL/GCS → VMs).
+DNS is on Cloudflare (DNS-only records, managed by hand). Details: [cloud-architecture.md](./documentation/cloud-architecture.md).
+
+- **Terraform (applied by hand, never in CI)**: [`cloud/infra/envs/gcp-taiga`](./cloud/infra/envs/gcp-taiga) (VM, Taiga Cloud Run + Artifact Registry + Secret Manager + media bucket, backup bucket) and [`cloud/infra/envs/oci-blog`](./cloud/infra/envs/oci-blog) (spare OCI A1 VM, still being acquired by a retry loop). Runbook: [vm-provisioning.md](./documentation/vm-provisioning.md).
+- **Stacks**: `cloud/<stack>/` with `stack.json` + `.env.example` (+ `compose.yml` or an `up_script`). Secrets live only in `/opt/stacks/<stack>/.env` on the VM; Taiga's Neon credentials are synced there from the `taiga-prod` GitHub environment.
+- **Scripts** (stdlib Python / bash, all with `--dry-run`):
+  [`bootstrap_vm.py`](./cloud/scripts/bootstrap_vm.py) (host setup, `--check` for drift),
+  [`deploy_stack.py`](./cloud/scripts/deploy_stack.py) (rsync + compose or `up_script` + HTTPS check; used by CI and locally),
+  [`backup_stack.py`](./cloud/scripts/backup_stack.py) (DB dumps incl. remote Neon, volumes, GCS buckets → restic in `gs://vitorx86-backups`),
+  [`tf_apply_retry.sh`](./cloud/scripts/tf_apply_retry.sh) (OCI capacity retry loop),
+  [`configure_ai_spend_cap.py`](./cloud/scripts/configure_ai_spend_cap.py).
 
 ```bash
-python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<ip> --provider oracle --deploy-pubkey-file ~/.ssh/blog_deploy.pub --backup-stack personal-blog --dry-run
-python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<ip> --provider oracle --deploy-pubkey-file ~/.ssh/blog_deploy.pub --backup-stack personal-blog --check
-python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@<ip> --dry-run
-python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<ip> --init-env
-python3 cloud/scripts/migrate_gcp_data.py all --stack taiga --host deploy@<ip> --confirm-overwrite --dry-run
+python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<ip> --provider gce --deploy-pubkey-file ~/.ssh/blog_deploy.pub --check
+python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@<ip> --identity-file ~/.ssh/blog_deploy --dry-run
+python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<ip> --identity-file ~/.ssh/taiga_deploy      # -> Cloud Run
 ssh deploy@<ip> 'python3 /opt/stacks/.ops/backup_stack.py --stack taiga --restore-test'
-```
-
-**Legacy GCP stack (until Phase 5 of the runbook):**
-
-- **Shared Terraform Infrastructure ([`cloud/infra/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/infra))**:
-  - [`modules/load-balancer`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/infra/modules/load-balancer): Provisions the shared Global External HTTPS Load Balancer, static IP, Managed SSL Certificate, HTTP-to-HTTPS redirect, Cloud CDN + GCS static hosting buckets for `nobuffer-site` and `personal-portifolio`, and Cloud Run v2 + Cloud SQL for MySQL 8.0 + Serverless NEG + Artifact Registry for `personal-blog`.
-  - [`envs/prod`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/infra/envs/prod): Production environment configuration.
-- **`nobuffer-site` extras ([`cloud/nobuffer-site/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/nobuffer-site))**:
-  - [`reverse-proxy/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/nobuffer-site/reverse-proxy): Nginx vhost configurations (`demo.vitorx86.dev`, `homeapi.vitorx86.dev`, `maintance.vitorx86.dev`) deployed via [`.github/workflows/deploy-nginx-sites.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/deploy-nginx-sites.yml).
-  - [`maintenance/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/nobuffer-site/maintenance): Containerized static maintenance page.
-- **`personal-blog` Deployment ([`cloud/personal-blog/`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/personal-blog))**:
-  - [`cloudbuild.yaml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/personal-blog/cloudbuild.yaml): Validates the custom `vitorx86-garage` Ghost theme and builds/pushes the Ghost 5 container image to Artifact Registry.
-  - [`download_personal_blog.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/scripts/download_personal_blog.py): Clones/updates `vitorecomp/personal-blog` into `cloud/personal-blog/repo` (gitignored) and optionally submits the Cloud Build + Cloud Run deployment.
-  - [`seed_ghost_admin.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/scripts/seed_ghost_admin.py): Idempotently seeds the initial Ghost Admin Owner account via the Ghost Admin Setup API during the deployment pipeline.
-
-```bash
-# Preview downloading/updating and Cloud Build submission (safe, read-only)
-python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
-python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
 python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --services all --dry-run
-
-# Download/update and deploy workloads via Cloud Build
-python3 cloud/scripts/download_personal_blog.py --deploy
-python3 cloud/scripts/deploy_taiga.py --deploy
-python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --services all
 ```
 
 ### 2. `home-server/`
@@ -145,30 +119,17 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
 
 | Workflow | File | Trigger | Description |
 | :--- | :--- | :--- | :--- |
-| **CI Validation** | [`.github/workflows/ci.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/ci.yml) | Push, PR, manual | Scans tracked files and Git history for secrets, validates Python script syntax, runs `--dry-run` checks across `workspace/` and `cloud/` scripts, runs `terraform fmt -check` & `terraform validate` for every Terraform root (no plan/apply), and validates the compose stacks (`docker compose config`, `caddy validate`). |
-| **Deploy the Personal Blog (GCP VM)** | [`.github/workflows/deploy-blog.yml`](./.github/workflows/deploy-blog.yml) | Push on `cloud/personal-blog/**`, `repository_dispatch` (`deploy-personal-blog`), manual | SSH deploy (edge + blog) via `deploy_stack.py` to the GCP VM. Gated by `BLOG_DEPLOY_ENABLED`; environment `blog-prod`. |
-| **Deploy Taiga (GCE VM)** | [`.github/workflows/deploy-taiga.yml`](./.github/workflows/deploy-taiga.yml) | Push on `cloud/taiga/**`, `repository_dispatch` (`deploy-taiga`), manual | SSH deploy via `deploy_stack.py` to the GCE VM. Gated by `TAIGA_DEPLOY_ENABLED`; environment `taiga-prod`. |
-| **Build and Deploy the Personal Blog** _(legacy)_ | [`.github/workflows/build-blog.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/build-blog.yml) | `repository_dispatch` (`deploy-personal-blog`), manual | Clones `personal-blog` via [`download_personal_blog.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/scripts/download_personal_blog.py) and submits [`cloud/personal-blog/cloudbuild.yaml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/cloud/personal-blog/cloudbuild.yaml) to Cloud Build & Cloud Run. |
-| **Deploy the Nginx** | [`.github/workflows/deploy-nginx-sites.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/deploy-nginx-sites.yml) | Push on `cloud/nobuffer-site/reverse-proxy/**`, manual | Copies Nginx reverse-proxy configs over SSH, validates with `nginx -t`, reloads Nginx, and issues Certbot certificates. |
-| **Update Workspace Repo Stats** | [`.github/workflows/update-repo-stats.yml`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/.github/workflows/update-repo-stats.yml) | Weekly schedule (Mondays 06:00 UTC), manual | Runs [`update_repo_stats.py`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/scripts/update_repo_stats.py) and commits updated metadata to [`repo_stats.csv`](file:///usr/local/google/home/vieiravitor/workspace/personal/personal-infra/workspace/documentation/repo_stats.csv). |
+| **CI Validation** | [`ci.yml`](./.github/workflows/ci.yml) | Push, PR, manual | Secret scan (files + history), Python syntax and `--dry-run` checks, `terraform fmt -check` / `validate` for every root (no plan/apply), stack validation (`docker compose config`, `caddy validate`, shell syntax). |
+| **Deploy the Personal Blog (GCP VM)** | [`deploy-blog.yml`](./.github/workflows/deploy-blog.yml) | Push on `cloud/personal-blog/**` / `cloud/edge/**`, `repository_dispatch` (`deploy-personal-blog`), manual | SSH to the VM: edge + blog via `deploy_stack.py`. Gated by `BLOG_DEPLOY_ENABLED`; environment `blog-prod`. |
+| **Deploy Taiga (Cloud Run, via the VM)** | [`deploy-taiga.yml`](./.github/workflows/deploy-taiga.yml) | Push on `cloud/taiga/**` / `cloud/edge/**`, `repository_dispatch` (`deploy-taiga`), manual | SSH to the VM: edge, then `deploy-cloudrun.sh` (build, migrations against Neon, Secret Manager sync, Cloud Run revision). Gated by `TAIGA_DEPLOY_ENABLED`; environment `taiga-prod`. |
+| **Deploy the Nginx** | [`deploy-nginx-sites.yml`](./.github/workflows/deploy-nginx-sites.yml) | Push on `cloud/nobuffer-site/reverse-proxy/**`, manual | Copies Nginx reverse-proxy configs over SSH to a separate server, validates, reloads, Certbot. |
+| **Update Workspace Repo Stats** | [`update-repo-stats.yml`](./.github/workflows/update-repo-stats.yml) | Weekly (Mon 06:00 UTC), manual | Refreshes [`repo_stats.csv`](./workspace/documentation/repo_stats.csv). |
 
-### Required GitHub Secrets & Variables
+### GitHub Secrets & Variables
 
-- **VM deploys (environments `blog-prod` / `taiga-prod`)**: secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY`; variables `DEPLOY_KNOWN_HOSTS`, `DEPLOY_USER`; repository variables `BLOG_DEPLOY_ENABLED` / `TAIGA_DEPLOY_ENABLED`. See [pipeline-setup.md §5](./documentation/pipeline-setup.md#5-vm-deploy-workflows-ssh). The GCP entries below belong to the legacy stack and are deleted in Phase 5.
-- **Secrets (`personal-infra`)**:
-  - `GCP_SA_KEY`: GCP service account JSON key for Cloud Build, Cloud Run, Cloud SQL, Artifact Registry, and Terraform.
-  - `BLOG_ADMIN_PASSWORD`: Initial Ghost Admin Owner password seeded idempotently during the blog deployment pipeline (`build-blog.yml`).
-  - `BLOG_DB_PASSWORD` _(optional)_: Cloud SQL MySQL password for the Ghost user (auto-generated by Terraform if omitted).
-  - `HOST`, `USERNAME`, `KEY`: SSH credentials for the Nginx reverse-proxy deployment.
-  - `METRICS_TOKEN` _(optional)_: GitHub token with repo read access for `update_repo_stats.py`.
-- **Variables (`personal-infra`)**:
-  - `GCP_PROJECT_ID`, `GCP_REGION`: Target GCP project and region for Terraform, Cloud SQL, and Cloud Run.
-  - `GCS_BLOG_CONTENT_BUCKET_NAME` _(optional)_: GCS bucket name for persistent Ghost media/images on Cloud Run.
-  - `BLOG_DB_INSTANCE_NAME`, `BLOG_DB_TIER`, `BLOG_DB_NAME`, `BLOG_DB_USER` _(optional)_: Cloud SQL MySQL 8.0 settings for `personal-blog`.
-  - `GAR_BLOG_REPO`, `CLOUD_RUN_BLOG_SERVICE`, `BLOG_URL`, `BLOG_ADMIN_EMAIL` _(optional)_: Artifact Registry repo, Cloud Run service name, public URL, and initial Ghost Admin Owner email for `personal-blog`.
-  - `NOBUFFER_DOMAINS`, `PORTFOLIO_DOMAINS`, `BLOG_DOMAINS` _(optional JSON lists)_: Domains routed by the shared load balancer.
-- **Secrets (`nobuffer-site`, `personal-portifolio` & `personal-blog`)**:
-  - `PERSONAL_INFRA_TOKEN` (or `METRICS_TOKEN`): Fine-grained PAT or token with `contents: write` / `actions: write` on `vitorecomp/personal-infra` to trigger `repository_dispatch`.
+- **Environments `blog-prod` / `taiga-prod`** (deployments from `main` only): secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY`; variables `DEPLOY_KNOWN_HOSTS`, `DEPLOY_USER`. `taiga-prod` also holds `TAIGA_DB_HOST` / `TAIGA_DB_USER` / `TAIGA_DB_PASSWORD` (Neon), `TAIGA_ADMIN_PASSWORD`, and the variables `TAIGA_DB_NAME`, `TAIGA_ADMIN_EMAIL`; `blog-prod` holds `BLOG_ADMIN_EMAIL`.
+- **Repository**: secret `BLOG_ADMIN_PASSWORD` (Ghost owner check after deploys), `METRICS_TOKEN` (repo stats), `HOST` / `USERNAME` / `KEY` (Nginx server); variables `BLOG_DEPLOY_ENABLED`, `TAIGA_DEPLOY_ENABLED`.
+- No cloud credentials live in GitHub: Terraform runs from a workstation, Cloud Run deploys use the VM's service account.
 
 ---
 

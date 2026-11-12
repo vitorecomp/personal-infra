@@ -14,7 +14,6 @@ on the VM into `/opt/stacks/personal-blog/app` at the requested ref. Pushes to t
 | `compose.yml` | `ghost` (built from `./app`, `GHOST_VERSION` build arg, heap capped, content on volume `personal-blog_ghost-content`) + local `mysql:8.0.46` (tuned for a shared 1 GB VM, binlog off, private network). |
 | `.env.example` | Keys for `/opt/stacks/personal-blog/.env` on the VM (mode 0600, never committed, never written by CI). |
 | `stack.json` | Metadata for `deploy_stack.py` / `backup_stack.py` (app repo, theme-validation `pre_build`, `edge_tls_key: BLOG_TLS`, backup). |
-| `cloudbuild.yaml` | Legacy Cloud Run build (removed with the old GCP stack). |
 
 The final data of the old GCP blog is restored from the saved export
 (`gs://vitorx86-backups/migration/personal-blog/`, see the migration runbook).

@@ -1,124 +1,57 @@
 # Cloud Architecture
 
-> **Migration in progress.** This document describes the current (legacy) GCP stack, which keeps serving until
-> each cutover in the [migration runbook](./migration-runbook.md). Target architecture:
->
-> | Domain | Target | Defined in |
-> | :--- | :--- | :--- |
-> | `vitorx86.dev`, `www` | Vercel (`nobuffer-site` repo, Git integration) | Vercel project settings / `vercel.json` |
-> | `me.`, `cases.` | Vercel (`personal-portifolio` repo, Git integration) | Vercel project settings / `vercel.json` |
-> | `blog.` | GCE e2-micro VM: edge Caddy → Ghost 5.130 → local MySQL 8.0 (docker compose) | [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga), [`cloud/edge`](../cloud/edge), [`cloud/personal-blog`](../cloud/personal-blog) |
-> | `taiga.` | Edge Caddy on the VM → **Cloud Run** `taiga` (free tier, 0..1 instances); database on **Neon** (Postgres 15, AWS us-east-2); uploads in GCS `vitorx86-taiga-media` | [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga), [`cloud/edge`](../cloud/edge), [`cloud/taiga`](../cloud/taiga) |
->
-> DNS stays in Cloud DNS zone `vitorx86-dev` (project `study-deploys`) and is managed by hand. Both stacks back
-> up with restic to the GCS bucket `vitorx86-backups` ([backup-restore.md](./backup-restore.md)).
-
-This document describes the Google Cloud Platform (GCP) and reverse-proxy architecture provisioned and managed under [`cloud/`](../cloud).
-
----
-
-## 1. High-Level Topology
-
-All public web properties under `vitorx86.dev` share a single **Global External Managed HTTPS Load Balancer**, a single **Global Anycast IPv4 address** (`nobuffer-site-ip`), and a single **Google-Managed SSL Certificate** (`nobuffer-site-cert-v2`). Traffic is routed by hostname (`host_rule`) to the appropriate backend:
+Everything is on free tiers except the VM's IPv4 address (~US$3.60/month). DNS for `vitorx86.dev` is on
+**Cloudflare** (DNS-only records, managed by hand).
 
 ```mermaid
 flowchart LR
-    User["Client Browser"]
-
-    subgraph Edge["Google Cloud Global Edge"]
-        IP["Global Static IP\n(nobuffer-site-ip)"]
-        HTTPProxy["HTTP Proxy :80\n(HTTPS Redirect)"]
-        HTTPSProxy["HTTPS Proxy :443\n+ Managed SSL Cert"]
-        URLMap["URL Map\n(nobuffer-site-url-map)"]
-    end
-
-    subgraph StaticBackends["Static Workloads (Cloud CDN + GCS)"]
-        CDN1["Backend Bucket + Cloud CDN\n(nobuffer-site-backend)"]
-        GCS1[("GCS Bucket\n(website_bucket)")]
-
-        CDN2["Backend Bucket + Cloud CDN\n(personal-portifolio-backend)"]
-        GCS2[("GCS Bucket\n(portfolio_bucket)")]
-    end
-
-    subgraph DynamicBackends["Dynamic Workloads (Serverless + Managed DB)"]
-        BackendSvc["Backend Service\n(personal-blog-backend)"]
-        NEG["Serverless NEG\n(personal-blog-neg)"]
-        CloudRun["Cloud Run v2 Service\n(personal-blog / Ghost 5)"]
-        CloudSQL[("Cloud SQL MySQL 8.0\n(personal-blog-mysql)")]
-        BlogGCS[("Private GCS Bucket\n(blog_content_bucket)")]
-        GAR["Artifact Registry\n(personal-blog Docker Repo)"]
-    end
-
-    User -->|HTTP :80| IP
-    User -->|HTTPS :443| IP
-    IP --> HTTPProxy
-    IP --> HTTPSProxy
-    HTTPProxy -->|301 Redirect| HTTPSProxy
-    HTTPSProxy --> URLMap
-
-    URLMap -->|"Default: www.vitorx86.dev, vitorx86.dev"| CDN1
-    CDN1 --> GCS1
-
-    URLMap -->|"Host: cases.vitorx86.dev, me.vitorx86.dev"| CDN2
-    CDN2 --> GCS2
-
-    URLMap -->|"Host: blog.vitorx86.dev"| BackendSvc
-    BackendSvc --> NEG
-    NEG --> CloudRun
-    CloudRun -->|"/cloudsql Unix Socket"| CloudSQL
-    CloudRun -->|"/mnt/blog-storage (GCS FUSE)"| BlogGCS
-    GAR -.->|Container Image| CloudRun
+    U[Visitors] --> CF[Cloudflare DNS]
+    CF -->|vitorx86.dev, www, me, cases| V[Vercel]
+    CF -->|blog, taiga| E[edge Caddy on GCE e2-micro personal-host]
+    E -->|blog-ghost:2368| G[Ghost 5.130]
+    G --> M[(MySQL 8.0, local)]
+    E -->|https run.app| R[Cloud Run: taiga]
+    R --> N[(Neon Postgres 15, AWS us-east-2)]
+    R --> B[(GCS vitorx86-taiga-media)]
+    E -.nightly restic.-> K[(GCS vitorx86-backups)]
 ```
 
----
+| Domain | Runs on | Code |
+| :--- | :--- | :--- |
+| `vitorx86.dev`, `www` | Vercel, Git integration on `vitorecomp/nobuffer-site` (static `build/`) | app repo `vercel.json` |
+| `me.`, `cases.` | Vercel, Git integration on `vitorecomp/personal-portifolio` (static export `out/`) | app repo `vercel.json` |
+| `blog.` | GCE e2-micro `personal-host` (`personal-project-514501`, us-central1): edge Caddy → Ghost → local MySQL | [`cloud/edge`](../cloud/edge), [`cloud/personal-blog`](../cloud/personal-blog) |
+| `taiga.` | Cloud Run `taiga` (1 vCPU / 512 MiB, 0..1 instances), proxied by the edge Caddy; Neon database; uploads in GCS | [`cloud/taiga`](../cloud/taiga) |
 
-## 2. Hosted Workloads
+## Components
 
-| Workload | Source Repo | Domains | Hosting Model | Backing Storage |
-| :--- | :--- | :--- | :--- | :--- |
-| **Main Website** (`nobuffer-site`) | `vitorecomp/nobuffer-site` | `www.vitorx86.dev`, `vitorx86.dev` | Cloud CDN + GCS Static Bucket | Public GCS Bucket (`website_bucket`) |
-| **Personal Portfolio** (`personal-portifolio`) | `vitorecomp/personal-portifolio` | `cases.vitorx86.dev`, `me.vitorx86.dev` | Cloud CDN + GCS Static Bucket (Next.js/Nextra static export) | Public GCS Bucket (`portfolio_bucket`) |
-| **Technology Blog** (`personal-blog`) | `vitorecomp/personal-blog` | `blog.vitorx86.dev` | Cloud Run v2 (`ghost:5-alpine` + `vitorx86-garage` theme) via Serverless NEG | Cloud SQL for MySQL 8.0 (`personal-blog-mysql`) + Private GCS Bucket (`blog_content_bucket`) |
-| **Taiga Project Manager** (`taiga`) | `personal-infra/cloud/taiga` | `taiga.vitorx86.dev` | Cloud Run v2 (`taiga-front` + `taiga-back` + `nginx` on `:8080`) via Serverless NEG | Cloud SQL for PostgreSQL 15 (`taiga-postgres`) + Private GCS Bucket (`taiga_content_bucket`) |
-| **Subdomain Reverse Proxy** | `personal-infra/cloud/nobuffer-site/reverse-proxy` | `demo.vitorx86.dev`, `homeapi.vitorx86.dev`, `maintance.vitorx86.dev` | Nginx + Certbot on Linux Server | Local container ports (`localhost:8081`) |
+- **VM `personal-host`** ([`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga) → [`modules/gce-vm`](../cloud/infra/modules/gce-vm)):
+  e2-micro + 30 GB pd-standard (free tier), dedicated VPC and firewall (22 for SSH deploys, 80/443), static IPv4
+  `35.255.9.34`, 3 GB swap, Docker. Configured by [`bootstrap_vm.py`](../cloud/scripts/bootstrap_vm.py); runs the
+  `edge` and `personal-blog` compose stacks, builds the Taiga image and deploys it to Cloud Run with its own
+  service account (no keys anywhere).
+- **Edge Caddy** ([`cloud/edge`](../cloud/edge)): only container publishing 80/443; Let's Encrypt certificates
+  (persisted in `edge_caddy-data`); per-site TLS mode in its `.env`.
+- **Ghost** ([`cloud/personal-blog`](../cloud/personal-blog)): image from `vitorecomp/personal-blog`, built on the VM;
+  MySQL 8.0 tuned for 1 GB RAM; content volume `personal-blog_ghost-content`.
+- **Taiga on Cloud Run** ([`cloud/taiga`](../cloud/taiga)): image in Artifact Registry (only the newest kept),
+  `TAIGA_SECRET_KEY` / DB password in Secret Manager, uploads mounted from `gs://vitorx86-taiga-media`, migrations
+  run from the VM at deploy time (instances skip them, so cold starts stay short). Taiga 6.10 needs Postgres ≤ 15.
+- **Neon**: managed Postgres 15 (free plan; compute scales to zero, the container health check never touches it).
+- **Backups** ([backup-restore.md](./backup-restore.md)): daily restic snapshots to `gs://vitorx86-backups`
+  (blog MySQL + content; Taiga Neon dump + media bucket mirror + edge certificates).
+- **Spare OCI VM** ([`cloud/infra/envs/oci-blog`](../cloud/infra/envs/oci-blog)): Always Free A1 in `sa-saopaulo-1`,
+  compartment `vitorecomp`; no capacity yet, a retry loop (`oci-blog-retry.service` on the VM) keeps trying.
+  OCI has a budget alert on any spend.
 
----
+## Free-tier guardrails
 
-## 3. Component Breakdown
-
-### 3.1 Shared Edge & Load Balancing ([`cloud/infra/modules/load-balancer/main.tf`](../cloud/infra/modules/load-balancer/main.tf))
-- **Static IP (`google_compute_global_address.nobuffer_site_ip`)**: Single global IPv4 address used by all DNS `A` records for load-balanced domains.
-- **HTTP-to-HTTPS Redirect**:
-  - `google_compute_global_forwarding_rule.nobuffer_site_forwarding_rule` (Port `80`)
-  - `google_compute_target_http_proxy.nobuffer_site_http_proxy`
-  - `google_compute_url_map.nobuffer_site_redirect_map` (`https_redirect = true`, `strip_query = false`)
-- **HTTPS Termination & Routing**:
-  - `google_compute_global_forwarding_rule.nobuffer_site_forwarding_rule_https` (Port `443`, `EXTERNAL_MANAGED`)
-  - `google_compute_managed_ssl_certificate.nobuffer_site_cert`: Automatically provisions and renews TLS certificates for the union of `var.domain`, `var.portfolio_domain`, and `var.blog_domain`.
-  - `google_compute_url_map.nobuffer_site_url_map`:
-    - **Default service**: Routes unmatched hosts (`www.vitorx86.dev`, `vitorx86.dev`) to `nobuffer_site_backend`.
-    - **`portfolio-matcher`**: Routes `var.portfolio_domain` (`cases.vitorx86.dev`, `me.vitorx86.dev`) to `portfolio_backend`.
-    - **`blog-matcher`**: Routes `var.blog_domain` (`blog.vitorx86.dev`) to `blog_backend` (Cloud Run Serverless NEG).
-
-### 3.2 Static Website Backends (`nobuffer-site` & `personal-portifolio`)
-- **GCS Buckets (`website_bucket`, `portfolio_bucket`)**:
-  - Multi-region `US` location with `uniform_bucket_level_access = true`.
-  - Configured with `main_page_suffix = "index.html"` and `not_found_page = "404.html"`.
-  - Public read access granted via `roles/storage.objectViewer` for `allUsers`.
-- **Cloud CDN (`nobuffer_site_backend`, `portfolio_backend`)**:
-  - `CACHE_ALL_STATIC` mode with `client_ttl = 3600`, `default_ttl = 3600`, `max_ttl = 86400`, and `serve_while_stale = 86400`.
-  - HTML entrypoints (`index.html`, `404.html`) are uploaded with `Cache-Control: no-cache` during Cloud Build so new deploys take effect immediately without serving stale asset hashes.
-
-### 3.3 Dynamic Blog Backend (`personal-blog` on Cloud Run + Cloud SQL)
-- **Artifact Registry (`google_artifact_registry_repository.blog_repo`)**:
-  - Regional Docker repository (`personal-blog`) storing versioned Ghost 5 + `vitorx86-garage` images built by Cloud Build.
-- **Cloud SQL for MySQL 8.0 (`google_sql_database_instance.blog_db`)**:
-  - Managed MySQL 8.0 instance (`db-f1-micro` by default, `PD_SSD` with `disk_autoresize = true` and daily automated backups).
-  - Dedicated `ghost` database (`utf8mb4` / `utf8mb4_0900_ai_ci`) and `ghost` MySQL user with a 32-character password managed by Terraform.
-- **Cloud Run v2 Service (`google_cloud_run_v2_service.blog`)**:
-  - Runs on `EXECUTION_ENVIRONMENT_GEN2` with `ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"` so traffic enters through the shared HTTPS Load Balancer.
-  - Connects to Cloud SQL over the native Cloud SQL Auth Proxy Unix socket mounted at `/cloudsql/<connection_name>`.
-  - Optionally mounts a private GCS bucket (`blog_content_bucket`) at `/mnt/blog-storage` via Cloud Storage FUSE to persist uploaded images and media across container restarts.
-
-### 3.4 Nginx Subdomain Reverse Proxy ([`cloud/nobuffer-site/reverse-proxy/`](../cloud/nobuffer-site/reverse-proxy))
-- Manages Nginx virtual host configs (`demo.vitorx86.dev`, `homeapi.vitorx86.dev`, `maintance.vitorx86.dev`) for self-hosted/VM container workloads, with automated TLS certificate issuance via Certbot.
+| Service | Limit | How we stay inside |
+| :--- | :--- | :--- |
+| Compute Engine | 1 e2-micro, 30 GB pd-standard, us-central1 | `machine_type`/disk pinned in Terraform |
+| Cloud Run | 180k vCPU-s, 360k GiB-s, 2M requests / month | 1 vCPU / 512 MiB, max 1 instance, request-based CPU, scale to zero |
+| Artifact Registry | 0.5 GB | cleanup policy keeps 1 image (~250 MB) |
+| Secret Manager | 6 active versions | 3 secrets, old versions destroyed on change |
+| Cloud Storage | 5 GB in us-central1 | media + backups are a few MB |
+| Network egress | 1 GB/month (Premium tier) | small personal traffic |
+| Not free | VM external IPv4 | ~US$3.60/month (Google bills all in-use VM IPv4 beyond 1 h/month) |

@@ -1,5 +1,11 @@
 # Migration Runbook: GCP → Vercel + compose VMs
 
+> **Completed 2026-11-12. Kept as history.** Final state: static sites on Vercel; the blog on the GCE e2-micro
+> `personal-host` (Ghost + local MySQL behind the edge Caddy); Taiga on Cloud Run with Neon Postgres 15; DNS on
+> Cloudflare. The `compute-bench` stack was destroyed (46 resources) and `migrate_gcp_data.py` deleted; its final
+> exports/archives are in `gs://vitorx86-backups/migration/`. Current docs: [cloud-architecture.md](./cloud-architecture.md),
+> [vm-provisioning.md](./vm-provisioning.md), [pipeline-setup.md](./pipeline-setup.md).
+
 Moves everything off the `compute-bench` GCP stack (Global LB + CDN, GCS static sites, Cloud Run,
 Cloud SQL, Cloud Build) to:
 

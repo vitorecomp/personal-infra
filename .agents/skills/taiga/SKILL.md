@@ -35,7 +35,7 @@ When the user invokes `/taiga ...`, interpret their arguments as follows:
 
 > [!IMPORTANT]
 > - Always run the checked-in CLI scripts (`taiga_cli.py` or `enroll_taiga_projects.py`) via `run_command` rather than inline `python3 -c` socket/HTTP snippets.
-> - Authentication is automatic: `taiga_cli.py` checks `TAIGA_AUTH_TOKEN`, `~/.cache/taiga_cli/token.json`, `TAIGA_ADMIN_PASSWORD`, and automatically falls back to reading `TAIGA_ADMIN_PASSWORD` from the `taiga` Cloud Run service in GCP project `compute-bench` (`us-central1`) via `gcloud`.
+> - Authentication is automatic: `taiga_cli.py` checks `TAIGA_AUTH_TOKEN`, `~/.cache/taiga_cli/token.json`, `TAIGA_ADMIN_PASSWORD`, and automatically falls back to the `taiga-admin-password` secret in Secret Manager (GCP project `personal-project-514501`) via `gcloud secrets versions access`.
 > - All mutating commands support `--dry-run`.
 
 ---

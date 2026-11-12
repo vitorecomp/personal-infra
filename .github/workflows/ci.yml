@@ -53,8 +53,6 @@ jobs:
 
     - name: Verify cloud download & deploy scripts dry-run
       run: |
-        python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
-        python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
         BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --dry-run
         TAIGA_ADMIN_EMAIL=ci@example.com TAIGA_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_taiga_admin.py --dry-run
         python3 cloud/scripts/configure_ai_spend_cap.py compute-bench --billing-account 000000-000000-000000 --project-number 1234567890 --amount 1200 --services all --dry-run
@@ -69,12 +67,6 @@ jobs:
         TAIGA_DB_HOST=db.example TAIGA_DB_NAME=taiga TAIGA_DB_USER=ci TAIGA_DB_PASSWORD=ci python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --sync-env TAIGA_DB_HOST,TAIGA_DB_NAME,TAIGA_DB_USER,TAIGA_DB_PASSWORD --dry-run
         python3 cloud/scripts/backup_stack.py --stack-dir cloud/personal-blog --dry-run
         python3 cloud/scripts/backup_stack.py --stack-dir cloud/taiga --restore-test --dry-run
-        python3 cloud/scripts/migrate_gcp_data.py archive --stack taiga --dry-run
-        python3 cloud/scripts/migrate_gcp_data.py all --stack personal-blog --host deploy@example.invalid --confirm-overwrite --dry-run
-        python3 cloud/scripts/migrate_gcp_data.py copy-secrets --stack taiga --host deploy@example.invalid --dry-run
-        python3 cloud/scripts/migrate_gcp_data.py import --stack personal-blog --host deploy@example.invalid --local-export /tmp/ci-export --confirm-overwrite --dry-run
-        python3 cloud/scripts/migrate_gcp_data.py verify --stack personal-blog --host deploy@example.invalid --offline --dry-run
-        python3 cloud/scripts/migrate_gcp_data.py export --stack taiga --host deploy@example.invalid --upload-to gs://ci-bucket/migration --dry-run
         bash -n cloud/scripts/tf_apply_retry.sh && cloud/scripts/tf_apply_retry.sh --env oci-blog --dry-run
         BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --connect-ip 192.0.2.10 --insecure --dry-run
 
@@ -84,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [ "prod", "gcp-taiga", "oci-blog" ]
+        env: [ "gcp-taiga", "oci-blog" ]
     steps:
     - uses: actions/checkout@v7
 
@@ -98,7 +90,7 @@ jobs:
         terraform fmt -check -recursive cloud/infra
 
     # Validation only: no plan/apply ever runs in CI. VM roots are applied by hand
-    # (documentation/vm-provisioning.md); prod is legacy until it is destroyed.
+    # (documentation/vm-provisioning.md).
     - name: Terraform init & validate
       working-directory: cloud/infra/envs/${{ matrix.env }}
       run: |

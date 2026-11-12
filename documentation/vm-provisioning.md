@@ -7,7 +7,6 @@ The two compose VMs are created with Terraform **run by hand from your workstati
 | :--- | :--- | :--- | :--- |
 | [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga) | GCP project `personal-project-514501` | `taiga-vpc` + subnet + firewall (22, 80/443, ICMP), static IP `taiga-ip`, **e2-micro** VM `personal-host` (hosts the blog + edge Caddy; builds/deploys Taiga), **Cloud Run** `taiga` + Artifact Registry `taiga` + Secret Manager + bucket `vitorx86-taiga-media` (30 GB pd-standard, Ubuntu 24.04 amd64), SA `taiga-vm`, backup bucket `vitorx86-backups` + SA `stack-backup-writer` | `gs://personal-project-514501-tfstate/vms/gcp-taiga` |
 | [`cloud/infra/envs/oci-blog`](../cloud/infra/envs/oci-blog) (spare, not used by any stack yet) | OCI compartment `vitorecomp` | VCN + IGW + route table + security list + public subnet, **A1.Flex 1 OCPU / 6 GB** VM `blog` (50 GB boot, Ubuntu 24.04 aarch64), reserved public IP (+ an empty `taiga-backups` bucket from the old cross-cloud design, removed once the VM exists) | `gs://personal-project-514501-tfstate/vms/oci-blog` |
-| [`cloud/infra/envs/prod`](../cloud/infra/envs/prod) | GCP project `compute-bench` | **Legacy** LB/CDN/Cloud Run/Cloud SQL stack. Only touched again for the final destroy ([§7](#7-decommission-the-legacy-compute-bench-stack-phase-5)). | `gs://compute-bench_cloudbuild/terraform/state/personal-infra-prod` |
 
 Both stacks back up with restic to the GCS bucket `vitorx86-backups` ([backup-restore.md](./backup-restore.md)).
 
@@ -198,33 +197,8 @@ gh variable set BLOG_DEPLOY_ENABLED --body true      # repository-level gate
 
 ---
 
-## 7. Decommission the legacy `compute-bench` stack (Phase 5)
+## 7. Legacy stack (done)
 
-Only after both cutovers plus the rollback window, and after the final archives
-(`python3 cloud/scripts/migrate_gcp_data.py archive --stack personal-blog` and `--stack taiga`).
-
-```bash
-cd cloud/infra/envs/prod
-gcloud auth application-default login      # account with owner on compute-bench
-terraform init
-# 1. deletion_protection on the Cloud SQL instances is a Terraform-only guard: flip it in state first
-terraform apply \
-  -var blog_db_deletion_protection=false -var taiga_db_deletion_protection=false \
-  -target='module.load_balancer.google_sql_database_instance.blog_db[0]' \
-  -target='module.load_balancer.google_sql_database_instance.taiga_db[0]'
-# 2. content buckets have force_destroy=false: empty them (archives are already downloaded)
-gcloud storage rm -r "gs://blog-content-compute-bench/**" "gs://taiga-content-compute-bench/**"
-# 3. destroy everything in this state (~45 resources) and REVIEW the plan
-terraform plan -destroy \
-  -var blog_db_deletion_protection=false -var taiga_db_deletion_protection=false -out destroy.tfplan
-terraform apply destroy.tfplan
-```
-
-Read the destroy plan carefully: it must only contain `module.load_balancer.*` resources. The g4 VMs,
-the `aidemo-space` zone, `aiconnect-lb` and the `study-deploys` DNS zone are not in this state and must
-stay untouched. Releasing `nobuffer-site-ip` is the point of no rollback. If the provider reports
-`deletion_protection` on the Cloud Run services, flip it the same way as step 1.
-
-Afterwards: delete `gs://compute-bench_cloudbuild/terraform/state/personal-infra-prod/` (keep the
-bucket), delete the `personal-infra-deployer` service account and its keys, and remove `GCP_SA_KEY`
-plus the old GCP repository variables from GitHub ([migration runbook, Phase 5](./migration-runbook.md#phase-5--decommission-compute-bench)).
+The old `compute-bench` stack (Global LB, Cloud CDN, Cloud Run, Cloud SQL, Cloud Build) was destroyed on
+2026-11-12 with Terraform (46 resources), its state removed and its code deleted. Final Cloud SQL exports and
+content are kept in `gs://vitorx86-backups/migration/<stack>/` ([migration runbook](./migration-runbook.md)).
