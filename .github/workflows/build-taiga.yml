@@ -1,15 +1,10 @@
 name: Build and Deploy Taiga Project Manager
+# Frozen during the VM migration (documentation/migration-runbook.md): push triggers removed so
+# merges cannot redeploy Cloud Run. Manual and repository_dispatch runs still work until cutover.
 on:
   workflow_dispatch:
   repository_dispatch:
     types: [ "deploy-taiga" ]
-  push:
-    branches: [ "main", "master" ]
-    paths:
-      - "cloud/taiga/**"
-      - "cloud/scripts/deploy_taiga.py"
-      - "cloud/scripts/seed_taiga_admin.py"
-      - ".github/workflows/build-taiga.yml"
 
 concurrency:
   group: build-taiga
