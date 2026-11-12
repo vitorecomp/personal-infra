@@ -43,3 +43,9 @@ variable "backup_bucket_name" {
   type        = string
   default     = "my-infra-backups"
 }
+
+variable "taiga_media_bucket_name" {
+  description = "Globally unique GCS bucket mounted into the Taiga Cloud Run service for uploads"
+  type        = string
+  default     = "my-taiga-media"
+}

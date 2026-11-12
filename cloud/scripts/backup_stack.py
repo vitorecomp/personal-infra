@@ -28,6 +28,7 @@ import gzip
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -200,6 +201,25 @@ class Backup:
         print(f"[ok] Dumped {label} database -> {target} ({target.stat().st_size} bytes)")
         return target
 
+    def sync_gcs(self) -> bool:
+        """Mirrors buckets listed in backup.gcs into <dump_dir>/gcs/<bucket> (VM service account auth)."""
+        for uri in (self.meta.get("backup") or {}).get("gcs", []):
+            bucket = uri.removeprefix("gs://").split("/", 1)[0]
+            target = self.dump_dir / "gcs" / bucket
+            gcloud = shutil.which("gcloud") or "/snap/bin/gcloud"
+            cmd = [gcloud, "storage", "rsync", "--recursive", "--delete-unmatched-destination-objects", uri, str(target)]
+            if self.dry_run:
+                self.say_cmd(cmd)
+                continue
+            target.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                print(f"[error] gcloud storage rsync {uri} failed: {result.stderr.strip()[-300:]}", file=sys.stderr)
+                return False
+            files = sum(1 for p in target.rglob("*") if p.is_file())
+            print(f"[ok] Mirrored {uri} -> {target} ({files} files)")
+        return True
+
     def prune_local(self, keep: int) -> None:
         dumps = sorted(self.dump_dir.glob(f"{self.name}-db-*"), key=lambda p: p.name, reverse=True)
         for old in dumps[keep:]:
@@ -238,6 +258,8 @@ class Backup:
         if self.dump_database() is None and self.meta.get("backup", {}).get("db"):
             return False
         self.prune_local(keep_local)
+        if not self.sync_gcs():
+            return False
         result = self.restic(["backup", "/backup", "--tag", self.name, "--host", self.name], self.mounts())
         if result.returncode != 0:
             print("[error] restic backup failed (run with --init if the repository is new)", file=sys.stderr)

@@ -129,7 +129,13 @@ jobs:
 
     - name: docker compose config
       working-directory: cloud/${{ matrix.stack }}
-      run: docker compose -f compose.yml --env-file .env.example config -q
+      run: |
+        if [ -f compose.yml ]; then docker compose -f compose.yml --env-file .env.example config -q; else echo "no compose.yml (stack deploys via its up_script)"; fi
+
+    - name: shell scripts syntax
+      working-directory: cloud/${{ matrix.stack }}
+      run: |
+        for f in *.sh; do [ -e "$f" ] || continue; bash -n "$f" && echo "ok $f"; done
 
     - name: caddy validate
       if: matrix.stack == 'edge'

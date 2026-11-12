@@ -11,10 +11,10 @@ personal-infra/
 ├── documentation/            # Project, architecture, cloud setup, and pipeline documentation
 ├── cloud/                    # Cloud infrastructure provisioning and workload deployments
 │   ├── infra/                # Terraform (applied by hand): GCP VM (gcp-taiga), spare OCI VM (oci-blog), legacy GCP LB (prod)
-│   ├── edge/                 # Shared Caddy on the GCP VM: TLS + routing for taiga. and blog.
+│   ├── edge/                 # Shared Caddy on the GCP VM: TLS for blog. and taiga. (proxied to Cloud Run)
 │   ├── nobuffer-site/        # Nginx reverse-proxy & maintenance page (the site itself is on Vercel)
 │   ├── personal-blog/        # Ghost + local MySQL compose stack for the GCP VM (+ legacy Cloud Build)
-│   ├── taiga/                # Taiga image + compose stack for the GCE VM (+ legacy Cloud Build)
+│   ├── taiga/                # Taiga image + Cloud Run deploy script (built/deployed from the VM)
 │   └── scripts/              # bootstrap/deploy/backup/migration scripts + legacy Cloud Build helpers
 ├── home-server/              # Home server / self-hosted services and maintenance (TBD)
 ├── linux/                    # Linux OS bootstrap, packages, and system configuration (TBD)
@@ -37,8 +37,8 @@ personal-infra/
 Manages cloud infrastructure and deployments for hosted sites and services.
 
 > **Migration in progress**: see the [migration runbook](./documentation/migration-runbook.md). Target layout:
-> `nobuffer-site` + `personal-portifolio` on **Vercel** (done: Git integration on the app repos, no workflow here), `personal-blog` (Ghost + local MySQL) and `taiga` on one **GCE free-tier e2-micro VM** behind a shared Caddy
-> (`cloud/edge`), Taiga's database on **Neon** (managed Postgres 15), all deployed over SSH.
+> `nobuffer-site` + `personal-portifolio` on **Vercel** (done: Git integration on the app repos, no workflow here), `personal-blog` (Ghost + local MySQL) on a **GCE free-tier e2-micro VM** behind a shared Caddy (`cloud/edge`),
+> `taiga` on **Cloud Run** (free tier, deployed from the VM) with its database on **Neon** (managed Postgres 15).
 > The legacy GCP stack described further below keeps serving until each cutover.
 
 - **VM Terraform (applied by hand, [runbook](./documentation/vm-provisioning.md))**:
