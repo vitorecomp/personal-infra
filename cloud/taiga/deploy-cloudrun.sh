@@ -65,6 +65,10 @@ fi
 # 3. Secrets -> Secret Manager ----------------------------------------------
 sync_secret() {
   local name="$1" value="$2" current v
+  if ! "$GCLOUD" secrets describe "$name" --project "$PROJECT" >/dev/null 2>&1; then
+    log "secret ${name}: does not exist yet (apply cloud/infra/envs/gcp-taiga); skipping"
+    return
+  fi
   current="$("$GCLOUD" secrets versions access latest --secret="$name" --project "$PROJECT" 2>/dev/null || true)"
   if [[ "$current" == "$value" ]]; then
     log "secret ${name}: unchanged"
@@ -80,6 +84,7 @@ sync_secret() {
 }
 sync_secret taiga-secret-key "$TAIGA_SECRET_KEY"
 sync_secret taiga-db-password "$TAIGA_DB_PASSWORD"
+[[ -n "${TAIGA_ADMIN_PASSWORD:-}" ]] && sync_secret taiga-admin-password "$TAIGA_ADMIN_PASSWORD"
 
 # 4. Cloud Run revision -------------------------------------------------------
 envs="^@^POSTGRES_HOST=${TAIGA_DB_HOST}@POSTGRES_PORT=${TAIGA_DB_PORT:-5432}@POSTGRES_DB=${TAIGA_DB_NAME:-taiga}"

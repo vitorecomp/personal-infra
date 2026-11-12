@@ -49,49 +49,22 @@ def slugify_name(name: str) -> str:
     return slug or name.lower()
 
 
-def _resolve_password_from_cloud_run(
-    project_id: str = "compute-bench",
-    region: str = "us-central1",
-    service_name: str = "taiga",
+def _resolve_password_from_secret_manager(
+    project_id: str = "personal-project-514501",
+    secret: str = "taiga-admin-password",
 ) -> str:
-    """Falls back to reading TAIGA_ADMIN_PASSWORD from the Cloud Run service via gcloud if authenticated locally."""
+    """Falls back to the Taiga admin password stored in Secret Manager (gcloud must be authenticated)."""
     try:
         res = subprocess.run(
-            [
-                "gcloud",
-                "run",
-                "services",
-                "describe",
-                service_name,
-                f"--project={project_id}",
-                f"--region={region}",
-                "--format=json",
-            ],
+            ["gcloud", "secrets", "versions", "access", "latest", f"--secret={secret}", f"--project={project_id}"],
             check=False,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=20,
         )
-        if res.returncode != 0:
-            return ""
-        data = json.loads(res.stdout)
-        containers = (
-            data.get("spec", {})
-            .get("template", {})
-            .get("spec", {})
-            .get("containers", [])
-        )
-        if not containers:
-            return ""
-        for env_entry in containers[0].get("env", []):
-            if (
-                isinstance(env_entry, dict)
-                and env_entry.get("name") == "TAIGA_ADMIN_PASSWORD"
-            ):
-                return str(env_entry.get("value") or "").strip()
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return ""
-    return ""
+    return res.stdout.strip() if res.returncode == 0 else ""
 
 
 def _load_cached_token(taiga_url: str, username: str) -> tuple[str, int | None]:
@@ -229,10 +202,10 @@ class TaigaClient:
                 self.user_id = cached_uid
                 return self.auth_token
 
-        password = self.password or _resolve_password_from_cloud_run()
+        password = self.password or _resolve_password_from_secret_manager()
         if not password:
             sys.exit(
-                "[error] Set TAIGA_ADMIN_PASSWORD or TAIGA_AUTH_TOKEN (or authenticate gcloud to compute-bench)."
+                "[error] Set TAIGA_ADMIN_PASSWORD or TAIGA_AUTH_TOKEN (or authenticate gcloud to personal-project-514501)."
             )
 
         for login_id in (self.username, self.email):
