@@ -118,11 +118,24 @@ Do the blog first: it has the least data at risk and tests the riskiest provider
 4. CI: set the `blog-prod` secrets/variables ([vm-provisioning.md §5](./vm-provisioning.md#5-hand-off-to-cicd)),
    `gh variable set BLOG_DEPLOY_ENABLED --body true`, run *Deploy the Personal Blog (Oracle VM)* manually.
 
-**Rehearsal**
+**Restore the saved export** (the old Cloud SQL/GCS blog may already be deleted)
+
+The final blog data was exported on 2026-11-12 (`export-20261112T053347Z`: MySQL dump + content, restore-tested
+in MySQL 8.0.46 with identical row counts). It lives in `~/.local/state/personal-infra/migrations/personal-blog/`
+and in `gs://vitorx86-backups/migration/personal-blog/`. If the local copy is gone, download it first:
 
 ```bash
-python3 cloud/scripts/migrate_gcp_data.py all --stack personal-blog --host deploy@$IP \
-  --identity-file ~/.ssh/blog_deploy --confirm-overwrite
+mkdir -p ~/.local/state/personal-infra/migrations/personal-blog
+gcloud storage rsync --recursive gs://vitorx86-backups/migration/personal-blog/export-20261112T053347Z \
+  ~/.local/state/personal-infra/migrations/personal-blog/export-20261112T053347Z
+```
+
+```bash
+EXPORT=~/.local/state/personal-infra/migrations/personal-blog/export-20261112T053347Z
+python3 cloud/scripts/migrate_gcp_data.py import --stack personal-blog --host deploy@$IP \
+  --identity-file ~/.ssh/blog_deploy --local-export $EXPORT --confirm-overwrite
+python3 cloud/scripts/migrate_gcp_data.py verify --stack personal-blog --host deploy@$IP \
+  --identity-file ~/.ssh/blog_deploy --offline --local-export $EXPORT    # row/file counts vs the export manifest
 curl -sk --resolve blog.vitorx86.dev:443:$IP https://blog.vitorx86.dev/ghost/api/admin/site/ | head -c 300   # "version":"5.130"
 curl -sk --resolve blog.vitorx86.dev:443:$IP -o /dev/null -w '%{http_code}\n' https://blog.vitorx86.dev/rss/
 BLOG_ADMIN_EMAIL=... BLOG_ADMIN_PASSWORD=... python3 cloud/scripts/seed_ghost_admin.py --connect-ip $IP --insecure
@@ -139,7 +152,7 @@ throwaway browser profile with an `/etc/hosts` entry.
 | :--- | :--- | :--- |
 | T−1 day | you | `blog` record TTL → 60 |
 | T−15 min | you | Content freeze (no edits in Ghost admin on the old site) |
-| T−10 min | either | Final sync: `migrate_gcp_data.py all --stack personal-blog ... --confirm-overwrite` (`verify` must show parity) |
+| T−10 min | either | Data: restore the saved export (above) if not done yet; `verify --offline` must show parity. (If the old Cloud SQL still exists and the blog changed since 2026-11-12, run `migrate_gcp_data.py all --stack personal-blog ... --confirm-overwrite` instead.) |
 | T−5 min | you | `web_source_cidrs = ["0.0.0.0/0"]` in `oci-blog` → plan → apply |
 | T0 | you | Cloud DNS: `blog` A → `$IP` |
 | T+1 min | either | Once the authoritative answer shows `$IP` (`dig +short blog.vitorx86.dev @ns-cloud-a1.googledomains.com`, or without dig: `curl -s 'https://dns.google/resolve?name=blog.vitorx86.dev&type=A'`), switch Caddy to Let's Encrypt on the VM: `cd /opt/stacks/personal-blog && sed -i 's/^CADDY_TLS=.*/CADDY_TLS=vitor.ecomp@gmail.com/' .env && docker compose up -d caddy`, then watch `docker compose logs -f caddy` for "certificate obtained successfully" (switching only after DNS points here avoids failed ACME validations, which Let's Encrypt rate-limits) |
@@ -147,7 +160,7 @@ throwaway browser profile with an `/etc/hosts` entry.
 | T+10 min | either | Push a theme change (or `workflow_dispatch`) in `personal-blog` and see it deploy via SSH |
 | T+1 day | either | `systemctl list-timers 'stack-backup@*'` ran; `journalctl -u stack-backup@personal-blog`; TTL back to 300 |
 
-**Rollback:** blog A record → `34.110.226.37`. Cloud Run + Cloud SQL were never modified. Anything written on
+**Rollback:** while the old stack exists, blog A record → `34.110.226.37` (Cloud Run + Cloud SQL were never modified). After Phase 5, the saved export is the fallback. Anything written on
 the VM after cutover must be reverse-synced (`mysqldump` on the VM → import via cloud-sql-proxy) or accepted as lost.
 
 **Follow-up PR:** delete `build-blog.yml`, `cloud/personal-blog/cloudbuild.yaml`, `download_personal_blog.py`
@@ -183,7 +196,9 @@ Same flow as Phase 3, with these differences:
 
 ## Phase 5: Decommission `compute-bench`
 
-After ~7 days without rollback:
+Prerequisites: Taiga is live on its VM, `vitorx86.dev`/`www`/`me`/`cases` resolve to Vercel, and the final exports
+of both apps are in `gs://vitorx86-backups/migration/` (done 2026-11-12 for both). The blog no longer needs the old
+stack: Phase 3 restores it from the saved export. Then:
 
 1. Final archives: `migrate_gcp_data.py archive --stack personal-blog` and `--stack taiga`.
 2. Destroy the legacy Terraform state: [vm-provisioning.md §7](./vm-provisioning.md#7-decommission-the-legacy-compute-bench-stack-phase-5).

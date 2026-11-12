@@ -15,7 +15,12 @@ Subcommands (all support --dry-run):
                  content volume, start the app. Requires --confirm-overwrite. Re-running converges,
                  so the final pre-cutover sync is simply `all` again.
   verify         Exact row counts (source vs target) on key tables + file counts/bytes + HTTPS smoke.
+                 --offline compares against the counts saved in the export's manifest.json instead
+                 (for restores after Cloud SQL is gone).
   all            export + import + verify.
+  Offline restore (old GCP stack already deleted): `export --upload-to gs://...` keeps a copy of the
+  export in GCS; later `import --local-export <dir> --confirm-overwrite` pushes that saved export to a
+  new VM and restores it, then `verify --offline --local-export <dir>`.
   copy-secrets   (taiga) Copy TAIGA_SECRET_KEY / TAIGA_ADMIN_* from the Cloud Run env into the VM .env
                  through SSH stdin. Run BEFORE Taiga's first boot on the VM.
 
@@ -343,6 +348,10 @@ def cmd_export(src: Source, args: argparse.Namespace, remote: Remote) -> tuple[i
         }
         (local / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         remote.run(f"cat > {rdir}/manifest.json", input_text=json.dumps(manifest, indent=2) + "\n", describe="write manifest")
+    if args.upload_to:
+        dest = f"{args.upload_to.rstrip('/')}/{src.stack}/{local.name}"
+        run(["gcloud", "storage", "rsync", "--recursive", str(local), dest], args.dry_run)
+        print(f"[ok] Uploaded the export to {dest}/")
     print(f"[ok] Exported {src.stack} -> {remote.host}:{rdir} (local copy {local})")
     return 0, rdir
 
@@ -394,11 +403,26 @@ def latest_remote_dir(src: Source, remote: Remote) -> str:
     return path
 
 
+def upload_local_export(src: Source, local: Path, remote: Remote) -> str:
+    """Copies a saved export directory (dump + content/ + manifest.json) to the VM; returns its remote path."""
+    if not remote.dry_run:
+        missing = [n for n in (src.dump_name, "manifest.json") if not (local / n).is_file()]
+        if missing:
+            raise SystemExit(f"[error] {local} is not a {src.stack} export (missing {', '.join(missing)})")
+    rdir = f"{REMOTE_ROOT}/{src.stack}/.migration/{local.name}"
+    remote.run(f"umask 077 && mkdir -p {rdir}", describe=f"mkdir {rdir}")
+    if not remote.rsync(f"{local}/", f"{rdir}/"):
+        raise SystemExit("[error] could not upload the saved export")
+    print(f"[ok] Uploaded {local} -> {remote.host}:{rdir}")
+    return rdir
+
+
 def cmd_import(src: Source, args: argparse.Namespace, remote: Remote, rdir: str | None) -> int:
     if not args.confirm_overwrite:
         print("[error] import DROPS and recreates the VM database and content volume; pass --confirm-overwrite", file=sys.stderr)
         return 1
-    rdir = rdir or latest_remote_dir(src, remote)
+    if rdir is None:
+        rdir = upload_local_export(src, args.local_export, remote) if args.local_export else latest_remote_dir(src, remote)
     stack_dir = f"{REMOTE_ROOT}/{src.stack}"
     compose = f"docker compose -p {src.stack} -f compose.yml"
     if src.engine == "mysql":
@@ -449,15 +473,33 @@ def cmd_import(src: Source, args: argparse.Namespace, remote: Remote, rdir: str 
     return 0
 
 
+def offline_manifest(src: Source, args: argparse.Namespace, remote: Remote) -> dict[str, object]:
+    """Loads manifest.json from --local-export, or from the newest export on the VM."""
+    if args.local_export:
+        return json.loads((args.local_export / "manifest.json").read_text()) if not args.dry_run else {}
+    rdir = latest_remote_dir(src, remote)
+    result = remote.run(f"cat {rdir}/manifest.json", capture=True, describe=f"read {rdir}/manifest.json")
+    return json.loads(result.stdout) if not remote.dry_run else {}
+
+
 def cmd_verify(src: Source, args: argparse.Namespace, remote: Remote) -> int:
-    env = cloud_run_env(src, args.dry_run)
-    with Proxy(src, args.dry_run):
-        source = source_row_counts(src, remote, env.get(src.password_env, ""))
+    if args.offline:
+        manifest = offline_manifest(src, args, remote)
+        source = {k: int(v) for k, v in dict(manifest.get("source_row_counts", {})).items()}
+        if not source and not args.dry_run:
+            print("[error] manifest.json has no source_row_counts to compare against", file=sys.stderr)
+            return 1
+    else:
+        env = cloud_run_env(src, args.dry_run)
+        with Proxy(src, args.dry_run):
+            source = source_row_counts(src, remote, env.get(src.password_env, ""))
     target = target_row_counts(src, remote)
 
-    # Content: bucket vs volume
+    # Content: bucket (or manifest) vs volume
     bucket_files = 0
-    if not args.dry_run:
+    if args.offline:
+        bucket_files = int(manifest.get("content_files", 0)) if not args.dry_run else 0
+    elif not args.dry_run:
         listing = run(["gcloud", "storage", "ls", "--recursive", f"gs://{src.bucket}/**"], False, capture=True, check=False).stdout
         bucket_files = sum(1 for line in listing.splitlines()
                            if line.startswith("gs://") and not line.endswith("/")
@@ -543,9 +585,16 @@ def main() -> None:
     parser.add_argument("--workdir", type=Path, default=DEFAULT_WORKDIR, help=f"Local artifact directory, outside the repo (default: {DEFAULT_WORKDIR})")
     parser.add_argument("--archive-bucket", default=DEFAULT_ARCHIVE_BUCKET, help=f"GCS bucket for `archive` exports (default: {DEFAULT_ARCHIVE_BUCKET})")
     parser.add_argument("--confirm-overwrite", action="store_true", help="Required by import/all: drop and replace VM data")
+    parser.add_argument("--local-export", type=Path, help="import/verify: use this saved export directory (pushed to the VM by import)")
+    parser.add_argument("--offline", action="store_true", help="verify: compare against the export's manifest.json instead of Cloud SQL/GCS")
+    parser.add_argument("--upload-to", default="", help="export: also copy the export to this GCS prefix, e.g. gs://vitorx86-backups/migration")
     parser.add_argument("--dry-run", action="store_true", help="Print every command without touching GCP or the VM")
     args = parser.parse_args()
     args.workdir = args.workdir.expanduser().resolve()
+    if args.local_export:
+        args.local_export = args.local_export.expanduser().resolve()
+        if not args.dry_run and not args.local_export.is_dir():
+            parser.error(f"--local-export {args.local_export} is not a directory")
     src = SOURCES[args.stack]
 
     if args.command == "archive":
