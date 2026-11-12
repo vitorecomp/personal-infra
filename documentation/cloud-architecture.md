@@ -28,15 +28,15 @@ flowchart LR
 - **VM `personal-host`** ([`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga) → [`modules/gce-vm`](../cloud/infra/modules/gce-vm)):
   e2-micro + 30 GB pd-standard (free tier), dedicated VPC and firewall (22 for SSH deploys, 80/443), static IPv4
   `35.255.9.34`, 3 GB swap, Docker. Configured by [`bootstrap_vm.py`](../cloud/scripts/bootstrap_vm.py); runs the
-  `edge` and `personal-blog` compose stacks, builds the Taiga image and deploys it to Cloud Run with its own
-  service account (no keys anywhere).
+  `edge` and `personal-blog` compose stacks. It builds nothing: images are built on GitHub runners, and Taiga is
+  deployed to Cloud Run from GitHub Actions via Workload Identity Federation (`github-deployer`, no keys anywhere).
 - **Edge Caddy** ([`cloud/edge`](../cloud/edge)): only container publishing 80/443; Let's Encrypt certificates
   (persisted in `edge_caddy-data`); per-site TLS mode in its `.env`.
-- **Ghost** ([`cloud/personal-blog`](../cloud/personal-blog)): image from `vitorecomp/personal-blog`, built on the VM;
+- **Ghost** ([`cloud/personal-blog`](../cloud/personal-blog)): image from `vitorecomp/personal-blog`, built in CI and pulled from GHCR (digest-pinned);
   MySQL 8.0 tuned for 1 GB RAM; content volume `personal-blog_ghost-content`.
 - **Taiga on Cloud Run** ([`cloud/taiga`](../cloud/taiga)): image in Artifact Registry (only the newest kept),
   `TAIGA_SECRET_KEY` / DB password in Secret Manager, uploads mounted from `gs://vitorx86-taiga-media`, migrations
-  run from the VM at deploy time (instances skip them, so cold starts stay short). Taiga 6.10 needs Postgres ≤ 15.
+  run from the GitHub runner at deploy time (instances skip them, so cold starts stay short). Taiga 6.10 needs Postgres ≤ 15.
 - **Neon**: managed Postgres 15 (free plan; compute scales to zero, the container health check never touches it).
 - **Backups** ([backup-restore.md](./backup-restore.md)): daily restic snapshots to `gs://vitorx86-backups`
   (blog MySQL + content; Taiga Neon dump + media bucket mirror + edge certificates).

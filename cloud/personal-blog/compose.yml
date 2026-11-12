@@ -1,20 +1,17 @@
-# Ghost 5 blog stack for the GCP VM (blog.vitorx86.dev), next to Taiga.
+# Ghost 5 blog stack for the GCP VM (blog.vitorx86.dev).
 #
 # TLS and ports are handled by the shared edge stack (cloud/edge); Ghost joins the `edge`
-# network as `blog-ghost`. MySQL runs locally on a private network, tuned to share the
-# e2-micro (1 GB RAM) with Taiga. `app/` is a checkout of github.com/vitorecomp/personal-blog
-# made by deploy_stack.py; `.env` (mode 0600, never written by CI) holds the secrets.
+# network as `blog-ghost`. MySQL runs locally on a private network, tuned for the e2-micro
+# (1 GB RAM). The Ghost image is built from github.com/vitorecomp/personal-blog on the GitHub
+# runner (deploy-blog.yml), pushed to GHCR and pinned by digest in GHOST_IMAGE; the VM only
+# pulls it. `.env` (mode 0600) holds the secrets; CI only writes GHOST_IMAGE into it.
 #
 # Rules: every volume has an explicit name; never run `docker compose down -v`.
 name: personal-blog
 
 services:
   ghost:
-    build:
-      context: ./app
-      args:
-        GHOST_VERSION: ${GHOST_VERSION:-5.130.6}
-    image: personal-blog-ghost:local
+    image: ${GHOST_IMAGE:?set GHOST_IMAGE in .env (deploy-blog.yml writes it)}
     restart: unless-stopped
     depends_on:
       db:

@@ -1,12 +1,15 @@
 name: Deploy the Personal Blog (GCP VM)
-# SSH deploy of the shared edge proxy + cloud/personal-blog to the GCP VM via cloud/scripts/deploy_stack.py (same code path as a local deploy).
-# Gated by the repository variable BLOG_DEPLOY_ENABLED so main stays green until the VM exists.
-# Secrets/variables live in the GitHub Environment "blog-prod" (see documentation/pipeline-setup.md).
+# 1. build: builds the Ghost image from vitorecomp/personal-blog on the GitHub runner (theme check
+#    included) and pushes it to GHCR, so the e2-micro VM never builds anything.
+# 2. deploy: over SSH, refreshes the shared edge proxy, writes the digest-pinned GHOST_IMAGE into the
+#    VM .env, pulls it (throwaway login with this job's GITHUB_TOKEN) and restarts Ghost.
+# Gated by the repository variable BLOG_DEPLOY_ENABLED. Secrets/variables live in the GitHub
+# Environment "blog-prod" (see documentation/pipeline-setup.md).
 on:
   workflow_dispatch:
     inputs:
       app_ref:
-        description: "App repository ref/SHA to deploy (blog only; ignored for stacks without an app repo)"
+        description: "vitorecomp/personal-blog ref/SHA to build (default: main)"
         required: false
         default: ""
   repository_dispatch:
@@ -28,14 +31,73 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  IMAGE_NAME: personal-blog
+
 jobs:
+  build:
+    name: Build the Ghost image (GHCR)
+    if: vars.BLOG_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+    steps:
+    - name: Validate the requested ref
+      id: ref
+      env:
+        # Untrusted inputs go through env (never inline in run:).
+        APP_REF: ${{ github.event.client_payload.sha || inputs.app_ref || 'main' }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$APP_REF" =~ ^[A-Za-z0-9._/-]{1,100}$ || "$APP_REF" == *..* || "$APP_REF" == -* ]]; then
+          echo "::error::Refusing suspicious app ref"; exit 1
+        fi
+        echo "ref=$APP_REF" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/checkout@v7
+      with:
+        repository: vitorecomp/personal-blog
+        ref: ${{ steps.ref.outputs.ref }}
+        path: app
+        persist-credentials: false
+
+    - name: Validate the theme
+      run: docker run --rm -v "$PWD/app:/src:ro" -w /src node:24.22.3-alpine node scripts/validate-theme.mjs
+
+    - name: Build and push
+      id: push
+      env:
+        REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+        sha="$(git -C app rev-parse HEAD)"
+        repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}"
+        printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin >/dev/null
+        BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker build --pull -q \
+          --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+          --label "org.opencontainers.image.revision=${sha}" \
+          --label "org.opencontainers.image.description=Ghost + vitorx86-garage theme (vitorecomp/personal-blog)" \
+          -t "${repo}:${sha}" -t "${repo}:latest" app >/dev/null
+        docker push -q "${repo}:${sha}" >/dev/null
+        docker push -q "${repo}:latest" >/dev/null
+        image="$(docker inspect --format '{{index .RepoDigests 0}}' "${repo}:${sha}")"
+        echo "Built personal-blog@${sha} -> ${image}"
+        echo "image=${image}" >> "$GITHUB_OUTPUT"
+        docker logout ghcr.io >/dev/null
+
   deploy:
     name: Deploy personal-blog over SSH
-    if: vars.BLOG_DEPLOY_ENABLED == 'true'
+    needs: build
     runs-on: ubuntu-latest
     environment:
       name: blog-prod
       url: https://blog.vitorx86.dev
+    permissions:
+      contents: read
+      packages: read # the VM pulls the image with this job's short-lived GITHUB_TOKEN
     steps:
     - uses: actions/checkout@v7
 
@@ -59,13 +121,14 @@ jobs:
       env:
         DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
-        # Untrusted inputs go through env (never inline in run:); deploy_stack.py validates the ref.
-        APP_REF: ${{ github.event.client_payload.sha || inputs.app_ref || '' }}
+        GHOST_IMAGE: ${{ needs.build.outputs.image }}
+        REGISTRY_USER: ${{ github.actor }}
+        REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         BLOG_ADMIN_EMAIL: ${{ vars.BLOG_ADMIN_EMAIL }}
         BLOG_ADMIN_PASSWORD: ${{ secrets.BLOG_ADMIN_PASSWORD }}
       run: |
         python3 cloud/scripts/deploy_stack.py --stack edge
-        python3 cloud/scripts/deploy_stack.py --stack personal-blog
+        python3 cloud/scripts/deploy_stack.py --stack personal-blog --sync-env GHOST_IMAGE
 
     - name: Stop ssh-agent
       if: always()

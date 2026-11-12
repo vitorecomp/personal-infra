@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
-# Deploys Taiga to Cloud Run. Runs ON THE VM inside /opt/stacks/taiga (deploy_stack.py calls it
-# over SSH) with the VM's own service account, so no keys exist anywhere:
-#   1. build the image on the VM (skipped when this exact build context is already in Artifact Registry)
-#   2. run migrations + admin reconcile against Neon from the VM (Cloud Run instances skip them)
-#   3. sync TAIGA_SECRET_KEY / the DB password into Secret Manager (only on change; old versions destroyed)
+# Deploys Taiga to Cloud Run. Runs on the GitHub runner (.github/workflows/deploy-taiga.yml) as the
+# github-deployer service account via Workload Identity Federation, so no keys exist anywhere and
+# the e2-micro VM does no work. Also runs from a workstation logged in with `gcloud auth login`.
+#   1. build the image (skipped when this exact build context is already in Artifact Registry)
+#   2. run migrations + admin reconcile against Neon (Cloud Run instances skip them)
+#   3. sync the DB / admin passwords into Secret Manager (only on change; old versions destroyed)
 #   4. roll out a new Cloud Run revision (free-tier sizing from cloudrun.env)
+#
+# Inputs (environment): TAIGA_DB_HOST, TAIGA_DB_USER, TAIGA_DB_PASSWORD, [TAIGA_DB_NAME=taiga,
+# TAIGA_DB_PORT=5432, TAIGA_DB_SSLMODE=require], TAIGA_ADMIN_PASSWORD, [TAIGA_ADMIN_USER=admin,
+# TAIGA_ADMIN_EMAIL]. TAIGA_SECRET_KEY defaults to the latest taiga-secret-key in Secret Manager.
+#
+# Usage: cloud/taiga/deploy-cloudrun.sh [--dry-run]
 set -euo pipefail
 cd "$(dirname "$0")"
+DRY_RUN=false
+case "${1:-}" in
+  --dry-run) DRY_RUN=true ;;
+  "") ;;
+  *) echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
+esac
 # shellcheck source=/dev/null
 . ./cloudrun.env
-set -a
-# shellcheck source=/dev/null
-. ./.env
-set +a
 
 GCLOUD="$(command -v gcloud || echo /snap/bin/gcloud)"
 REGISTRY="${REGION}-docker.pkg.dev"
@@ -21,13 +30,32 @@ TAG="ctx-$(cat Dockerfile nginx.conf docker-entrypoint.sh | sha256sum | cut -c1-
 DOMAIN="${STACK_DOMAIN:-taiga.vitorx86.dev}"
 log() { echo "[cloudrun] $*"; }
 
+missing=()
+for var in TAIGA_DB_HOST TAIGA_DB_USER TAIGA_DB_PASSWORD TAIGA_ADMIN_PASSWORD; do
+  [[ -n "${!var:-}" ]] || missing+=("$var")
+done
+if (( ${#missing[@]} )); then
+  log "missing required environment: ${missing[*]}"
+  exit 2
+fi
+if $DRY_RUN; then
+  log "[dry-run] would build ${IMAGE}:${TAG} unless it is already in Artifact Registry, then push it"
+  log "[dry-run] would run TAIGA_ENTRYPOINT_MODE=migrate against ${TAIGA_DB_HOST}"
+  log "[dry-run] would sync taiga-db-password / taiga-admin-password into Secret Manager (${PROJECT})"
+  log "[dry-run] would deploy Cloud Run service ${SERVICE} in ${REGION} (${CPU} vCPU / ${MEMORY}, 0..${MAX_INSTANCES})"
+  exit 0
+fi
+if [[ -z "${TAIGA_SECRET_KEY:-}" ]]; then
+  TAIGA_SECRET_KEY="$("$GCLOUD" secrets versions access latest --secret=taiga-secret-key --project "$PROJECT")"
+fi
+
 # 1. Image -----------------------------------------------------------------
 "$GCLOUD" auth print-access-token | docker login -u oauth2accesstoken --password-stdin "https://${REGISTRY}" >/dev/null 2>&1
 if "$GCLOUD" artifacts docker images describe "${IMAGE}:${TAG}" >/dev/null 2>&1; then
   log "image ${TAG} already in Artifact Registry"
   docker image inspect "${IMAGE}:${TAG}" >/dev/null 2>&1 || docker pull -q "${IMAGE}:${TAG}" >/dev/null
 else
-  log "building ${TAG} on the VM"
+  log "building ${TAG}"
   BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker build --pull -q -t "${IMAGE}:${TAG}" . >/dev/null
   docker push -q "${IMAGE}:${TAG}" >/dev/null
   log "pushed ${IMAGE}:${TAG}"
@@ -65,11 +93,11 @@ fi
 # 3. Secrets -> Secret Manager ----------------------------------------------
 sync_secret() {
   local name="$1" value="$2" current v
-  # The VM SA only holds per-secret version roles (no secrets.get), so probe with versions list;
+  # The deployer only holds per-secret version roles (no secrets.get), so probe with versions list;
   # a missing secret and a missing grant both come back as PERMISSION_DENIED.
   if ! "$GCLOUD" secrets versions list "$name" --project "$PROJECT" --limit=1 >/dev/null 2>&1; then
-    log "secret ${name}: missing or not granted to the VM SA (apply cloud/infra/envs/gcp-taiga); skipping"
-    return
+    log "secret ${name}: missing or not granted to $("$GCLOUD" config get-value account 2>/dev/null) (apply cloud/infra/envs/gcp-taiga)"
+    exit 1
   fi
   current="$("$GCLOUD" secrets versions access latest --secret="$name" --project "$PROJECT" 2>/dev/null || true)"
   if [[ "$current" == "$value" ]]; then
@@ -84,9 +112,9 @@ sync_secret() {
     "$GCLOUD" secrets versions destroy "$v" --secret="$name" --project "$PROJECT" --quiet >/dev/null
   done
 }
-sync_secret taiga-secret-key "$TAIGA_SECRET_KEY"
+# taiga-secret-key is the source of truth itself (read above); the passwords come from taiga-prod.
 sync_secret taiga-db-password "$TAIGA_DB_PASSWORD"
-[[ -n "${TAIGA_ADMIN_PASSWORD:-}" ]] && sync_secret taiga-admin-password "$TAIGA_ADMIN_PASSWORD"
+sync_secret taiga-admin-password "$TAIGA_ADMIN_PASSWORD"
 
 # 4. Cloud Run revision -------------------------------------------------------
 envs="^@^POSTGRES_HOST=${TAIGA_DB_HOST}@POSTGRES_PORT=${TAIGA_DB_PORT:-5432}@POSTGRES_DB=${TAIGA_DB_NAME:-taiga}"
@@ -106,6 +134,4 @@ log "deploying revision to Cloud Run (${CPU} vCPU / ${MEMORY}, 0..${MAX_INSTANCE
   --add-volume "name=media,type=cloud-storage,bucket=${MEDIA_BUCKET}" \
   --add-volume-mount "volume=media,mount-path=/mnt/taiga-storage" 2>&1 | grep -vE "^\s*$" | tail -3
 
-# Keep only the deployed image locally (the e2-micro disk is small).
-docker images "${IMAGE}" --format '{{.Repository}}:{{.Tag}}' | grep -v ":${TAG}$" | xargs -r docker rmi >/dev/null 2>&1 || true
 log "serving at $("$GCLOUD" run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format='value(status.url)')"

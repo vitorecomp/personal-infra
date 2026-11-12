@@ -62,12 +62,14 @@ jobs:
         python3 cloud/scripts/bootstrap_vm.py --host ci@example.invalid --provider oracle --deploy-pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly ci" --backup-stack personal-blog --dry-run
         python3 cloud/scripts/bootstrap_vm.py --host ci@example.invalid --provider gce --deploy-pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly ci" --swap-gb 3 --backup-stack taiga --dry-run
         python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@example.invalid --dry-run
+        GHOST_IMAGE=ghcr.io/example/personal-blog@sha256:0000 REGISTRY_USER=ci REGISTRY_TOKEN=ci python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@example.invalid --sync-env GHOST_IMAGE --dry-run
         python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --dry-run
         python3 cloud/scripts/deploy_stack.py --stack edge --host deploy@example.invalid --dry-run
         TAIGA_DB_HOST=db.example TAIGA_DB_NAME=taiga TAIGA_DB_USER=ci TAIGA_DB_PASSWORD=ci python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --sync-env TAIGA_DB_HOST,TAIGA_DB_NAME,TAIGA_DB_USER,TAIGA_DB_PASSWORD --dry-run
         python3 cloud/scripts/backup_stack.py --stack-dir cloud/personal-blog --dry-run
         python3 cloud/scripts/backup_stack.py --stack-dir cloud/taiga --restore-test --dry-run
         bash -n cloud/scripts/tf_apply_retry.sh && cloud/scripts/tf_apply_retry.sh --env oci-blog --dry-run
+        TAIGA_DB_HOST=db.example TAIGA_DB_USER=ci TAIGA_DB_PASSWORD=ci TAIGA_ADMIN_PASSWORD=ci cloud/taiga/deploy-cloudrun.sh --dry-run
         BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --connect-ip 192.0.2.10 --insecure --dry-run
 
   terraform-validate:
@@ -122,7 +124,7 @@ jobs:
     - name: docker compose config
       working-directory: cloud/${{ matrix.stack }}
       run: |
-        if [ -f compose.yml ]; then docker compose -f compose.yml --env-file .env.example config -q; else echo "no compose.yml (stack deploys via its up_script)"; fi
+        if [ -f compose.yml ]; then docker compose -f compose.yml --env-file .env.example config -q; else echo "no compose.yml (runs off the VM; only .env + backup metadata live there)"; fi
 
     - name: shell scripts syntax
       working-directory: cloud/${{ matrix.stack }}

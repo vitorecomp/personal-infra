@@ -49,3 +49,9 @@ variable "taiga_media_bucket_name" {
   type        = string
   default     = "vitorx86-taiga-media"
 }
+
+variable "github_repository_id" {
+  description = "Numeric ID of github.com/vitorecomp/personal-infra (gh api repos/vitorecomp/personal-infra -q .id); the only repo allowed to deploy"
+  type        = string
+  default     = "529765415"
+}

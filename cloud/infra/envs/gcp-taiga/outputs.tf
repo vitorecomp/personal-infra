@@ -52,3 +52,13 @@ output "taiga_media_bucket" {
   description = "GCS bucket mounted at /mnt/taiga-storage in the Taiga container"
   value       = google_storage_bucket.taiga_media.name
 }
+
+output "github_wif_provider" {
+  description = "GCP_WIF_PROVIDER repository variable (google-github-actions/auth workload_identity_provider)"
+  value       = google_iam_workload_identity_pool_provider.github.name
+}
+
+output "github_deployer_email" {
+  description = "GCP_DEPLOY_SA repository variable (service account the taiga-prod jobs impersonate)"
+  value       = google_service_account.github_deployer.email
+}

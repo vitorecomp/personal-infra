@@ -8,7 +8,7 @@ Instructions and context for AI coding agents working in `personal-infra`.
 
 The repository is organized into four top-level domains:
 
-1. **`cloud/`** — `nobuffer-site` + `personal-portifolio` on Vercel (Git integration on their repos); `personal-blog` (Ghost + local MySQL) on the GCE free-tier e2-micro VM `personal-host` behind a shared Caddy (`cloud/edge`); `taiga` on Cloud Run free tier (built and deployed from the VM by `cloud/taiga/deploy-cloudrun.sh`, database on Neon Postgres 15, media in GCS). Terraform in `cloud/infra/envs/{gcp-taiga,oci-blog}` is applied from a workstation, never in CI (`documentation/vm-provisioning.md`); `oci-blog` is a spare OCI A1 VM still being acquired by `tf_apply_retry.sh` on the VM. DNS is on Cloudflare. Also holds reverse-proxy configs for a separate Nginx server.
+1. **`cloud/`** — `nobuffer-site` + `personal-portifolio` on Vercel (Git integration on their repos); `personal-blog` (Ghost + local MySQL) on the GCE free-tier e2-micro VM `personal-host` behind a shared Caddy (`cloud/edge`); `taiga` on Cloud Run free tier (built and deployed from GitHub Actions by `cloud/taiga/deploy-cloudrun.sh` as `github-deployer` via Workload Identity Federation, database on Neon Postgres 15, media in GCS). The VM never builds images: the Ghost image is built in CI and pulled from GHCR. Terraform in `cloud/infra/envs/{gcp-taiga,oci-blog}` is applied from a workstation, never in CI (`documentation/vm-provisioning.md`); `oci-blog` is a spare OCI A1 VM still being acquired by `tf_apply_retry.sh` on the VM. DNS is on Cloudflare. Also holds reverse-proxy configs for a separate Nginx server.
 2. **`home-server/`** — Home server workloads, self-hosted services, networking, and maintenance _(specification pending)_.
 3. **`linux/`** — Linux system bootstrap, package installation, dotfiles, and OS configuration _(specification pending)_.
 4. **`workspace/`** — Local `~/workspace` directory orchestration and GitHub repository synchronization.
@@ -39,8 +39,8 @@ personal-infra/
 │           └── taiga_cli.py                # Canonical CLI for Taiga projects, sprints, stories, tasks, issues & wiki
 ├── .github/workflows/
 │   ├── ci.yml                              # Secret scan, Python syntax/dry-run checks, Terraform fmt/validate (no apply), compose/Caddy validation
-│   ├── deploy-blog.yml                     # SSH deploy of cloud/edge + cloud/personal-blog to the GCP VM (gated by BLOG_DEPLOY_ENABLED)
-│   ├── deploy-taiga.yml                    # SSH to the VM: edge + Taiga build/migrate/Cloud Run deploy, syncing Neon creds (gated by TAIGA_DEPLOY_ENABLED)
+│   ├── deploy-blog.yml                     # Runner builds Ghost -> GHCR; SSH: edge + blog pull/restart on the GCP VM (gated by BLOG_DEPLOY_ENABLED)
+│   ├── deploy-taiga.yml                    # Runner (WIF): Taiga build/migrate/Cloud Run; SSH: edge + Taiga backup .env (gated by TAIGA_DEPLOY_ENABLED)
 │   ├── deploy-nginx-sites.yml              # Deploys reverse-proxy vhosts to server via SSH
 │   └── update-repo-stats.yml               # Scheduled/manual sync of repo_stats.csv
 ├── mise.toml                               # Workstation tool pins (terraform, cloud-sql-proxy)
@@ -55,18 +55,18 @@ personal-infra/
 │   │   ├── maintenance/                    # Containerized static maintenance page
 │   │   └── reverse-proxy/                  # Nginx vhost configs (*.vitorx86.dev)
 │   ├── personal-blog/
-│   │   ├── compose.yml                     # Ghost (built from vitorecomp/personal-blog on the VM) + local MySQL 8.0; joins the edge network
+│   │   ├── compose.yml                     # Ghost (CI-built image from GHCR, digest in GHOST_IMAGE) + local MySQL 8.0; joins the edge network
 │   │   └── .env.example, stack.json        # VM .env template & deploy/backup metadata
 │   ├── taiga/
 │   │   ├── Dockerfile                      # taiga-front + taiga-back (pinned 6.10.3 / 6.10.2) + nginx container
 │   │   ├── nginx.conf                      # Nginx gateway routing /, /api, /admin, /static, /media on :8080
 │   │   ├── docker-entrypoint.sh            # Idempotent DB migrations, template load & superuser seed
-│   │   ├── deploy-cloudrun.sh, cloudrun.env # Build on the VM -> Artifact Registry -> Cloud Run (migrations from the VM; Neon DB; GCS media)
+│   │   ├── deploy-cloudrun.sh, cloudrun.env # CI runner: build -> Artifact Registry -> migrations -> Cloud Run (Neon DB; GCS media)
 │   │   ├── .env.example, stack.json        # VM .env template & deploy/backup metadata
 │   │   └── compose.local.yml               # Local dev compose stack (127.0.0.1:8080)
 │   └── scripts/
 │       ├── bootstrap_vm.py                 # Idempotent host setup over SSH (Docker, deploy user, swap, sshd, firewall, backup timers)
-│       ├── deploy_stack.py                 # rsync + remote .env preflight + compose up --wait or up_script + HTTPS check (CI & local)
+│       ├── deploy_stack.py                 # rsync + remote .env preflight + compose pull/up --wait (never builds) + HTTPS check (CI & local)
 │       ├── backup_stack.py                 # Runs on the VM: DB dump + volumes -> restic in gs://vitorx86-backups
 │       ├── tf_apply_retry.sh               # Retries plan+apply on OCI 'Out of host capacity' (refuses destructive plans)
 │       ├── seed_ghost_admin.py             # Idempotently seeds/verifies the Ghost owner (--connect-ip/--insecure for VMs)
@@ -104,7 +104,7 @@ personal-infra/
 - Read credentials exclusively from environment variables (e.g., `GITHUB_TOKEN`, `METRICS_TOKEN`, `DEPLOY_HOST`, `APP_REF`, `BLOG_URL`) or external secret stores, with graceful fallbacks when unauthenticated execution is possible.
 
 ### 4. Terraform & VM Stacks
-- **Never add a CI workflow that runs `terraform plan/apply`** or stores cloud credentials in GitHub; VM roots are applied by hand (`documentation/vm-provisioning.md`), CI only runs `fmt`/`validate`. Keep `prevent_destroy`, `deletion_protection` and the image `ignore_changes` guards.
+- **Never add a CI workflow that runs `terraform plan/apply`** or stores cloud keys in GitHub (CI reaches GCP only through Workload Identity Federation as `github-deployer`, limited to this repo on `main` in `taiga-prod`); VM roots are applied by hand (`documentation/vm-provisioning.md`), CI only runs `fmt`/`validate`. Keep `prevent_destroy`, `deletion_protection` and the image `ignore_changes` guards.
 - Compose stacks: only Caddy publishes ports; every volume has an explicit `name:`; never `docker compose down -v`; pin image tags.
 - VM app secrets live only in `/opt/stacks/<stack>/.env` (mode 0600). CI never writes it; `deploy_stack.py` only checks key names. Add new keys to `.env.example` (`__generate__` / `__required__` placeholders).
 - New or renamed scripts in `cloud/scripts/` need a matching `--dry-run` line in `.github/workflows/ci.yml`.
@@ -128,7 +128,8 @@ python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --ser
 python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<ip> --provider oracle --deploy-pubkey-file ~/.ssh/blog_deploy.pub --backup-stack personal-blog --dry-run
 python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<ip> --provider gce --deploy-pubkey-file ~/.ssh/taiga_deploy.pub --swap-gb 3 --backup-stack taiga --check
 python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@<ip> --dry-run
-python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<ip> --dry-run   # builds on the VM, deploys to Cloud Run
+python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<ip> --dry-run   # VM side only (.env for backups); Cloud Run deploys run in CI
+TAIGA_DB_HOST=x TAIGA_DB_USER=x TAIGA_DB_PASSWORD=x TAIGA_ADMIN_PASSWORD=x cloud/taiga/deploy-cloudrun.sh --dry-run
 python3 cloud/scripts/backup_stack.py --stack-dir cloud/taiga --dry-run
 cloud/scripts/tf_apply_retry.sh --env oci-blog --dry-run
 docker compose -f cloud/personal-blog/compose.yml --env-file cloud/personal-blog/.env.example config -q

@@ -157,7 +157,7 @@ guard to "make the plan pass". In-place updates (`~`) of firewall rules, labels 
 | **Open 80/443 at DNS cutover** | `web_source_cidrs = ["0.0.0.0/0"]` → plan → apply (in-place firewall/security-list update). Let's Encrypt validates from many IPs, so it must be open to the world. |
 | **Taiga VM too small** | `machine_type = "e2-small"` in `gcp-taiga/terraform.tfvars` → plan → apply. In-place stop/start (`allow_stopping_for_update`); the static IP is kept. e2-small is not free tier (~US$13/month). |
 | **Blog VM size** | `ocpus` / `memory_in_gbs` (stay ≤ 2 / 12 for Always Free). Flex shape changes are in-place (reboot). |
-| **CPU limits (e2-micro)** | The VM sustains only ~25% of its 2 vCPUs. Image builds, migrations and restores are slow and must not overlap (run them one at a time; `deploy_stack.py` deploys are serialized by the `deploy-gcp-vm` concurrency group). If deploys become painful, `machine_type = "e2-small"` is an in-place change. |
+| **CPU limits (e2-micro)** | The VM sustains only ~25% of its 2 vCPUs, so it never builds images or runs Taiga migrations (both happen on GitHub runners); deploys there are just `compose pull`/`up`. Restores and the OCI retry loop's Terraform runs are still slow and must not overlap (`deploy_stack.py` deploys are serialized by the `deploy-gcp-vm` concurrency group). If deploys become painful, `machine_type = "e2-small"` is an in-place change. |
 | **Rename the VM** | GCE names change only while stopped and Terraform would replace the instance, so: `gcloud compute instances stop <vm>`, `gcloud compute instances set-name <vm> --new-name=<new>`, `gcloud compute instances start <new>`, then set `instance_name` in `envs/gcp-taiga/main.tf`, `terraform state rm module.taiga_vm.google_compute_instance.this` and `terraform import module.taiga_vm.google_compute_instance.this projects/personal-project-514501/zones/us-central1-a/instances/<new>`; the next plan must show no replacement. |
 | **Disk snapshots (GCE)** | `enable_snapshots = true` → daily snapshots kept 7 days (billed per GB). restic backups remain the primary safety net. |
 | **Rotate the admin key** | Instance metadata keys are ignored after creation on OCI. Edit `~ubuntu/.ssh/authorized_keys` over SSH, or for GCE change `admin_ssh_public_key` (in-place metadata update). Deploy keys are managed by `bootstrap_vm.py`. |
@@ -177,6 +177,16 @@ gh secret set DEPLOY_SSH_KEY --env blog-prod < ~/.ssh/blog_deploy
 gh variable set DEPLOY_KNOWN_HOSTS --env blog-prod --body "$(ssh-keyscan -t ed25519 $IP 2>/dev/null)"
 gh variable set DEPLOY_USER  --env blog-prod --body deploy
 gh variable set BLOG_DEPLOY_ENABLED --body true      # repository-level gate
+```
+
+The Taiga job deploys to Cloud Run as `github-deployer` through Workload Identity Federation (pool `github`,
+provider `personal-infra`, accepted only for this repository's numeric ID on `main`, bound to the `taiga-prod`
+environment). Its identifiers are not secrets; store them as repository variables after the `gcp-taiga` apply:
+
+```bash
+cd cloud/infra/envs/gcp-taiga
+gh variable set GCP_WIF_PROVIDER --body "$(terraform output -raw github_wif_provider)"
+gh variable set GCP_DEPLOY_SA    --body "$(terraform output -raw github_deployer_email)"
 ```
 
 ---

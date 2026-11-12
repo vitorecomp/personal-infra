@@ -14,17 +14,18 @@ keyword), so the Neon project must stay on 15.
 | :--- | :--- |
 | `Dockerfile` | One image: `taiga-front` SPA + `taiga-back` (gunicorn on `127.0.0.1:8000`) + nginx on `:8080`; bases pinned to 6.10.2 / 6.10.3. |
 | `docker-entrypoint.sh` | Links media to `$TAIGA_STORAGE_SYNC_DIR`, renders `conf.json`, runs migrations + admin reconcile (skipped with `TAIGA_SKIP_MIGRATIONS=true`; `TAIGA_ENTRYPOINT_MODE=migrate` runs them and exits), starts gunicorn + nginx. |
-| `deploy-cloudrun.sh` | Runs **on the VM** (keyless, VM service account): builds the image (skipped if this build context is already in Artifact Registry), runs migrations against Neon, syncs `TAIGA_SECRET_KEY` / DB password into Secret Manager, rolls out a Cloud Run revision. |
+| `deploy-cloudrun.sh` | Runs **on the GitHub runner** (`deploy-taiga.yml`, keyless `github-deployer` via Workload Identity Federation) or a workstation: builds the image (skipped if this build context is already in Artifact Registry), runs migrations against Neon, syncs the DB / admin passwords into Secret Manager (`TAIGA_SECRET_KEY` is read from it), rolls out a Cloud Run revision. `--dry-run` prints the plan. |
 | `cloudrun.env` | Non-secret Cloud Run settings (project, region, sizing: 1 vCPU / 512 MiB, 0..1 instances). |
-| `.env.example` | Keys for `/opt/stacks/taiga/.env` on the VM (Neon `TAIGA_DB_*`, secret key, admin). `TAIGA_DB_*` are synced from the `taiga-prod` GitHub environment. |
-| `stack.json` | `deploy_stack.py` / `backup_stack.py` metadata (`up_script`, health path, Neon + media-bucket backups). |
+| `.env.example` | Keys for `/opt/stacks/taiga/.env` on the VM, which only backs Taiga up: Neon `TAIGA_DB_*` (synced from the `taiga-prod` GitHub environment) and restic. |
+| `stack.json` | `deploy_stack.py` / `backup_stack.py` metadata (no `compose.yml`: the VM keeps only `.env` + backups; health path; Neon + media-bucket backups). |
 | `nginx.conf`, `compose.local.yml` | Container gateway; local development stack. |
 
 ## Commands
 
 ```bash
+TAIGA_DB_HOST=x TAIGA_DB_USER=x TAIGA_DB_PASSWORD=x TAIGA_ADMIN_PASSWORD=x cloud/taiga/deploy-cloudrun.sh --dry-run
+gh workflow run deploy-taiga.yml        # the normal path: build + migrate + Cloud Run on a GitHub runner
 python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<vm> --identity-file ~/.ssh/taiga_deploy --dry-run
-python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<vm> --identity-file ~/.ssh/taiga_deploy
 gcloud run services describe taiga --project personal-project-514501 --region us-central1 --format='value(status.url)'
 docker compose -f cloud/taiga/compose.local.yml up --build   # local development
 ```
