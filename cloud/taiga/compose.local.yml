@@ -1,3 +1,7 @@
+# Local development stack only (production is compose.yml on the GCE VM).
+# Usage: docker compose -f compose.local.yml up --build
+name: taiga-local
+
 services:
   taiga-db:
     image: postgres:15-alpine
@@ -23,7 +27,7 @@ services:
       taiga-db:
         condition: service_healthy
     ports:
-      - "${TAIGA_LOCAL_PORT:-8080}:8080"
+      - "127.0.0.1:${TAIGA_LOCAL_PORT:-8080}:8080"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-taiga}
       POSTGRES_USER: ${POSTGRES_USER:-taiga}

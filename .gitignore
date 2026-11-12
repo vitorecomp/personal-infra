@@ -201,3 +201,8 @@ override.tf.json
 .terraformrc
 terraform.rc
 
+
+# Compose stacks: app checkouts cloned on the VMs and migration/backup artifacts
+cloud/*/app/
+*.sql.gz
+*.dump
