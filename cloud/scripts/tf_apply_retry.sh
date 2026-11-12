@@ -12,6 +12,10 @@
 #
 # Usage:
 #   cloud/scripts/tf_apply_retry.sh [--env oci-blog] [--interval 300] [--max-attempts 0] [--adc] [--dry-run]
+#                                   [--probe-url URL --probe-log FILE]
+#
+# --probe-url/--probe-log: after every attempt, time one GET of URL (curl) and append a line to FILE,
+# to see how much each Terraform run slows a site sharing the host.
 #
 # See documentation/vm-provisioning.md.
 
@@ -25,16 +29,29 @@ INTERVAL=300
 MAX_ATTEMPTS=0   # 0 = unlimited
 USE_ADC=false
 DRY_RUN=false
+PROBE_URL=""
+PROBE_LOG=""
 MAX_PLAN_FAILURES=3
 CAPACITY_PATTERN='out of host capacity|outofcapacity|out of capacity|insufficient capacity|does not have enough resources|zone_resource_pool_exhausted'
 # Transient failures worth retrying (seen on a CPU-starved host: the provider plugin failed to start in time).
 TRANSIENT_PATTERN='timeout while waiting for plugin to start|error acquiring the state lock|i/o timeout|tls handshake timeout|connection reset by peer|too many requests|429'
 
 usage() {
-  sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
+
+# probe ATTEMPT RESULT: time one GET of $PROBE_URL right after a Terraform run and append it to $PROBE_LOG.
+probe() {
+  [[ -n "$PROBE_URL" && -n "$PROBE_LOG" ]] || return 0
+  local started timing
+  started="$(date -u '+%FT%TZ')"
+  timing="$(curl -s -o /dev/null --max-time 180 \
+    -w 'http=%{http_code} connect=%{time_connect}s ttfb=%{time_starttransfer}s total=%{time_total}s' \
+    "$PROBE_URL" 2>/dev/null)" || timing="${timing:-http=000} curl_failed"
+  printf '%s attempt=%s result=%s %s\n' "$started" "$1" "$2" "$timing" >> "$PROBE_LOG"
+}
 
 notify() {
   if command -v notify-send >/dev/null 2>&1; then
@@ -48,6 +65,8 @@ while [[ $# -gt 0 ]]; do
     --interval) INTERVAL="$2"; shift 2 ;;
     --max-attempts) MAX_ATTEMPTS="$2"; shift 2 ;;
     --adc) USE_ADC=true; shift ;;
+    --probe-url) PROBE_URL="$2"; shift 2 ;;
+    --probe-log) PROBE_LOG="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[error] unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -83,6 +102,7 @@ if $DRY_RUN; then
   echo "[dry-run]   ${TF[*]} plan -input=false -detailed-exitcode -out <tmp>/tfplan"
   echo "[dry-run]   refuse if the plan deletes/replaces anything; stop if there are no changes"
   echo "[dry-run]   ${TF[*]} apply -input=false <tmp>/tfplan   (retry only on capacity errors)"
+  [[ -n "$PROBE_URL" ]] && echo "[dry-run]   after each attempt: curl timing of $PROBE_URL >> $PROBE_LOG"
   exit 0
 fi
 
@@ -131,6 +151,7 @@ while :; do
   fi
   if [[ $plan_rc -ne 2 ]] && grep -qiE "$TRANSIENT_PATTERN" "$OUT"; then
     log "[wait] transient plan error ($(grep -oiE "$TRANSIENT_PATTERN" "$OUT" | head -1)); retrying in ${INTERVAL}s"
+    probe "$attempt" plan-transient
     sleep "$INTERVAL"
     continue
   fi
@@ -175,6 +196,7 @@ while :; do
   set -e
   if [[ $apply_rc -eq 0 ]]; then
     log "[ok] apply succeeded"
+    probe "$attempt" applied
     "${TF[@]}" output
     notify "terraform $ENV_NAME: apply succeeded"
     exit 0
@@ -182,11 +204,13 @@ while :; do
 
   if grep -qiE "$CAPACITY_PATTERN" "$OUT"; then
     log "[wait] no capacity yet; retrying in ${INTERVAL}s"
+    probe "$attempt" no-capacity
     sleep "$INTERVAL"
     continue
   fi
   if grep -qiE "$TRANSIENT_PATTERN" "$OUT"; then
     log "[wait] transient error ($(grep -oiE "$TRANSIENT_PATTERN" "$OUT" | head -1)); retrying in ${INTERVAL}s"
+    probe "$attempt" apply-transient
     sleep "$INTERVAL"
     continue
   fi
