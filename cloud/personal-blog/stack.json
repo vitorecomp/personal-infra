@@ -1,0 +1,23 @@
+{
+  "name": "personal-blog",
+  "domain": "blog.vitorx86.dev",
+  "health_path": "/ghost/api/admin/site/",
+  "required_files": ["compose.yml", "Caddyfile", ".env.example", "stack.json"],
+  "app_repo": {
+    "url": "https://github.com/vitorecomp/personal-blog.git",
+    "default_ref": "main",
+    "path": "app"
+  },
+  "pre_build": [
+    "docker", "run", "--rm", "-v", "{app}:/src:ro", "-w", "/src",
+    "node:24.22.3-alpine", "node", "scripts/validate-theme.mjs"
+  ],
+  "post_deploy": {
+    "script": "seed_ghost_admin.py",
+    "url_flag": "--blog-url"
+  },
+  "backup": {
+    "db": {"engine": "mysql", "service": "db", "database": "ghost"},
+    "volumes": ["personal-blog_ghost-content", "personal-blog_caddy-data"]
+  }
+}

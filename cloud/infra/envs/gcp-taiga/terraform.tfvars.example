@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+# project_id   = "personal-project-514501"
+# region       = "us-central1"
+# zone         = "us-central1-a"
+# machine_type = "e2-micro"
+
+admin_ssh_public_key = "ssh-ed25519 AAAA... you@workstation"
+
+# Your public IP until DNS cutover (curl -s https://api.ipify.org), then ["0.0.0.0/0"].
+web_source_cidrs = ["203.0.113.10/32"]

@@ -1,0 +1,6 @@
+# Workstation tool versions for personal-infra (run `mise trust && mise install` once).
+# Terraform is applied by hand for the VM roots (documentation/vm-provisioning.md);
+# cloud-sql-proxy is used by cloud/scripts/migrate_gcp_data.py during the migration.
+[tools]
+terraform = "1.17.1"
+cloud-sql-proxy = "2.27.0"
