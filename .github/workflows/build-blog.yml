@@ -1,15 +1,10 @@
 name: Build and Deploy the Personal Blog
+# Frozen during the VM migration (documentation/migration-runbook.md): push triggers removed so
+# merges cannot redeploy Cloud Run. Manual and repository_dispatch runs still work until cutover.
 on:
   workflow_dispatch:
   repository_dispatch:
     types: [ "deploy-personal-blog" ]
-  push:
-    branches: [ "main", "master" ]
-    paths:
-      - "cloud/personal-blog/cloudbuild.yaml"
-      - "cloud/scripts/download_personal_blog.py"
-      - "cloud/scripts/seed_ghost_admin.py"
-      - ".github/workflows/build-blog.yml"
 
 concurrency:
   group: build-blog
