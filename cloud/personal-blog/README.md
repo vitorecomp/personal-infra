@@ -1,7 +1,7 @@
 # Personal Blog (`cloud/personal-blog`)
 
 docker compose stack for the **Ghost 5** blog (`https://blog.example.com`) on the GCE e2-micro VM
-(`cloud/infra/envs/gcp-taiga`), next to Taiga. TLS and routing come from the shared edge proxy
+(`cloud/infra/envs/gcp-taiga`; Taiga runs on Cloud Run). TLS and routing come from the shared edge proxy
 ([`cloud/edge`](../edge)); Ghost joins the `edge` network as `blog-ghost` and publishes no ports.
 
 The Ghost image (Ghost + `custom-blog-theme` theme + entrypoint) is built from

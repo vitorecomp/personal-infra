@@ -51,7 +51,7 @@ jobs:
         python3 workspace/scripts/enroll_taiga_projects.py --dry-run
         python3 workspace/scripts/taiga_cli.py projects create --name ci-test --dry-run
 
-    - name: Verify cloud download & deploy scripts dry-run
+    - name: Verify cloud and workspace scripts dry-run
       run: |
         BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --dry-run
         TAIGA_ADMIN_EMAIL=ci@example.com TAIGA_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_taiga_admin.py --dry-run
@@ -83,7 +83,7 @@ jobs:
     - uses: actions/checkout@v7
 
     - name: Set up Terraform
-      uses: hashicorp/setup-terraform@v4
+      uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
       with:
         terraform_version: "1.17.1"
 

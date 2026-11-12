@@ -83,7 +83,7 @@ resource "google_storage_bucket_iam_member" "backup_writer" {
 
 # --- Taiga on Cloud Run (free tier) ------------------------------------------
 # Terraform owns the service's existence, identity and public access; deploys
-# (cloud/taiga/deploy-cloudrun.sh, run on the VM by deploy_stack.py) own the revision
+# (cloud/taiga/deploy-cloudrun.sh, run by deploy-taiga.yml on the GitHub runner) own the revision
 # template (image, env, secrets, volumes), hence ignore_changes on template.
 # Free-tier guardrails: max 1 instance, scale to zero, request-based CPU, a single
 # image version kept in Artifact Registry, 3 secret versions.

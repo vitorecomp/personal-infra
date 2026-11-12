@@ -25,7 +25,7 @@ DEFAULT_BLOG_URL = "https://blog.example.com"
 DEFAULT_ADMIN_NAME = "Admin User"
 DEFAULT_BLOG_TITLE = "example.com // blog"
 DEFAULT_THEME_NAME = "custom-blog-theme"
-DEFAULT_FALLBACK_SNI = "example.com"
+DEFAULT_FALLBACK_SNI = ""  # opt-in only: a second SNI weakens hostname verification
 SETUP_ENDPOINT = "/ghost/api/admin/authentication/setup/"
 SESSION_ENDPOINT = "/ghost/api/admin/session/"
 
@@ -352,7 +352,7 @@ def main() -> None:
         "--fallback-sni",
         type=str,
         default=DEFAULT_FALLBACK_SNI,
-        help=f"Fallback TLS SNI hostname on the shared Load Balancer while subdomain SSL provisions (default: {DEFAULT_FALLBACK_SNI}).",
+        help="Retry the TLS handshake with this SNI hostname (default: none).",
     )
     parser.add_argument(
         "--retries",
