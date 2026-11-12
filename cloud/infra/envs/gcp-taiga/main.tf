@@ -224,6 +224,12 @@ resource "google_storage_bucket_iam_member" "vm_media" {
   member = local.vm_sa_member
 }
 
+resource "google_storage_bucket_iam_member" "vm_media_bucket_read" {
+  bucket = google_storage_bucket.taiga_media.name
+  role   = "roles/storage.legacyBucketReader" # storage.buckets.get, needed by `gcloud storage rsync` (backups)
+  member = local.vm_sa_member
+}
+
 resource "google_secret_manager_secret_iam_member" "vm_secret_versions" {
   for_each  = local.taiga_secrets
   secret_id = google_secret_manager_secret.taiga[each.value].id
