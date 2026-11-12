@@ -42,8 +42,6 @@ personal-infra/
 │   ├── ci.yml                              # Secret scan, Python syntax/dry-run checks, Terraform fmt/validate (no apply), compose/Caddy validation
 │   ├── deploy-blog.yml                     # SSH deploy of cloud/personal-blog to the OCI VM (gated by BLOG_DEPLOY_ENABLED)
 │   ├── deploy-taiga.yml                    # SSH deploy of cloud/taiga to the GCE VM (gated by TAIGA_DEPLOY_ENABLED)
-│   ├── build-website.yml                   # Fetches nobuffer-site and submits Cloud Build
-│   ├── build-portfolio.yml                 # Fetches personal-portifolio and submits Cloud Build
 │   ├── build-blog.yml                      # LEGACY: personal-blog Cloud Build -> Cloud Run (no push trigger)
 │   ├── build-taiga.yml                     # LEGACY: cloud/taiga Cloud Build -> Cloud Run (no push trigger)
 │   ├── deploy-nginx-sites.yml              # Deploys reverse-proxy vhosts to server via SSH
@@ -57,12 +55,9 @@ personal-infra/
 │   │   ├── envs/gcp-taiga/                 # Taiga VM (personal-project-514501) + shared backup bucket; applied by hand
 │   │   ├── envs/oci-blog/                  # Blog VM (compartment vitorecomp); applied by hand
 │   │   └── envs/prod/                      # LEGACY compute-bench stack (frozen)
-│   ├── nobuffer-site/
-│   │   ├── cloudbuild.yaml                 # LEGACY Cloud Build pipeline (site moves to Vercel)
+│   ├── nobuffer-site/                      # The site itself deploys to Vercel from its own repo
 │   │   ├── maintenance/                    # Containerized static maintenance page
 │   │   └── reverse-proxy/                  # Nginx vhost configs (*.vitorx86.dev)
-│   ├── personal-portifolio/
-│   │   └── cloudbuild.yaml                 # LEGACY Cloud Build static export (site moves to Vercel)
 │   ├── personal-blog/
 │   │   ├── compose.yml, Caddyfile          # Caddy -> Ghost (built from vitorecomp/personal-blog on the VM) -> MySQL 8.0
 │   │   ├── .env.example, stack.json        # VM .env template & deploy/backup metadata
@@ -81,8 +76,6 @@ personal-infra/
 │       ├── backup_stack.py                 # Runs on the VM: DB dump + volumes -> restic in gs://vitorx86-backups
 │       ├── migrate_gcp_data.py             # TEMPORARY: Cloud SQL/GCS -> VMs (archive/export/import/verify/copy-secrets)
 │       ├── tf_apply_retry.sh               # Retries plan+apply on OCI 'Out of host capacity' (refuses destructive plans)
-│       ├── download_nobuffer_site.py       # LEGACY: clones nobuffer-site and optionally deploys via Cloud Build
-│       ├── download_personal_portifolio.py # LEGACY: clones personal-portifolio and optionally deploys via Cloud Build
 │       ├── download_personal_blog.py       # LEGACY: clones personal-blog and optionally deploys via Cloud Build
 │       ├── deploy_taiga.py                 # LEGACY: validates cloud/taiga and deploys to Cloud Run
 │       ├── seed_ghost_admin.py             # Idempotently seeds/verifies the Ghost owner (--connect-ip/--insecure for VMs)
@@ -117,7 +110,7 @@ personal-infra/
 
 ### 3. Secrets & Credentials
 - **Never** hardcode or commit API tokens, SSH keys, passwords, `.env` files, `.tfvars` files, `.tfstate` files, or sensitive host/IP details.
-- Read credentials exclusively from environment variables (e.g., `GITHUB_TOKEN`, `METRICS_TOKEN`, `GCS_BUCKET_NAME`, `GCS_PORTFOLIO_BUCKET_NAME`, `BLOG_URL`) or external secret stores, with graceful fallbacks when unauthenticated execution is possible.
+- Read credentials exclusively from environment variables (e.g., `GITHUB_TOKEN`, `METRICS_TOKEN`, `DEPLOY_HOST`, `APP_REF`, `BLOG_URL`) or external secret stores, with graceful fallbacks when unauthenticated execution is possible.
 
 ### 4. Terraform & VM Stacks
 - **Never add a CI workflow that runs `terraform plan/apply`** or stores cloud credentials in GitHub; VM roots are applied by hand (`documentation/vm-provisioning.md`), CI only runs `fmt`/`validate`. Keep `prevent_destroy`, `deletion_protection` and the image `ignore_changes` guards.
@@ -138,8 +131,6 @@ personal-infra/
 
 ```bash
 # Preview downloading/updating workloads and Cloud Build submission (safe, read-only)
-python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_bucket> --dry-run
-python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket> --dry-run
 python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
 python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
 python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --services all --dry-run
@@ -156,8 +147,6 @@ docker compose -f cloud/taiga/compose.yml --env-file cloud/taiga/.env.example co
 terraform -chdir=cloud/infra/envs/gcp-taiga init -backend=false && terraform -chdir=cloud/infra/envs/gcp-taiga validate
 
 # LEGACY (until each cutover): download or update repositories into cloud/<project>/repo
-python3 cloud/scripts/download_nobuffer_site.py
-python3 cloud/scripts/download_personal_portifolio.py
 python3 cloud/scripts/download_personal_blog.py
 
 # Refresh GitHub repository metadata in repo_stats.csv
