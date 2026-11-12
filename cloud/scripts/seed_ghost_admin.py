@@ -29,6 +29,12 @@ DEFAULT_FALLBACK_SNI = "vitorx86.dev"
 SETUP_ENDPOINT = "/ghost/api/admin/authentication/setup/"
 SESSION_ENDPOINT = "/ghost/api/admin/session/"
 
+# Optional connection overrides set by --connect-ip / --insecure. They let the
+# post-deploy check talk to a new VM by IP (keeping the real Host header and SNI)
+# before public DNS points at it, and accept Caddy's `tls internal` rehearsal cert.
+CONNECT_IP: str | None = None
+TLS_INSECURE: bool = False
+
 
 class _SNIOverrideHTTPSConnection(http.client.HTTPSConnection):
     """HTTPSConnection that allows overriding the TLS SNI hostname while preserving HTTP Host."""
@@ -38,8 +44,11 @@ class _SNIOverrideHTTPSConnection(http.client.HTTPSConnection):
         self._sni_hostname = sni_hostname or host
 
     def connect(self) -> None:
-        sock = socket.create_connection((self.host, self.port), self.timeout)
+        sock = socket.create_connection((CONNECT_IP or self.host, self.port), self.timeout)
         context = ssl.create_default_context()
+        if TLS_INSECURE:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
         self.sock = context.wrap_socket(sock, server_hostname=self._sni_hostname)
 
 
@@ -86,7 +95,7 @@ def _request_ghost_api(
                     host=host, port=port, sni_hostname=sni, timeout=timeout
                 )
             else:
-                conn = http.client.HTTPConnection(host=host, port=port, timeout=timeout)
+                conn = http.client.HTTPConnection(host=CONNECT_IP or host, port=port, timeout=timeout)
             try:
                 conn.request(method, path, body=body_bytes, headers=headers)
                 resp = conn.getresponse()
@@ -358,11 +367,25 @@ def main() -> None:
         help="Seconds between retries (default: 5.0).",
     )
     parser.add_argument(
+        "--connect-ip",
+        type=str,
+        default=os.environ.get("SEED_CONNECT_IP", ""),
+        help="Connect to this IP instead of resolving the URL host (Host header and TLS SNI stay unchanged).",
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Skip TLS certificate verification (only for rehearsals against Caddy `tls internal`).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Preview the Ghost Admin setup check without making network calls.",
     )
     args = parser.parse_args()
+    global CONNECT_IP, TLS_INSECURE
+    CONNECT_IP = args.connect_ip.strip() or None
+    TLS_INSECURE = args.insecure
 
     password = os.environ.get("BLOG_ADMIN_PASSWORD", "")
     sys.exit(

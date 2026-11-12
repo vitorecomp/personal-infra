@@ -1,0 +1,111 @@
+# Taiga stack for the GCE e2-micro VM (taiga.vitorx86.dev).
+#
+# Deployed by cloud/scripts/deploy_stack.py into /opt/stacks/taiga; the image is
+# built on the VM from ./Dockerfile (taiga-back + taiga-front + nginx on :8080).
+# `.env` (mode 0600, never written by CI) holds the secrets listed in .env.example.
+# TAIGA_SECRET_KEY must be the value Cloud Run used (migrate_gcp_data.py --copy-secret-key).
+#
+# Rules: only Caddy publishes ports; every volume has an explicit name so data
+# survives project renames; never run `docker compose down -v`.
+name: taiga
+
+services:
+  caddy:
+    image: caddy:2.11.9-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      STACK_DOMAIN: ${STACK_DOMAIN:-taiga.vitorx86.dev}
+      ACME_EMAIL: ${ACME_EMAIL:-vitor.ecomp@gmail.com}
+      # Email => Let's Encrypt; "internal" => local CA for pre-cutover rehearsals.
+      CADDY_TLS: ${CADDY_TLS:-vitor.ecomp@gmail.com}
+      UPSTREAM: taiga:8080
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      taiga:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2019/config/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  taiga:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: taiga:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: taiga
+      POSTGRES_USER: taiga
+      POSTGRES_PASSWORD: ${TAIGA_DB_PASSWORD:?set TAIGA_DB_PASSWORD in .env}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      TAIGA_SECRET_KEY: ${TAIGA_SECRET_KEY:?set TAIGA_SECRET_KEY in .env}
+      TAIGA_SITES_SCHEME: https
+      TAIGA_SITES_DOMAIN: ${STACK_DOMAIN:-taiga.vitorx86.dev}
+      TAIGA_URL: https://${STACK_DOMAIN:-taiga.vitorx86.dev}
+      PUBLIC_REGISTER_ENABLED: "False"
+      ENABLE_TELEMETRY: "False"
+      CELERY_ENABLED: "False"
+      TAIGA_ADMIN_USER: ${TAIGA_ADMIN_USER:-admin}
+      TAIGA_ADMIN_EMAIL: ${TAIGA_ADMIN_EMAIL:-vitor.ecomp@gmail.com}
+      TAIGA_ADMIN_PASSWORD: ${TAIGA_ADMIN_PASSWORD:-}
+      TAIGA_STORAGE_SYNC_DIR: /mnt/taiga-storage
+      # e2-micro has 1 GB RAM: one worker keeps gunicorn + Postgres inside it (plus swap).
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-1}
+    volumes:
+      - taiga-media:/mnt/taiga-storage
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8080/api/v1/project-templates', headers={'Host': 'taiga.vitorx86.dev', 'X-Forwarded-Proto': 'https'}), timeout=10)"
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 300s # first boot runs Django migrations
+
+  db:
+    image: postgres:15.19-alpine
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=30
+      - -c
+      - work_mem=4MB
+    environment:
+      POSTGRES_DB: taiga
+      POSTGRES_USER: taiga
+      POSTGRES_PASSWORD: ${TAIGA_DB_PASSWORD:?set TAIGA_DB_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taiga -d taiga"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  caddy-data:
+    name: taiga_caddy-data
+  caddy-config:
+    name: taiga_caddy-config
+  taiga-media:
+    name: taiga_media
+  postgres-data:
+    name: taiga_postgres-data

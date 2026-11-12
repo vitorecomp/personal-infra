@@ -61,21 +61,77 @@ jobs:
         TAIGA_ADMIN_EMAIL=ci@example.com TAIGA_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_taiga_admin.py --dry-run
         python3 cloud/scripts/configure_ai_spend_cap.py compute-bench --billing-account 000000-000000-000000 --project-number 1234567890 --amount 1200 --services all --dry-run
 
+    - name: Verify VM stack scripts dry-run
+      run: |
+        python3 cloud/scripts/bootstrap_vm.py --host ci@example.invalid --provider oracle --deploy-pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly ci" --backup-stack personal-blog --dry-run
+        python3 cloud/scripts/bootstrap_vm.py --host ci@example.invalid --provider gce --deploy-pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly ci" --swap-gb 3 --backup-stack taiga --dry-run
+        python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@example.invalid --dry-run
+        python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --dry-run
+        python3 cloud/scripts/backup_stack.py --stack-dir cloud/personal-blog --dry-run
+        python3 cloud/scripts/backup_stack.py --stack-dir cloud/taiga --restore-test --dry-run
+        python3 cloud/scripts/migrate_gcp_data.py archive --stack taiga --dry-run
+        python3 cloud/scripts/migrate_gcp_data.py all --stack personal-blog --host deploy@example.invalid --confirm-overwrite --dry-run
+        python3 cloud/scripts/migrate_gcp_data.py copy-secrets --stack taiga --host deploy@example.invalid --dry-run
+        BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --connect-ip 192.0.2.10 --insecure --dry-run
+
   terraform-validate:
-    name: Validate Terraform Configuration
+    name: Validate Terraform (${{ matrix.env }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [ "prod", "gcp-taiga", "oci-blog" ]
     steps:
     - uses: actions/checkout@v7
 
     - name: Set up Terraform
       uses: hashicorp/setup-terraform@v4
+      with:
+        terraform_version: "1.17.1"
 
     - name: Terraform format check
       run: |
         terraform fmt -check -recursive cloud/infra
 
-    - name: Terraform init & validate (prod)
-      working-directory: cloud/infra/envs/prod
+    # Validation only: no plan/apply ever runs in CI. VM roots are applied by hand
+    # (documentation/vm-provisioning.md); prod is legacy until it is destroyed.
+    - name: Terraform init & validate
+      working-directory: cloud/infra/envs/${{ matrix.env }}
       run: |
-        terraform init -backend=false
+        terraform init -backend=false -input=false
         terraform validate
+
+  stack-validate:
+    name: Validate compose stacks
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: [ "personal-blog", "taiga" ]
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Validate stack.json and required files
+      run: |
+        python3 - <<'PY'
+        import json, pathlib, sys
+        stack = pathlib.Path("cloud/${{ matrix.stack }}")
+        meta = json.loads((stack / "stack.json").read_text())
+        missing = [f for f in meta["required_files"] if not (stack / f).exists()]
+        if missing:
+            sys.exit(f"missing required files: {missing}")
+        print(f"stack.json ok: {meta['name']} -> {meta['domain']}")
+        PY
+
+    - name: docker compose config
+      working-directory: cloud/${{ matrix.stack }}
+      run: docker compose -f compose.yml --env-file .env.example config -q
+
+    - name: caddy validate
+      working-directory: cloud/${{ matrix.stack }}
+      run: |
+        for tls in internal ci@example.com; do
+          docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -e STACK_DOMAIN=example.com -e ACME_EMAIL=ci@example.com -e CADDY_TLS="$tls" -e UPSTREAM=app:8080 \
+            caddy:2.11.9-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+        done

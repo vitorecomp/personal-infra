@@ -1,0 +1,69 @@
+name: Deploy the Personal Blog (Oracle VM)
+# SSH deploy of cloud/personal-blog to its VM via cloud/scripts/deploy_stack.py (same code path as a local deploy).
+# Gated by the repository variable BLOG_DEPLOY_ENABLED so main stays green until the VM exists.
+# Secrets/variables live in the GitHub Environment "blog-prod" (see documentation/pipeline-setup.md).
+on:
+  workflow_dispatch:
+    inputs:
+      app_ref:
+        description: "App repository ref/SHA to deploy (blog only; ignored for stacks without an app repo)"
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [ "deploy-personal-blog" ]
+  push:
+    branches: [ "main" ]
+    paths:
+      - "cloud/personal-blog/**"
+      - "cloud/scripts/deploy_stack.py"
+      - "cloud/scripts/backup_stack.py"
+      - "cloud/scripts/seed_ghost_admin.py"
+      - ".github/workflows/deploy-blog.yml"
+
+concurrency:
+  group: deploy-personal-blog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy personal-blog over SSH
+    if: vars.BLOG_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: blog-prod
+      url: https://blog.vitorx86.dev
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Load deploy key and pin the host key
+      env:
+        DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+      run: |
+        set -euo pipefail
+        test -n "$DEPLOY_SSH_KEY" || { echo "::error::DEPLOY_SSH_KEY is not set in environment blog-prod"; exit 1; }
+        test -n "$DEPLOY_KNOWN_HOSTS" || { echo "::error::DEPLOY_KNOWN_HOSTS is not set in environment blog-prod"; exit 1; }
+        install -d -m 700 ~/.ssh
+        printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+        chmod 600 ~/.ssh/known_hosts
+        eval "$(ssh-agent -s)"
+        printf '%s\n' "$DEPLOY_SSH_KEY" | ssh-add - >/dev/null
+        echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+        echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+
+    - name: Deploy
+      env:
+        DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
+        # Untrusted inputs go through env (never inline in run:); deploy_stack.py validates the ref.
+        APP_REF: ${{ github.event.client_payload.sha || inputs.app_ref || '' }}
+        BLOG_ADMIN_EMAIL: ${{ vars.BLOG_ADMIN_EMAIL }}
+        BLOG_ADMIN_PASSWORD: ${{ secrets.BLOG_ADMIN_PASSWORD }}
+      run: python3 cloud/scripts/deploy_stack.py --stack personal-blog
+
+    - name: Stop ssh-agent
+      if: always()
+      run: ssh-agent -k >/dev/null 2>&1 || true
