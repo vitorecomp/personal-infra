@@ -54,6 +54,7 @@ class Stack:
     app_repo: dict[str, str] | None
     pre_build: list[str] | None
     post_deploy: dict[str, str] | None
+    edge_tls_key: str | None
 
 
 def available_stacks() -> list[str]:
@@ -69,12 +70,13 @@ def load_stack(name: str) -> Stack:
     return Stack(
         name=meta["name"],
         path=path,
-        domain=meta["domain"],
-        health_path=meta.get("health_path", "/"),
+        domain=meta.get("domain"),
+        health_path=meta.get("health_path"),
         required_files=list(meta.get("required_files", [])),
         app_repo=meta.get("app_repo"),
         pre_build=meta.get("pre_build"),
         post_deploy=meta.get("post_deploy"),
+        edge_tls_key=meta.get("edge_tls_key"),
     )
 
 
@@ -235,9 +237,7 @@ if mode == "check":
     if blocking:
         print(f"[error] .env keys missing/empty/placeholder: {', '.join(blocking)}")
         sys.exit(5)
-    tls = "internal" if env.get("CADDY_TLS", "").strip() == "internal" else "acme"
-    print(f"[ok] .env has every key from .env.example (tls={tls})")
-    print(f"TLS_MODE={tls}")
+    print("[ok] .env has every key from .env.example")
     sys.exit(0)
 '''
 
@@ -316,6 +316,58 @@ def https_check(
 # ---------------------------------------------------------------------------
 
 
+_SET_ENV_TOOL = r"""
+import os, sys
+path, keys = sys.argv[1], sys.argv[2].split(",")
+values = [sys.stdin.readline().rstrip("\n") for _ in keys]
+lines = open(path).read().splitlines() if os.path.exists(path) else []
+changed = []
+for key, value in zip(keys, values):
+    new = f"{key}={value}"
+    idx = next((i for i, l in enumerate(lines) if l.split("=", 1)[0].strip() == key), None)
+    if idx is None:
+        lines.append(new); changed.append(key)
+    elif lines[idx] != new:
+        lines[idx] = new; changed.append(key)
+fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as fh:
+    fh.write("\n".join(lines) + "\n")
+os.replace(path + ".tmp", path)
+print(f"[ok] .env synced: {', '.join(changed) if changed else 'already up to date'}")
+"""
+
+
+def sync_env(remote: Remote, stack_dir: str, keys_csv: str) -> bool:
+    """Writes local environment values (e.g. GitHub secrets in CI) into the remote .env via SSH stdin."""
+    keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
+    bad = [k for k in keys if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", k)]
+    missing = [k for k in keys if not os.environ.get(k)]
+    if bad or missing:
+        print(f"[error] --sync-env: invalid {bad} / unset or empty in the environment {missing}", file=sys.stderr)
+        return False
+    if any("\n" in os.environ[k] for k in keys):
+        print("[error] --sync-env: values must be single-line", file=sys.stderr)
+        return False
+    env_path = f"{stack_dir}/.env"
+    result = remote.run(
+        f"python3 -c {shlex.quote(_SET_ENV_TOOL)} {shlex.quote(env_path)} {','.join(keys)}",
+        input_text="\n".join(os.environ[k] for k in keys) + "\n",
+        describe=f"sync {', '.join(keys)} into {env_path} (values via stdin)",
+    )
+    return result.returncode == 0
+
+
+def edge_tls_mode(remote: Remote, remote_root: str, stack: Stack) -> str:
+    """Reads this stack's TLS mode (e.g. BLOG_TLS) from the edge proxy's .env; 'internal' = rehearsal CA."""
+    if not stack.edge_tls_key or remote.dry_run:
+        return "acme"
+    result = remote.run(
+        f"sed -n 's/^{stack.edge_tls_key}=//p' {shlex.quote(remote_root)}/edge/.env 2>/dev/null | tail -n 1",
+        capture=True, describe=f"read {stack.edge_tls_key} from the edge .env",
+    )
+    return "internal" if (result.stdout or "").strip() == "internal" else "acme"
+
+
 def local_git_sha() -> str:
     result = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True, text=True)
     return result.stdout.strip() or "unknown"
@@ -348,6 +400,8 @@ def build_up_script(stack: Stack, stack_dir: str, skip_build: bool) -> str:
         f"cd {shlex.quote(stack_dir)}",
         "exec 9>.deploy.lock",
         "flock -n 9 || { echo '[error] another deploy holds .deploy.lock' >&2; exit 75; }",
+        # Shared network for the edge proxy and every app stack (declared external everywhere).
+        "docker network inspect edge >/dev/null 2>&1 || docker network create edge >/dev/null",
     ]
     if stack.pre_build:
         app_dir = f"{stack_dir}/{(stack.app_repo or {}).get('path', 'app')}"
@@ -408,7 +462,9 @@ def deploy(args: argparse.Namespace) -> int:
             ok, _ = remote_env(remote, "init", stack_dir)
             if not ok:
                 return 1
-        ok, tls_mode = remote_env(remote, "check", stack_dir)
+        if args.sync_env and not sync_env(remote, stack_dir, args.sync_env):
+            return 1
+        ok, _ = remote_env(remote, "check", stack_dir)
         if not ok:
             print("[error] Fix the remote .env (see .env.example) and re-run.", file=sys.stderr)
             return 1
@@ -441,16 +497,17 @@ def deploy(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return 1
 
-        # 6. Health check against the VM itself
-        insecure = tls_mode == "internal"
-        if args.dry_run:
+        # 6. Health check against the VM itself (through the edge proxy)
+        insecure = args.insecure_health_check or edge_tls_mode(remote, remote_root, stack) == "internal"
+        connect_ip = args.connect_ip or ("<vm-ip>" if args.dry_run else remote.resolve_ip())
+        if not (stack.domain and stack.health_path):
+            print(f"[skip] {stack.name} has no public health endpoint")
+        elif args.dry_run:
             print(f"[dry-run] Would GET https://{stack.domain}{stack.health_path} via the VM IP "
-                  f"(SNI {stack.domain}; certificate check skipped only if CADDY_TLS=internal)")
-            connect_ip = args.connect_ip or "<vm-ip>"
+                  f"(SNI {stack.domain}; certificate check skipped only in rehearsal TLS mode)")
         else:
-            connect_ip = args.connect_ip or remote.resolve_ip()
             if insecure:
-                print("[warn] CADDY_TLS=internal on the VM: skipping certificate verification (rehearsal mode)")
+                print(f"[warn] {stack.domain} uses the edge proxy's internal CA: skipping certificate verification (rehearsal mode)")
             if not args.skip_health_check and not https_check(connect_ip, stack.domain, stack.health_path, insecure):
                 return 1
 
@@ -506,6 +563,8 @@ def main() -> None:
     parser.add_argument("--skip-build", action="store_true", help="Skip `docker compose build` (restart with existing images)")
     parser.add_argument("--skip-health-check", action="store_true", help="Skip the HTTPS health check")
     parser.add_argument("--skip-seed", action="store_true", help="Skip the post-deploy seed/verification script")
+    parser.add_argument("--sync-env", default=os.environ.get("DEPLOY_SYNC_ENV", ""), help="Comma-separated env var names whose values (from this process' environment, e.g. GitHub secrets) are written into the remote .env")
+    parser.add_argument("--insecure-health-check", action="store_true", help="Skip certificate verification in the HTTPS check (rehearsals before DNS points at the VM)")
     parser.add_argument("--dry-run", action="store_true", help="Print every command without connecting anywhere")
     args = parser.parse_args()
     if not args.host:

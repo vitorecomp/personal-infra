@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from deploy_stack import Remote, https_check, load_stack  # noqa: E402
+from deploy_stack import Remote, edge_tls_mode, https_check, load_stack  # noqa: E402
 
 GCP_PROJECT = "compute-bench"
 GCP_REGION = "us-central1"
@@ -525,9 +525,7 @@ def cmd_verify(src: Source, args: argparse.Namespace, remote: Remote) -> int:
     print(f"{'files (' + ','.join(src.content_subdirs) + ')':<28}{bucket_files:>10}{volume_files:>10}{files_flag}")
 
     stack = load_stack(src.stack)
-    tls = remote.run(f"grep -qx 'CADDY_TLS=internal' {REMOTE_ROOT}/{src.stack}/.env && echo internal || echo acme",
-                     capture=True, describe="read CADDY_TLS mode")
-    insecure = (tls.stdout or "").strip() == "internal"
+    insecure = edge_tls_mode(remote, REMOTE_ROOT, stack) == "internal"
     ok &= https_check(remote.resolve_ip(), stack.domain, stack.health_path, insecure=insecure, retries=5, delay=3)
     print("[ok] verify: parity confirmed" if ok else "[error] verify: differences found", file=sys.stdout if ok else sys.stderr)
     return 0 if ok else 1

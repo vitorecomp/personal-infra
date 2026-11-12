@@ -1,55 +1,30 @@
-# Taiga stack for the GCE e2-micro VM (taiga.vitorx86.dev).
+# Taiga stack for the GCP VM (taiga.vitorx86.dev).
 #
-# Deployed by cloud/scripts/deploy_stack.py into /opt/stacks/taiga; the image is
-# built on the VM from ./Dockerfile (taiga-back + taiga-front + nginx on :8080).
-# `.env` (mode 0600, never written by CI) holds the secrets listed in .env.example.
-# TAIGA_SECRET_KEY must be the value Cloud Run used (migrate_gcp_data.py --copy-secret-key).
+# TLS and ports are handled by the shared edge stack (cloud/edge); this stack publishes nothing
+# and joins the `edge` network as `taiga-app`. The database is managed Postgres on Neon (TLS),
+# configured through TAIGA_DB_* in /opt/stacks/taiga/.env (synced from the taiga-prod GitHub
+# environment by the deploy workflow). The image is built on the VM from ./Dockerfile.
 #
-# Rules: only Caddy publishes ports; every volume has an explicit name so data
-# survives project renames; never run `docker compose down -v`.
+# Rules: every volume has an explicit name; never run `docker compose down -v`.
 name: taiga
 
 services:
-  caddy:
-    image: caddy:2.11.9-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      STACK_DOMAIN: ${STACK_DOMAIN:-taiga.vitorx86.dev}
-      ACME_EMAIL: ${ACME_EMAIL:-vitor.ecomp@gmail.com}
-      # Email => Let's Encrypt; "internal" => local CA for pre-cutover rehearsals.
-      CADDY_TLS: ${CADDY_TLS:-vitor.ecomp@gmail.com}
-      UPSTREAM: taiga:8080
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    depends_on:
-      taiga:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2019/config/ >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
   taiga:
     build:
       context: .
       dockerfile: Dockerfile
     image: taiga:local
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
-      POSTGRES_DB: taiga
-      POSTGRES_USER: taiga
+      POSTGRES_HOST: ${TAIGA_DB_HOST:?set TAIGA_DB_HOST in .env}
+      POSTGRES_PORT: ${TAIGA_DB_PORT:-5432}
+      POSTGRES_DB: ${TAIGA_DB_NAME:-taiga}
+      POSTGRES_USER: ${TAIGA_DB_USER:?set TAIGA_DB_USER in .env}
       POSTGRES_PASSWORD: ${TAIGA_DB_PASSWORD:?set TAIGA_DB_PASSWORD in .env}
-      POSTGRES_HOST: db
-      POSTGRES_PORT: "5432"
+      # Neon requires TLS. Taiga's settings pass sslmode explicitly from POSTGRES_SSLMODE
+      # (default "disable"), which overrides libpq's PGSSLMODE, so set both.
+      POSTGRES_SSLMODE: ${TAIGA_DB_SSLMODE:-require}
+      PGSSLMODE: ${TAIGA_DB_SSLMODE:-require}
       TAIGA_SECRET_KEY: ${TAIGA_SECRET_KEY:?set TAIGA_SECRET_KEY in .env}
       TAIGA_SITES_SCHEME: https
       TAIGA_SITES_DOMAIN: ${STACK_DOMAIN:-taiga.vitorx86.dev}
@@ -61,51 +36,33 @@ services:
       TAIGA_ADMIN_EMAIL: ${TAIGA_ADMIN_EMAIL:-vitor.ecomp@gmail.com}
       TAIGA_ADMIN_PASSWORD: ${TAIGA_ADMIN_PASSWORD:-}
       TAIGA_STORAGE_SYNC_DIR: /mnt/taiga-storage
-      # e2-micro has 1 GB RAM: one worker keeps gunicorn + Postgres inside it (plus swap).
+      # e2-micro shares 1 GB RAM with Ghost + MySQL: one worker keeps gunicorn small.
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-1}
     volumes:
       - taiga-media:/mnt/taiga-storage
+    networks:
+      default:
+      edge:
+        aliases: [taiga-app]
     healthcheck:
+      # Static file served by the container's nginx (only up after migrations finished).
+      # Deliberately does NOT touch the database: a DB health check every 30 s would keep
+      # Neon's compute awake 24/7 and burn the free 100 CU-hours/month in ~2 weeks.
       test:
         - CMD
         - python
         - -c
-        - "import urllib.request as u; u.urlopen(u.Request('http://127.0.0.1:8080/api/v1/project-templates', headers={'Host': 'taiga.vitorx86.dev', 'X-Forwarded-Proto': 'https'}), timeout=10)"
+        - "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/conf.json', timeout=10)"
       interval: 30s
       timeout: 15s
       retries: 5
       start_period: 300s # first boot runs Django migrations
 
-  db:
-    image: postgres:15.19-alpine
-    restart: unless-stopped
-    command:
-      - postgres
-      - -c
-      - shared_buffers=64MB
-      - -c
-      - max_connections=30
-      - -c
-      - work_mem=4MB
-    environment:
-      POSTGRES_DB: taiga
-      POSTGRES_USER: taiga
-      POSTGRES_PASSWORD: ${TAIGA_DB_PASSWORD:?set TAIGA_DB_PASSWORD in .env}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U taiga -d taiga"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
+networks:
+  edge:
+    name: edge
+    external: true
 
 volumes:
-  caddy-data:
-    name: taiga_caddy-data
-  caddy-config:
-    name: taiga_caddy-config
   taiga-media:
     name: taiga_media
-  postgres-data:
-    name: taiga_postgres-data

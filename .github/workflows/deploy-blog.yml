@@ -1,5 +1,5 @@
-name: Deploy the Personal Blog (Oracle VM)
-# SSH deploy of cloud/personal-blog to its VM via cloud/scripts/deploy_stack.py (same code path as a local deploy).
+name: Deploy the Personal Blog (GCP VM)
+# SSH deploy of the shared edge proxy + cloud/personal-blog to the GCP VM via cloud/scripts/deploy_stack.py (same code path as a local deploy).
 # Gated by the repository variable BLOG_DEPLOY_ENABLED so main stays green until the VM exists.
 # Secrets/variables live in the GitHub Environment "blog-prod" (see documentation/pipeline-setup.md).
 on:
@@ -15,13 +15,14 @@ on:
     branches: [ "main" ]
     paths:
       - "cloud/personal-blog/**"
+      - "cloud/edge/**"
       - "cloud/scripts/deploy_stack.py"
       - "cloud/scripts/backup_stack.py"
       - "cloud/scripts/seed_ghost_admin.py"
       - ".github/workflows/deploy-blog.yml"
 
 concurrency:
-  group: deploy-personal-blog
+  group: deploy-gcp-vm # both app workflows (and the shared edge stack) target the same VM
   cancel-in-progress: false
 
 permissions:
@@ -62,7 +63,9 @@ jobs:
         APP_REF: ${{ github.event.client_payload.sha || inputs.app_ref || '' }}
         BLOG_ADMIN_EMAIL: ${{ vars.BLOG_ADMIN_EMAIL }}
         BLOG_ADMIN_PASSWORD: ${{ secrets.BLOG_ADMIN_PASSWORD }}
-      run: python3 cloud/scripts/deploy_stack.py --stack personal-blog
+      run: |
+        python3 cloud/scripts/deploy_stack.py --stack edge
+        python3 cloud/scripts/deploy_stack.py --stack personal-blog
 
     - name: Stop ssh-agent
       if: always()

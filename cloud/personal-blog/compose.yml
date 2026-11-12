@@ -1,39 +1,14 @@
-# Ghost 5 blog stack for the Oracle Cloud A1 VM (blog.vitorx86.dev).
+# Ghost 5 blog stack for the GCP VM (blog.vitorx86.dev), next to Taiga.
 #
-# Deployed by cloud/scripts/deploy_stack.py into /opt/stacks/personal-blog, where
-# `app/` is a checkout of github.com/vitorecomp/personal-blog (Ghost + theme image)
-# and `.env` (mode 0600, never written by CI) holds the secrets listed in .env.example.
+# TLS and ports are handled by the shared edge stack (cloud/edge); Ghost joins the `edge`
+# network as `blog-ghost`. MySQL runs locally on a private network, tuned to share the
+# e2-micro (1 GB RAM) with Taiga. `app/` is a checkout of github.com/vitorecomp/personal-blog
+# made by deploy_stack.py; `.env` (mode 0600, never written by CI) holds the secrets.
 #
-# Rules: only Caddy publishes ports; every volume has an explicit name so data
-# survives project renames; never run `docker compose down -v`.
+# Rules: every volume has an explicit name; never run `docker compose down -v`.
 name: personal-blog
 
 services:
-  caddy:
-    image: caddy:2.11.9-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      STACK_DOMAIN: ${STACK_DOMAIN:-blog.vitorx86.dev}
-      ACME_EMAIL: ${ACME_EMAIL:-vitor.ecomp@gmail.com}
-      # Email => Let's Encrypt; "internal" => local CA for pre-cutover rehearsals.
-      CADDY_TLS: ${CADDY_TLS:-vitor.ecomp@gmail.com}
-      UPSTREAM: ghost:2368
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    depends_on:
-      ghost:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2019/config/ >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
   ghost:
     build:
       context: ./app
@@ -52,14 +27,21 @@ services:
       database__connection__user: ghost
       database__connection__password: ${GHOST_DB_PASSWORD:?set GHOST_DB_PASSWORD in .env}
       database__connection__database: ghost
+      database__pool__min: "0"
+      database__pool__max: "4"
       security__staffDeviceVerification: "false"
-      # GHOST_STORAGE_SYNC_DIR is intentionally unset: content lives on the volume below.
+      # Keep Node's heap small on the shared 1 GB VM.
+      NODE_OPTIONS: --max-old-space-size=${GHOST_MAX_HEAP_MB:-256}
     volumes:
       - ghost-content:/var/lib/ghost/content
+    networks:
+      default:
+      edge:
+        aliases: [blog-ghost]
     healthcheck:
       # Ghost redirects plain-HTTP requests to its https url unless told the proxy terminated TLS.
       test: ["CMD-SHELL", "wget -qO- --header 'X-Forwarded-Proto: https' http://127.0.0.1:2368/ghost/api/admin/site/ >/dev/null || exit 1"]
-      interval: 30s
+      interval: 60s
       timeout: 10s
       retries: 5
       start_period: 180s
@@ -68,9 +50,12 @@ services:
     image: mysql:8.0.46
     restart: unless-stopped
     command:
-      - --innodb-buffer-pool-size=128M
+      - --innodb-buffer-pool-size=64M
+      - --innodb-log-buffer-size=8M
       - --performance-schema=OFF
       - --disable-log-bin
+      - --max-connections=30
+      - --table-open-cache=200
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
     environment:
@@ -80,18 +65,21 @@ services:
       MYSQL_PASSWORD: ${GHOST_DB_PASSWORD:?set GHOST_DB_PASSWORD in .env}
     volumes:
       - mysql-data:/var/lib/mysql
+    networks:
+      - default
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
-      interval: 10s
+      interval: 30s
       timeout: 5s
       retries: 12
       start_period: 60s
 
+networks:
+  edge:
+    name: edge
+    external: true
+
 volumes:
-  caddy-data:
-    name: personal-blog_caddy-data
-  caddy-config:
-    name: personal-blog_caddy-config
   ghost-content:
     name: personal-blog_ghost-content
   mysql-data:
