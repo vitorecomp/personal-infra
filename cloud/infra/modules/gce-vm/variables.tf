@@ -8,6 +8,12 @@ variable "name" {
   type        = string
 }
 
+variable "instance_name" {
+  description = "Compute Engine instance name (defaults to var.name). Renaming an existing VM is done with `gcloud compute instances set-name` + state rm/import, never by letting Terraform replace it"
+  type        = string
+  default     = ""
+}
+
 variable "region" {
   description = "Region (free tier: us-west1, us-central1 or us-east1)"
   type        = string

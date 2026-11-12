@@ -1,4 +1,4 @@
-name: Deploy Taiga (GCE VM)
+name: Deploy Taiga (Cloud Run, via the VM)
 # SSH deploy of the shared edge proxy + cloud/taiga to the GCP VM via cloud/scripts/deploy_stack.py (same code path as a local deploy).
 # Gated by the repository variable TAIGA_DEPLOY_ENABLED so main stays green until the VM exists.
 # Secrets/variables live in the GitHub Environment "taiga-prod" (see documentation/pipeline-setup.md).

@@ -35,7 +35,8 @@ module "taiga_vm" {
   source = "../../modules/gce-vm"
 
   project_id           = var.project_id
-  name                 = "taiga"
+  name                 = "taiga" # prefix of the VPC, firewall, IP and VM service account (kept as is)
+  instance_name        = "personal-host"
   region               = var.region
   zone                 = var.zone
   machine_type         = var.machine_type
