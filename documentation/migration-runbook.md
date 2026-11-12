@@ -29,7 +29,6 @@ Order: **Phase 0 → (Phase 1 ∥ Phase 2) → Phase 3 → Phase 4 → Phase 5.*
 
   The migration PR also deletes `terraform-cloud.yml` and removes the `push:` triggers from
   `build-blog.yml`/`build-taiga.yml`, so merging it cannot redeploy Cloud Run even if you skip this.
-  `build-website.yml` and `build-portfolio.yml` stay active until the Vercel cutover.
 - [ ] Create GitHub Environments `blog-prod` and `taiga-prod` (Settings → Environments, deployment
   branches: `main` only) and set the gates `BLOG_DEPLOY_ENABLED=false`, `TAIGA_DEPLOY_ENABLED=false`:
 
@@ -70,6 +69,9 @@ External PRs:
   remove the stray `package-lock.json` (it also has `pnpm-lock.yaml` + `packageManager`).
 
 ## Phase 2: Static sites to Vercel (parallel with Phase 1)
+
+**Done 2026-11-12.** DNS moved to Cloudflare (DNS only records pointing at Vercel); Let's Encrypt certificates issued
+by Vercel; the GCS pipeline (`build-website.yml`, `build-portfolio.yml`, Cloud Build files, download scripts) was removed.
 
 | | `nobuffer-site` | `personal-portifolio` |
 | :--- | :--- | :--- |
