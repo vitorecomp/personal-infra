@@ -157,11 +157,8 @@ In your DNS provider for `vitorx86.dev`, point the following `A` records to the 
 Once Terraform has created the buckets, Artifact Registry repository, Cloud SQL database, and Cloud Run service, deploy each workload from the repository root:
 
 ```bash
-# 1. Deploy nobuffer-site (www.vitorx86.dev)
-python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_site_bucket_name>
+# nobuffer-site and personal-portifolio now deploy to Vercel from their own repos (Git integration).
 
-# 2. Deploy personal-portifolio (cases.vitorx86.dev)
-python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <personal_portifolio_bucket_name>
 
 # 3. Deploy personal-blog (blog.vitorx86.dev)
 python3 cloud/scripts/download_personal_blog.py --deploy --region us-central1

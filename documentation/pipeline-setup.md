@@ -40,8 +40,6 @@ sequenceDiagram
 | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | `push`, `pull_request`, `workflow_dispatch` | Scans repository files and Git history for leaked keys/secrets (`scan_repo_secrets.py --history`), syntax-checks all Python scripts, runs `--dry-run` smoke tests for workspace and cloud scripts, and runs `terraform fmt -check` + `terraform validate`. |
 | [`.github/workflows/deploy-blog.yml`](../.github/workflows/deploy-blog.yml) | `push` on `cloud/personal-blog/**` (+ deploy scripts), `workflow_dispatch` (`app_ref`), `repository_dispatch` (`deploy-personal-blog`) | **New.** SSH deploy of the Ghost compose stack to the OCI VM via `deploy_stack.py`. Runs only when `BLOG_DEPLOY_ENABLED=true`; environment `blog-prod`. |
 | [`.github/workflows/deploy-taiga.yml`](../.github/workflows/deploy-taiga.yml) | `push` on `cloud/taiga/**` (+ deploy scripts), `workflow_dispatch`, `repository_dispatch` (`deploy-taiga`) | **New.** SSH deploy of the Taiga compose stack to the GCE VM. Runs only when `TAIGA_DEPLOY_ENABLED=true`; environment `taiga-prod`. |
-| [`.github/workflows/build-website.yml`](../.github/workflows/build-website.yml) | `push`, `workflow_dispatch`, `repository_dispatch` (`deploy-nobuffer-site`) | Clones `vitorecomp/nobuffer-site` and submits [`cloud/nobuffer-site/cloudbuild.yaml`](../cloud/nobuffer-site/cloudbuild.yaml) to publish static files to `gs://${GCS_BUCKET_NAME}`. |
-| [`.github/workflows/build-portfolio.yml`](../.github/workflows/build-portfolio.yml) | `push`, `workflow_dispatch`, `repository_dispatch` (`deploy-personal-portifolio`) | Clones `vitorecomp/personal-portifolio` and submits [`cloud/personal-portifolio/cloudbuild.yaml`](../cloud/personal-portifolio/cloudbuild.yaml) to export Next.js/Nextra static HTML and sync to `gs://${GCS_PORTFOLIO_BUCKET_NAME}`. |
 | [`.github/workflows/build-blog.yml`](../.github/workflows/build-blog.yml) | `workflow_dispatch`, `repository_dispatch` (`deploy-personal-blog`) (legacy; disable during migration) | Clones `vitorecomp/personal-blog` and submits [`cloud/personal-blog/cloudbuild.yaml`](../cloud/personal-blog/cloudbuild.yaml) to validate the Ghost theme, push the image to Artifact Registry, and deploy to Cloud Run. |
 | [`.github/workflows/deploy-nginx-sites.yml`](../.github/workflows/deploy-nginx-sites.yml) | `push` on `cloud/nobuffer-site/reverse-proxy/**`, `workflow_dispatch` | Copies Nginx vhost files to the server over SCP/SSH, validates with `nginx -t`, reloads Nginx, and ensures Certbot certificates. |
 | [`.github/workflows/update-repo-stats.yml`](../.github/workflows/update-repo-stats.yml) | Weekly cron (`0 6 * * 1`), `workflow_dispatch` | Runs [`update_repo_stats.py`](../workspace/scripts/update_repo_stats.py) and commits updated metadata (sorted by `last updated`) to [`repo_stats.csv`](../workspace/documentation/repo_stats.csv). |
@@ -56,7 +54,7 @@ sequenceDiagram
 
 | Secret Name | Required By | Description |
 | :--- | :--- | :--- |
-| `GCP_SA_KEY` | `terraform-cloud.yml`, `build-website.yml`, `build-portfolio.yml`, `build-blog.yml` | Service Account JSON key with permissions for Cloud Build, GCS, Cloud Run, Cloud SQL, Artifact Registry, and Compute Load Balancing. |
+| `GCP_SA_KEY` | `build-blog.yml`, `build-taiga.yml` (legacy) | Service Account JSON key with permissions for Cloud Build, GCS, Cloud Run, Cloud SQL, Artifact Registry, and Compute Load Balancing. |
 | `BLOG_ADMIN_PASSWORD` | `terraform-cloud.yml` | Initial Ghost Admin Owner password seeded automatically on Cloud Run startup. |
 | `BLOG_DB_PASSWORD` | `terraform-cloud.yml` _(optional)_ | Password for the Ghost Cloud SQL MySQL user (`ghost`). If omitted, Terraform generates a 32-character random password automatically. |
 | `HOST` | `deploy-nginx-sites.yml` | Target SSH hostname or IP address for Nginx reverse-proxy deployment. |
@@ -70,8 +68,6 @@ sequenceDiagram
 | :--- | :--- | :--- |
 | `GCP_PROJECT_ID` | `my-gcp-project-id` | Google Cloud Project ID used by Terraform. |
 | `GCP_REGION` | `us-central1` | Region for Cloud Run, Cloud SQL, and Artifact Registry. |
-| `GCS_BUCKET_NAME` | `vitorx86-nobuffer-site-prod` | Target GCS bucket for `nobuffer-site`. |
-| `GCS_PORTFOLIO_BUCKET_NAME` | `vitorx86-portfolio-prod` | Target GCS bucket for `personal-portifolio`. |
 | `GCS_BLOG_CONTENT_BUCKET_NAME` | `vitorx86-blog-content-prod` _(optional)_ | Private GCS bucket mounted into Cloud Run for Ghost media persistence. |
 | `NOBUFFER_DOMAINS` | `["www.vitorx86.dev","vitorx86.dev"]` | JSON list of domains routed to `nobuffer-site`. |
 | `PORTFOLIO_DOMAINS` | `["cases.vitorx86.dev","me.vitorx86.dev"]` | JSON list of domains routed to `personal-portifolio`. |
@@ -99,19 +95,13 @@ All cloud deployments can also be previewed (`--dry-run`) or executed directly f
 
 ```bash
 # 1. Preview commands without making changes (--dry-run)
-python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_bucket> --dry-run
-python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket> --dry-run
 python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
 python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
 
 # 2. Download/update source repositories only (into cloud/<project>/repo)
-python3 cloud/scripts/download_nobuffer_site.py
-python3 cloud/scripts/download_personal_portifolio.py
 python3 cloud/scripts/download_personal_blog.py
 
 # 3. Download/update and submit to Google Cloud Build
-python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_bucket>
-python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket>
 python3 cloud/scripts/download_personal_blog.py --deploy --region us-central1
 python3 cloud/scripts/deploy_taiga.py --deploy --region us-central1
 ```
