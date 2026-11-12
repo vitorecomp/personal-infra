@@ -94,7 +94,7 @@ resource "google_project_iam_member" "vm" {
 }
 
 resource "google_compute_instance" "this" {
-  name                      = var.name
+  name                      = coalesce(var.instance_name, var.name)
   zone                      = var.zone
   machine_type              = var.machine_type
   tags                      = [local.network_tag]
