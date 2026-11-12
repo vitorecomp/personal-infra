@@ -1,5 +1,9 @@
 # Cloud Setup Guide
 
+> **Legacy.** These steps describe the GCP stack that is being retired ([migration runbook](./migration-runbook.md)).
+> New VMs are provisioned with [vm-provisioning.md](./vm-provisioning.md); `terraform-cloud.yml` no longer exists,
+> so section 4's CI apply no longer happens.
+
 Step-by-step instructions to provision and configure the Google Cloud infrastructure from scratch using Terraform.
 
 ---

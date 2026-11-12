@@ -8,7 +8,7 @@ Instructions and context for AI coding agents working in `personal-infra`.
 
 The repository is organized into four top-level domains:
 
-1. **`cloud/`** — Shared GCP Terraform infrastructure (Global HTTPS Load Balancer, Cloud CDN, SSL certificates, GCS static buckets, Cloud Run + Cloud SQL for MySQL 8.0 / PostgreSQL 15 + Serverless NEG + Artifact Registry), reverse-proxy configs, and Cloud Build deployment automation for `nobuffer-site`, `personal-portifolio`, `personal-blog`, and `taiga`.
+1. **`cloud/`** — **Migrating** (see `documentation/migration-runbook.md`) from the legacy GCP stack (Global HTTPS LB, Cloud CDN, GCS static buckets, Cloud Run + Cloud SQL, Cloud Build; `cloud/infra/envs/prod`) to: `nobuffer-site` + `personal-portifolio` on Vercel, `personal-blog` (Ghost) on an OCI Always Free A1 VM and `taiga` on a GCE free-tier e2-micro VM. Both VMs are created by Terraform applied **by hand** (`cloud/infra/envs/{oci-blog,gcp-taiga}`, `documentation/vm-provisioning.md`), configured by `bootstrap_vm.py`, and run docker compose stacks (`cloud/{personal-blog,taiga}/compose.yml`, Caddy for TLS) deployed over SSH by `deploy_stack.py` (locally and from GitHub Actions). Also holds reverse-proxy configs.
 2. **`home-server/`** — Home server workloads, self-hosted services, networking, and maintenance _(specification pending)_.
 3. **`linux/`** — Linux system bootstrap, package installation, dotfiles, and OS configuration _(specification pending)_.
 4. **`workspace/`** — Local `~/workspace` directory orchestration and GitHub repository synchronization.
@@ -28,7 +28,10 @@ personal-infra/
 │   ├── README.md                           # Documentation index
 │   ├── cloud-architecture.md               # GCP LB, CDN, GCS, Cloud Run & Cloud SQL architecture
 │   ├── cloud-setup.md                      # GCP bootstrap, IAM, Terraform & DNS setup guide
-│   ├── pipeline-setup.md                   # GitHub Actions, Cloud Build & secrets/variables guide
+│   ├── pipeline-setup.md                   # GitHub Actions, Cloud Build, SSH deploys & secrets/variables guide
+│   ├── migration-runbook.md                # GCP -> Vercel + compose VMs: phases, cutover checklists, rollback
+│   ├── vm-provisioning.md                  # Manual Terraform runbook for the VM roots (+ legacy prod destroy)
+│   ├── backup-restore.md                   # restic backups of the compose stacks (cross-cloud) & restores
 │   └── workspace-setup.md                  # Local ~/workspace inventory & sync documentation
 ├── .agents/skills/
 │   └── taiga/
@@ -36,37 +39,53 @@ personal-infra/
 │       └── scripts/
 │           └── taiga_cli.py                # Canonical CLI for Taiga projects, sprints, stories, tasks, issues & wiki
 ├── .github/workflows/
-│   ├── ci.yml                              # Secret scan, Python syntax/dry-run checks & Terraform fmt/validate
-│   ├── terraform-cloud.yml                 # Terraform plan/apply for cloud/infra/envs/prod
+│   ├── ci.yml                              # Secret scan, Python syntax/dry-run checks, Terraform fmt/validate (no apply), compose/Caddy validation
+│   ├── deploy-blog.yml                     # SSH deploy of cloud/personal-blog to the OCI VM (gated by BLOG_DEPLOY_ENABLED)
+│   ├── deploy-taiga.yml                    # SSH deploy of cloud/taiga to the GCE VM (gated by TAIGA_DEPLOY_ENABLED)
 │   ├── build-website.yml                   # Fetches nobuffer-site and submits Cloud Build
 │   ├── build-portfolio.yml                 # Fetches personal-portifolio and submits Cloud Build
-│   ├── build-blog.yml                      # Fetches personal-blog and submits Cloud Build -> Cloud Run
-│   ├── build-taiga.yml                     # Builds cloud/taiga and deploys to Cloud Run
+│   ├── build-blog.yml                      # LEGACY: personal-blog Cloud Build -> Cloud Run (no push trigger)
+│   ├── build-taiga.yml                     # LEGACY: cloud/taiga Cloud Build -> Cloud Run (no push trigger)
 │   ├── deploy-nginx-sites.yml              # Deploys reverse-proxy vhosts to server via SSH
 │   └── update-repo-stats.yml               # Scheduled/manual sync of repo_stats.csv
+├── mise.toml                               # Workstation tool pins (terraform, cloud-sql-proxy)
 ├── cloud/                                  # Cloud infrastructure and deployment automation
-│   ├── infra/                              # Shared Terraform modules (load-balancer) and envs (prod)
+│   ├── infra/
+│   │   ├── modules/gce-vm/                 # GCE VM + dedicated VPC/firewall + static IP + runtime SA
+│   │   ├── modules/oci-vm/                 # OCI A1 VM + VCN/security list + reserved IP
+│   │   ├── modules/load-balancer/          # LEGACY GCP LB/CDN/Cloud Run/Cloud SQL (destroyed in Phase 5)
+│   │   ├── envs/gcp-taiga/                 # Taiga VM (personal-project-514501) + blog backup bucket; applied by hand
+│   │   ├── envs/oci-blog/                  # Blog VM (compartment vitorecomp) + Taiga backup bucket; applied by hand
+│   │   └── envs/prod/                      # LEGACY compute-bench stack (frozen)
 │   ├── nobuffer-site/
-│   │   ├── cloudbuild.yaml                 # Cloud Build pipeline for nobuffer-site
+│   │   ├── cloudbuild.yaml                 # LEGACY Cloud Build pipeline (site moves to Vercel)
 │   │   ├── maintenance/                    # Containerized static maintenance page
 │   │   └── reverse-proxy/                  # Nginx vhost configs (*.vitorx86.dev)
 │   ├── personal-portifolio/
-│   │   └── cloudbuild.yaml                 # Cloud Build static-export pipeline for personal-portifolio
+│   │   └── cloudbuild.yaml                 # LEGACY Cloud Build static export (site moves to Vercel)
 │   ├── personal-blog/
-│   │   └── cloudbuild.yaml                 # Cloud Build container & Cloud Run pipeline for personal-blog
+│   │   ├── compose.yml, Caddyfile          # Caddy -> Ghost (built from vitorecomp/personal-blog on the VM) -> MySQL 8.0
+│   │   ├── .env.example, stack.json        # VM .env template & deploy/backup metadata
+│   │   └── cloudbuild.yaml                 # LEGACY Cloud Run pipeline
 │   ├── taiga/
-│   │   ├── Dockerfile                      # Multi-stage Taiga (taiga-front + taiga-back + nginx) container
+│   │   ├── Dockerfile                      # taiga-front + taiga-back (pinned 6.10.3 / 6.10.2) + nginx container
 │   │   ├── nginx.conf                      # Nginx gateway routing /, /api, /admin, /static, /media on :8080
 │   │   ├── docker-entrypoint.sh            # Idempotent DB migrations, template load & superuser seed
-│   │   ├── docker-compose.yml              # Local dev compose stack (PostgreSQL 15 + Taiga)
-│   │   └── cloudbuild.yaml                 # Cloud Build container pipeline for Taiga
+│   │   ├── compose.yml, Caddyfile          # Production stack on the GCE VM: Caddy -> Taiga -> Postgres 15
+│   │   ├── .env.example, stack.json        # VM .env template & deploy/backup metadata
+│   │   ├── compose.local.yml               # Local dev compose stack (127.0.0.1:8080)
+│   │   └── cloudbuild.yaml                 # LEGACY Cloud Run pipeline
 │   └── scripts/
-│       ├── download_nobuffer_site.py       # Clones/updates nobuffer-site and optionally deploys
-│       ├── download_personal_portifolio.py # Clones/updates personal-portifolio and optionally deploys
-│       ├── download_personal_blog.py       # Clones/updates personal-blog and optionally deploys
-│       ├── deploy_taiga.py                 # Validates cloud/taiga and deploys to Cloud Run
-│       ├── seed_ghost_admin.py             # Idempotently seeds Ghost Admin Owner in the deploy pipeline
-│       ├── seed_taiga_admin.py             # Idempotently verifies Taiga API & admin login in the deploy pipeline
+│       ├── bootstrap_vm.py                 # Idempotent host setup over SSH (Docker, deploy user, swap, sshd, firewall, backup timers)
+│       ├── deploy_stack.py                 # rsync + remote .env preflight + compose up --wait + HTTPS check (CI & local)
+│       ├── backup_stack.py                 # Runs on the VM: DB dump + volumes -> restic in the other cloud
+│       ├── migrate_gcp_data.py             # TEMPORARY: Cloud SQL/GCS -> VMs (archive/export/import/verify/copy-secrets)
+│       ├── download_nobuffer_site.py       # LEGACY: clones nobuffer-site and optionally deploys via Cloud Build
+│       ├── download_personal_portifolio.py # LEGACY: clones personal-portifolio and optionally deploys via Cloud Build
+│       ├── download_personal_blog.py       # LEGACY: clones personal-blog and optionally deploys via Cloud Build
+│       ├── deploy_taiga.py                 # LEGACY: validates cloud/taiga and deploys to Cloud Run
+│       ├── seed_ghost_admin.py             # Idempotently seeds/verifies the Ghost owner (--connect-ip/--insecure for VMs)
+│       ├── seed_taiga_admin.py             # Idempotently verifies Taiga API & admin login (--connect-ip/--insecure for VMs)
 │       └── configure_ai_spend_cap.py       # Idempotently configures GCP Cloud Billing Spend Cap budgets for AI services
 ├── home-server/                            # (Planned) Home server setup and maintenance
 ├── linux/                                  # (Planned) Linux workstation/system configuration
@@ -99,11 +118,17 @@ personal-infra/
 - **Never** hardcode or commit API tokens, SSH keys, passwords, `.env` files, `.tfvars` files, `.tfstate` files, or sensitive host/IP details.
 - Read credentials exclusively from environment variables (e.g., `GITHUB_TOKEN`, `METRICS_TOKEN`, `GCS_BUCKET_NAME`, `GCS_PORTFOLIO_BUCKET_NAME`, `BLOG_URL`) or external secret stores, with graceful fallbacks when unauthenticated execution is possible.
 
-### 4. Code Style & Dependencies
+### 4. Terraform & VM Stacks
+- **Never add a CI workflow that runs `terraform plan/apply`** or stores cloud credentials in GitHub; VM roots are applied by hand (`documentation/vm-provisioning.md`), CI only runs `fmt`/`validate`. Keep `prevent_destroy`, `deletion_protection` and the image `ignore_changes` guards.
+- Compose stacks: only Caddy publishes ports; every volume has an explicit `name:`; never `docker compose down -v`; pin image tags.
+- VM app secrets live only in `/opt/stacks/<stack>/.env` (mode 0600). CI never writes it; `deploy_stack.py` only checks key names. Add new keys to `.env.example` (`__generate__` / `__required__` placeholders).
+- New or renamed scripts in `cloud/scripts/` need a matching `--dry-run` line in `.github/workflows/ci.yml`.
+
+### 5. Code Style & Dependencies
 - **Python**: Target Python 3.10+ using standard library modules (`pathlib`, `argparse`, `csv`, `json`, `subprocess`, `urllib.request`, `concurrent.futures`) whenever possible to keep bootstrap scripts zero-dependency. Use type annotations on all function signatures.
 - **Paths**: Resolve paths relative to script locations (`Path(__file__).resolve()`) rather than relying on the caller's working directory, and allow CLI overrides via `argparse`.
 
-### 5. Documentation Hygiene
+### 6. Documentation Hygiene
 - When a new domain folder (`cloud/`, `home-server/`, `linux/`, `workspace/`) is populated or updated, update both `README.md` and `AGENTS.md` with its architecture, entrypoints, and verification commands.
 
 ---
@@ -118,7 +143,17 @@ python3 cloud/scripts/download_personal_blog.py --deploy --dry-run
 python3 cloud/scripts/deploy_taiga.py --deploy --dry-run
 python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --services all --dry-run
 
-# Download or update repositories into cloud/<project>/repo
+# VM stacks (Terraform itself is run by hand: documentation/vm-provisioning.md)
+python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<ip> --provider oracle --deploy-pubkey-file ~/.ssh/blog_deploy.pub --backup-stack personal-blog --dry-run
+python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<ip> --provider gce --deploy-pubkey-file ~/.ssh/taiga_deploy.pub --swap-gb 3 --backup-stack taiga --check
+python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@<ip> --dry-run
+python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<ip> --init-env
+python3 cloud/scripts/backup_stack.py --stack-dir cloud/taiga --dry-run
+python3 cloud/scripts/migrate_gcp_data.py all --stack personal-blog --host deploy@<ip> --confirm-overwrite --dry-run
+docker compose -f cloud/taiga/compose.yml --env-file cloud/taiga/.env.example config -q
+terraform -chdir=cloud/infra/envs/gcp-taiga init -backend=false && terraform -chdir=cloud/infra/envs/gcp-taiga validate
+
+# LEGACY (until each cutover): download or update repositories into cloud/<project>/repo
 python3 cloud/scripts/download_nobuffer_site.py
 python3 cloud/scripts/download_personal_portifolio.py
 python3 cloud/scripts/download_personal_blog.py

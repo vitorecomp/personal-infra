@@ -2,6 +2,11 @@
 
 This document explains how continuous integration, infrastructure provisioning, and cross-repository deployments work in `personal-infra`.
 
+> **Migration in progress** ([runbook](./migration-runbook.md)): the Cloud Build pipelines below keep serving
+> production until each cutover. `terraform-cloud.yml` has been removed (Terraform is applied by hand, see
+> [vm-provisioning.md](./vm-provisioning.md)), `build-blog.yml`/`build-taiga.yml` no longer run on push, and the
+> new SSH deploy workflows are described in [§5](#5-vm-deploy-workflows-ssh).
+
 ---
 
 ## 1. End-to-End Deployment Flow
@@ -33,10 +38,11 @@ sequenceDiagram
 | Workflow File | Triggers | Purpose |
 | :--- | :--- | :--- |
 | [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) | `push`, `pull_request`, `workflow_dispatch` | Scans repository files and Git history for leaked keys/secrets (`scan_repo_secrets.py --history`), syntax-checks all Python scripts, runs `--dry-run` smoke tests for workspace and cloud scripts, and runs `terraform fmt -check` + `terraform validate`. |
-| [`.github/workflows/terraform-cloud.yml`](../.github/workflows/terraform-cloud.yml) | `pull_request` / `push` on `cloud/infra/**`, `workflow_dispatch` | Runs `terraform plan` on PRs and `terraform apply` on pushes to `main`/`master` (or manual dispatch with `apply: true`). |
+| [`.github/workflows/deploy-blog.yml`](../.github/workflows/deploy-blog.yml) | `push` on `cloud/personal-blog/**` (+ deploy scripts), `workflow_dispatch` (`app_ref`), `repository_dispatch` (`deploy-personal-blog`) | **New.** SSH deploy of the Ghost compose stack to the OCI VM via `deploy_stack.py`. Runs only when `BLOG_DEPLOY_ENABLED=true`; environment `blog-prod`. |
+| [`.github/workflows/deploy-taiga.yml`](../.github/workflows/deploy-taiga.yml) | `push` on `cloud/taiga/**` (+ deploy scripts), `workflow_dispatch`, `repository_dispatch` (`deploy-taiga`) | **New.** SSH deploy of the Taiga compose stack to the GCE VM. Runs only when `TAIGA_DEPLOY_ENABLED=true`; environment `taiga-prod`. |
 | [`.github/workflows/build-website.yml`](../.github/workflows/build-website.yml) | `push`, `workflow_dispatch`, `repository_dispatch` (`deploy-nobuffer-site`) | Clones `vitorecomp/nobuffer-site` and submits [`cloud/nobuffer-site/cloudbuild.yaml`](../cloud/nobuffer-site/cloudbuild.yaml) to publish static files to `gs://${GCS_BUCKET_NAME}`. |
 | [`.github/workflows/build-portfolio.yml`](../.github/workflows/build-portfolio.yml) | `push`, `workflow_dispatch`, `repository_dispatch` (`deploy-personal-portifolio`) | Clones `vitorecomp/personal-portifolio` and submits [`cloud/personal-portifolio/cloudbuild.yaml`](../cloud/personal-portifolio/cloudbuild.yaml) to export Next.js/Nextra static HTML and sync to `gs://${GCS_PORTFOLIO_BUCKET_NAME}`. |
-| [`.github/workflows/build-blog.yml`](../.github/workflows/build-blog.yml) | `push`, `workflow_dispatch`, `repository_dispatch` (`deploy-personal-blog`) | Clones `vitorecomp/personal-blog` and submits [`cloud/personal-blog/cloudbuild.yaml`](../cloud/personal-blog/cloudbuild.yaml) to validate the Ghost theme, push the image to Artifact Registry, and deploy to Cloud Run. |
+| [`.github/workflows/build-blog.yml`](../.github/workflows/build-blog.yml) | `workflow_dispatch`, `repository_dispatch` (`deploy-personal-blog`) (legacy; disable during migration) | Clones `vitorecomp/personal-blog` and submits [`cloud/personal-blog/cloudbuild.yaml`](../cloud/personal-blog/cloudbuild.yaml) to validate the Ghost theme, push the image to Artifact Registry, and deploy to Cloud Run. |
 | [`.github/workflows/deploy-nginx-sites.yml`](../.github/workflows/deploy-nginx-sites.yml) | `push` on `cloud/nobuffer-site/reverse-proxy/**`, `workflow_dispatch` | Copies Nginx vhost files to the server over SCP/SSH, validates with `nginx -t`, reloads Nginx, and ensures Certbot certificates. |
 | [`.github/workflows/update-repo-stats.yml`](../.github/workflows/update-repo-stats.yml) | Weekly cron (`0 6 * * 1`), `workflow_dispatch` | Runs [`update_repo_stats.py`](../workspace/scripts/update_repo_stats.py) and commits updated metadata (sorted by `last updated`) to [`repo_stats.csv`](../workspace/documentation/repo_stats.csv). |
 
@@ -108,4 +114,35 @@ python3 cloud/scripts/download_nobuffer_site.py --deploy --bucket <nobuffer_buck
 python3 cloud/scripts/download_personal_portifolio.py --deploy --bucket <portfolio_bucket>
 python3 cloud/scripts/download_personal_blog.py --deploy --region us-central1
 python3 cloud/scripts/deploy_taiga.py --deploy --region us-central1
+```
+
+---
+
+## 5. VM deploy workflows (SSH)
+
+`deploy-blog.yml` and `deploy-taiga.yml` load a per-VM deploy key into `ssh-agent`, pin the VM host key, and run
+[`cloud/scripts/deploy_stack.py`](../cloud/scripts/deploy_stack.py), the same command you run locally.
+It rsyncs `cloud/<stack>/`, checks out the app repo (blog), runs `docker compose build && up -d --wait` on the VM,
+checks HTTPS against the VM IP and runs the post-deploy seed script. No cloud credentials are involved.
+
+| Where | Name | Kind | Value |
+| :--- | :--- | :--- | :--- |
+| Repository | `BLOG_DEPLOY_ENABLED`, `TAIGA_DEPLOY_ENABLED` | variable | `true` once the VM is bootstrapped (job-level `if:` gates can only read repository variables) |
+| Environments `blog-prod` / `taiga-prod` (deployment branch `main`) | `DEPLOY_HOST` | secret | `terraform output -raw public_ip` |
+| | `DEPLOY_SSH_KEY` | secret | private key `~/.ssh/blog_deploy` / `~/.ssh/taiga_deploy` |
+| | `DEPLOY_KNOWN_HOSTS` | variable | `ssh-keyscan -t ed25519 <ip>` (compare with the fingerprint `bootstrap_vm.py` prints) |
+| | `DEPLOY_USER` | variable | `deploy` |
+| `blog-prod` | `BLOG_ADMIN_EMAIL` (variable), `BLOG_ADMIN_PASSWORD` (secret) | | optional: post-deploy Ghost owner check |
+| `taiga-prod` | `TAIGA_ADMIN_EMAIL` (variable), `TAIGA_ADMIN_PASSWORD` (secret) | | optional: post-deploy Taiga login check |
+
+App secrets never live in GitHub: each VM keeps them in `/opt/stacks/<stack>/.env` (mode 0600), created by
+`deploy_stack.py --init-env` with secrets generated on the VM and backed up encrypted by restic.
+
+The `personal-blog` repo's existing `trigger-deploy.yml` keeps sending `repository_dispatch: deploy-personal-blog`
+with `client_payload.sha`, which becomes `--app-ref` (validated by `deploy_stack.py`).
+
+```bash
+# Same deploy from a workstation
+python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@<blog-ip> --identity-file ~/.ssh/blog_deploy --dry-run
+python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@<taiga-ip> --identity-file ~/.ssh/taiga_deploy
 ```
