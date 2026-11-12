@@ -65,6 +65,8 @@ jobs:
         python3 cloud/scripts/bootstrap_vm.py --host ci@example.invalid --provider gce --deploy-pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly ci" --swap-gb 3 --backup-stack taiga --dry-run
         python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@example.invalid --dry-run
         python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --dry-run
+        python3 cloud/scripts/deploy_stack.py --stack edge --host deploy@example.invalid --dry-run
+        TAIGA_DB_HOST=db.example TAIGA_DB_NAME=taiga TAIGA_DB_USER=ci TAIGA_DB_PASSWORD=ci python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --sync-env TAIGA_DB_HOST,TAIGA_DB_NAME,TAIGA_DB_USER,TAIGA_DB_PASSWORD --dry-run
         python3 cloud/scripts/backup_stack.py --stack-dir cloud/personal-blog --dry-run
         python3 cloud/scripts/backup_stack.py --stack-dir cloud/taiga --restore-test --dry-run
         python3 cloud/scripts/migrate_gcp_data.py archive --stack taiga --dry-run
@@ -109,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        stack: [ "personal-blog", "taiga" ]
+        stack: [ "edge", "personal-blog", "taiga" ]
     steps:
     - uses: actions/checkout@v7
 
@@ -130,10 +132,11 @@ jobs:
       run: docker compose -f compose.yml --env-file .env.example config -q
 
     - name: caddy validate
+      if: matrix.stack == 'edge'
       working-directory: cloud/${{ matrix.stack }}
       run: |
         for tls in internal ci@example.com; do
           docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            -e STACK_DOMAIN=example.com -e ACME_EMAIL=ci@example.com -e CADDY_TLS="$tls" -e UPSTREAM=app:8080 \
+            -e ACME_EMAIL=ci@example.com -e TAIGA_TLS="$tls" -e BLOG_TLS="$tls" \
             caddy:2.11.9-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
         done

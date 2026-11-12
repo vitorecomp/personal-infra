@@ -1,5 +1,5 @@
 name: Deploy Taiga (GCE VM)
-# SSH deploy of cloud/taiga to its VM via cloud/scripts/deploy_stack.py (same code path as a local deploy).
+# SSH deploy of the shared edge proxy + cloud/taiga to the GCP VM via cloud/scripts/deploy_stack.py (same code path as a local deploy).
 # Gated by the repository variable TAIGA_DEPLOY_ENABLED so main stays green until the VM exists.
 # Secrets/variables live in the GitHub Environment "taiga-prod" (see documentation/pipeline-setup.md).
 on:
@@ -15,13 +15,14 @@ on:
     branches: [ "main" ]
     paths:
       - "cloud/taiga/**"
+      - "cloud/edge/**"
       - "cloud/scripts/deploy_stack.py"
       - "cloud/scripts/backup_stack.py"
       - "cloud/scripts/seed_taiga_admin.py"
       - ".github/workflows/deploy-taiga.yml"
 
 concurrency:
-  group: deploy-taiga
+  group: deploy-gcp-vm # both app workflows (and the shared edge stack) target the same VM
   cancel-in-progress: false
 
 permissions:
@@ -63,7 +64,16 @@ jobs:
         TAIGA_ADMIN_USER: ${{ vars.TAIGA_ADMIN_USER || 'admin' }}
         TAIGA_ADMIN_EMAIL: ${{ vars.TAIGA_ADMIN_EMAIL }}
         TAIGA_ADMIN_PASSWORD: ${{ secrets.TAIGA_ADMIN_PASSWORD }}
-      run: python3 cloud/scripts/deploy_stack.py --stack taiga
+        TAIGA_DB_HOST: ${{ secrets.TAIGA_DB_HOST }}
+        TAIGA_DB_USER: ${{ secrets.TAIGA_DB_USER }}
+        TAIGA_DB_PASSWORD: ${{ secrets.TAIGA_DB_PASSWORD }}
+        TAIGA_DB_NAME: ${{ vars.TAIGA_DB_NAME || 'taiga' }}
+      run: |
+        python3 cloud/scripts/deploy_stack.py --stack edge
+        # Managed-DB settings live in the environment's secrets; sync them into the VM .env when set.
+        keys=""
+        if [ -n "$TAIGA_DB_PASSWORD" ]; then keys="TAIGA_DB_HOST,TAIGA_DB_NAME,TAIGA_DB_USER,TAIGA_DB_PASSWORD"; fi
+        python3 cloud/scripts/deploy_stack.py --stack taiga ${keys:+--sync-env "$keys"}
 
     - name: Stop ssh-agent
       if: always()
