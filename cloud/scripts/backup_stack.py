@@ -221,6 +221,7 @@ class Backup:
                 print("[error] restored snapshot contains no database dump", file=sys.stderr)
                 return False
             newest = dumps[-1]
+            newest_name, newest_size = newest.name, newest.stat().st_size
             try:
                 if newest.suffix == ".gz":
                     with gzip.open(newest, "rb") as fh:
@@ -238,9 +239,9 @@ class Backup:
             subprocess.run(["docker", "run", "--rm", "-v", f"{tmp}:/restore", "alpine:3.24.4", "rm", "-rf", "/restore/backup"],
                            check=False, capture_output=True)
             if not valid:
-                print(f"[error] restored dump {newest.name} failed validation", file=sys.stderr)
+                print(f"[error] restored dump {newest_name} failed validation", file=sys.stderr)
                 return False
-            print(f"[ok] Restore test passed: {newest.name} ({newest.stat().st_size} bytes) is a valid dump")
+            print(f"[ok] Restore test passed: {newest_name} ({newest_size} bytes) is a valid dump")
             return True
 
     def snapshots(self) -> bool:
