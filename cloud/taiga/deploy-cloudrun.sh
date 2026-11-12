@@ -65,8 +65,10 @@ fi
 # 3. Secrets -> Secret Manager ----------------------------------------------
 sync_secret() {
   local name="$1" value="$2" current v
-  if ! "$GCLOUD" secrets describe "$name" --project "$PROJECT" >/dev/null 2>&1; then
-    log "secret ${name}: does not exist yet (apply cloud/infra/envs/gcp-taiga); skipping"
+  # The VM SA only holds per-secret version roles (no secrets.get), so probe with versions list;
+  # a missing secret and a missing grant both come back as PERMISSION_DENIED.
+  if ! "$GCLOUD" secrets versions list "$name" --project "$PROJECT" --limit=1 >/dev/null 2>&1; then
+    log "secret ${name}: missing or not granted to the VM SA (apply cloud/infra/envs/gcp-taiga); skipping"
     return
   fi
   current="$("$GCLOUD" secrets versions access latest --secret="$name" --project "$PROJECT" 2>/dev/null || true)"
