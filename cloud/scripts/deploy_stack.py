@@ -321,6 +321,27 @@ def local_git_sha() -> str:
     return result.stdout.strip() or "unknown"
 
 
+_STALE_SERVICES = r"""
+import json, subprocess, sys
+project = json.load(sys.stdin)
+name = project.get("name", "")
+stale = []
+for svc, cfg in project.get("services", {}).items():
+    image = cfg.get("image")
+    if not image:
+        continue
+    cid = subprocess.run(["docker", "ps", "-q", "--filter", f"label=com.docker.compose.project={name}",
+                          "--filter", f"label=com.docker.compose.service={svc}"], capture_output=True, text=True).stdout.split()
+    want = subprocess.run(["docker", "image", "inspect", "-f", "{{.Id}}", image], capture_output=True, text=True).stdout.strip()
+    for c in cid:
+        have = subprocess.run(["docker", "inspect", "-f", "{{.Image}}", c], capture_output=True, text=True).stdout.strip()
+        if want and have and want != have:
+            stale.append(svc)
+            break
+print(" ".join(stale))
+"""
+
+
 def build_up_script(stack: Stack, stack_dir: str, skip_build: bool) -> str:
     compose = f"docker compose -p {shlex.quote(stack.name)} -f compose.yml"
     lines = [
@@ -334,9 +355,15 @@ def build_up_script(stack: Stack, stack_dir: str, skip_build: bool) -> str:
         lines += ["echo '[deploy] pre_build hook'", shlex.join(hook)]
     lines.append(f"{compose} pull --ignore-buildable --quiet")
     if not skip_build:
-        lines.append(f"{compose} build --pull")
+        # No provenance/SBOM attestations: unchanged sources then rebuild to the same image ID.
+        lines.append(f"BUILDX_NO_DEFAULT_ATTESTATIONS=1 {compose} build --pull")
     lines += [
         f"{compose} up -d --remove-orphans --wait --wait-timeout 900",
+        # `up` compares service config, not the image behind a tag, so a rebuilt `app:local` or a
+        # re-pulled tag would keep the old container. Recreate exactly the services that drifted.
+        f"stale=$({compose} config --format json | python3 -c {shlex.quote(_STALE_SERVICES)})",
+        f'if [ -n "$stale" ]; then echo "[deploy] recreating services on a new image: $stale"; '
+        f"{compose} up -d --no-deps --force-recreate --wait --wait-timeout 900 $stale; fi",
         f"{compose} ps",
         "docker image prune -f >/dev/null",
         "docker builder prune -f --filter until=168h >/dev/null",
