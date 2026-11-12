@@ -206,7 +206,6 @@ gh secret set DEPLOY_HOST    --env blog-prod --body "$IP"
 gh secret set DEPLOY_SSH_KEY --env blog-prod < ~/.ssh/blog_deploy
 gh variable set DEPLOY_KNOWN_HOSTS --env blog-prod --body "$(ssh-keyscan -t ed25519 $IP 2>/dev/null)"
 gh variable set DEPLOY_USER  --env blog-prod --body deploy
-gh variable set BLOG_DEPLOY_ENABLED --body true      # repository-level gate
 ```
 
 The Taiga job deploys to Cloud Run as `github-deployer` through Workload Identity Federation (pool `github`,

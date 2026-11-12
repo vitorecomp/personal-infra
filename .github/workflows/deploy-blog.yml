@@ -3,8 +3,7 @@ name: Deploy the Personal Blog (GCP VM)
 #    included) and pushes it to GHCR, so the e2-micro VM never builds anything.
 # 2. deploy: over SSH, refreshes the shared edge proxy, writes the digest-pinned GHOST_IMAGE into the
 #    VM .env, pulls it (throwaway login with this job's GITHUB_TOKEN) and restarts Ghost.
-# Gated by the repository variable BLOG_DEPLOY_ENABLED. Secrets/variables live in the GitHub
-# Environment "blog-prod" (see documentation/pipeline-setup.md).
+# Secrets/variables live in the GitHub Environment "blog-prod" (see documentation/pipeline-setup.md).
 on:
   workflow_dispatch:
     inputs:
@@ -37,7 +36,6 @@ env:
 jobs:
   build:
     name: Build the Ghost image (GHCR)
-    if: vars.BLOG_DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
