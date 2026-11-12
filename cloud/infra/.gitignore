@@ -36,3 +36,8 @@ override.tf.json
 
 # Ignore CLI configuration files
 .terraform.lock.hcl
+
+# ...except for the VM roots, where the lock file pins provider checksums for
+# reproducible manual applies (documentation/vm-provisioning.md).
+!envs/gcp-taiga/.terraform.lock.hcl
+!envs/oci-blog/.terraform.lock.hcl
