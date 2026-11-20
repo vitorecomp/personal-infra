@@ -1,0 +1,177 @@
+# Podman Compose stack for the GPU development machine (`dev-gpu-vm`).
+#
+# Run with:
+#   cp .env.example .env && chmod 600 .env
+#   podman-compose -f compose.yml up -d --build
+
+name: gpu-dev-machine
+
+services:
+  ray-server:
+    build:
+      context: ./ray-server
+      dockerfile: Dockerfile
+    image: localhost/gpu-dev-ray-server:0.33.0
+    container_name: ray-server
+    restart: unless-stopped
+    ipc: host
+    shm_size: "64gb"
+    security_opt:
+      - label=disable
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    devices:
+      - nvidia.com/gpu=all
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /mnt/data/huggingface
+      # All model & CPU-offload parameters are controlled directly here in compose.yml:
+      MODEL_ID: "deepseek-ai/DeepSeek-V4.1-Flash"
+      MODEL_SOURCE: "deepseek-ai/DeepSeek-V4.1-Flash"
+      TENSOR_PARALLEL_SIZE: "4"
+      CPU_OFFLOAD_GB: "48"
+      ENGRAM_CPU_OFFLOAD: "true"
+      GPU_MEMORY_UTILIZATION: "0.92"
+      MAX_MODEL_LEN: "65536"
+      KV_CACHE_DTYPE: "fp8"
+      MAX_NUM_SEQS: "8"
+      RAY_SERVE_HOST: "0.0.0.0"
+      RAY_SERVE_PORT: "8000"
+    volumes:
+      - ${HF_CACHE_DIR:-/mnt/data/huggingface}:/mnt/data/huggingface
+    ports:
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8265:8265"
+    networks:
+      - gpu-dev-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 1800s
+
+  litellm:
+    build:
+      context: ./litellm
+      dockerfile: Dockerfile
+    image: localhost/gpu-dev-litellm:1.109.1
+    container_name: litellm
+    restart: unless-stopped
+    depends_on:
+      - ray-server
+    environment:
+      RAY_SERVER_API_BASE: http://ray-server:8000/v1
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env}
+    ports:
+      - "127.0.0.1:4000:4000"
+    networks:
+      - gpu-dev-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4000/health/liveliness"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  deepseek-harness:
+    build:
+      context: ./deepseek-harness
+      dockerfile: Dockerfile
+    image: localhost/gpu-dev-deepseek-harness:0.2.2-rc.1
+    container_name: deepseek-harness
+    restart: unless-stopped
+    depends_on:
+      - litellm
+    security_opt:
+      - label=disable
+    environment:
+      DSH_HOME: /dsh-home
+      LITELLM_BASE_URL: http://litellm:4000/v1
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env}
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env}
+      OPENAI_BASE_URL: http://litellm:4000/v1
+      OPENAI_API_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env}
+    volumes:
+      - ${HARNESS_DATA_DIR:-/mnt/data/deepseek-harness/dsh-home}:/dsh-home
+      - ${HARNESS_WORKSPACE_DIR:-/mnt/data/deepseek-harness/workspace}:/workspace
+    ports:
+      - "127.0.0.1:3080:3080"
+    networks:
+      - gpu-dev-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3080/ >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  litellm-tunnel:
+    build:
+      context: ./reverse-tunnel
+      dockerfile: Dockerfile
+    image: localhost/gpu-dev-reverse-tunnel:1.0.0
+    container_name: litellm-tunnel
+    restart: unless-stopped
+    depends_on:
+      - litellm
+    security_opt:
+      - label=disable
+    environment:
+      TUNNEL_SSH_HOST: ${LITELLM_TUNNEL_SSH_HOST:-${TUNNEL_SSH_HOST:-}}
+      TUNNEL_SSH_PORT: ${LITELLM_TUNNEL_SSH_PORT:-${TUNNEL_SSH_PORT:-22}}
+      TUNNEL_SSH_USER: ${LITELLM_TUNNEL_SSH_USER:-${TUNNEL_SSH_USER:-}}
+      TUNNEL_BIND_ADDRESS: ${TUNNEL_BIND_ADDRESS:-127.0.0.1}
+      REMOTE_PORT: ${REMOTE_LITELLM_PORT:-4000}
+      TARGET_HOST: litellm
+      TARGET_PORT: "4000"
+    volumes:
+      - ${TUNNEL_SSH_KEY_FILE:-/mnt/data/reverse-tunnel/id_ed25519}:/run/tunnel/ssh_key:ro
+      - ${TUNNEL_KNOWN_HOSTS_FILE:-/mnt/data/reverse-tunnel/known_hosts}:/run/tunnel/known_hosts:ro
+      - ${TUNNEL_STATE_DIR:-/mnt/data/reverse-tunnel/state}/litellm:/data
+    networks:
+      - gpu-dev-net
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x autossh >/dev/null && pgrep -x ssh >/dev/null"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  deepseek-harness-tunnel:
+    build:
+      context: ./reverse-tunnel
+      dockerfile: Dockerfile
+    image: localhost/gpu-dev-reverse-tunnel:1.0.0
+    container_name: deepseek-harness-tunnel
+    restart: unless-stopped
+    depends_on:
+      - deepseek-harness
+    security_opt:
+      - label=disable
+    environment:
+      TUNNEL_SSH_HOST: ${HARNESS_TUNNEL_SSH_HOST:-${TUNNEL_SSH_HOST:-}}
+      TUNNEL_SSH_PORT: ${HARNESS_TUNNEL_SSH_PORT:-${TUNNEL_SSH_PORT:-22}}
+      TUNNEL_SSH_USER: ${HARNESS_TUNNEL_SSH_USER:-${TUNNEL_SSH_USER:-}}
+      TUNNEL_BIND_ADDRESS: ${TUNNEL_BIND_ADDRESS:-127.0.0.1}
+      REMOTE_PORT: ${REMOTE_HARNESS_PORT:-3080}
+      TARGET_HOST: deepseek-harness
+      TARGET_PORT: "3080"
+    volumes:
+      - ${TUNNEL_SSH_KEY_FILE:-/mnt/data/reverse-tunnel/id_ed25519}:/run/tunnel/ssh_key:ro
+      - ${TUNNEL_KNOWN_HOSTS_FILE:-/mnt/data/reverse-tunnel/known_hosts}:/run/tunnel/known_hosts:ro
+      - ${TUNNEL_STATE_DIR:-/mnt/data/reverse-tunnel/state}/harness:/data
+    networks:
+      - gpu-dev-net
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x autossh >/dev/null && pgrep -x ssh >/dev/null"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  gpu-dev-net:
+    name: gpu-dev-net
+    driver: bridge

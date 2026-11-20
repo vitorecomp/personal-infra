@@ -1,0 +1,11 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfstate.d/
+terraform.tfvars
+*.tfvars.json
+ssh-key
+ssh-key.pub
+known_hosts
+*.pem
+crash.log

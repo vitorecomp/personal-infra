@@ -1,0 +1,22 @@
+model_list:
+  - model_name: deepseek-v4.1-flash
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4.1-Flash
+      api_base: os.environ/RAY_SERVER_API_BASE
+      api_key: "local-dev-ray-serve"
+      timeout: 1800
+
+  - model_name: deepseek-ai/DeepSeek-V4.1-Flash
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4.1-Flash
+      api_base: os.environ/RAY_SERVER_API_BASE
+      api_key: "local-dev-ray-serve"
+      timeout: 1800
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  drop_params: true
+  num_retries: 2
+  request_timeout: 1800

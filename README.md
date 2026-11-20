@@ -16,6 +16,10 @@ personal-infra/
 │   ├── personal-blog/        # Ghost + local MySQL compose stack for the VM
 │   ├── taiga/                # Taiga image + Cloud Run deploy script (built/deployed from GitHub Actions)
 │   └── scripts/              # bootstrap / deploy / backup / OCI retry scripts, Ghost & Taiga seeders
+├── development/              # Cloud & on-prem GPU development machine infrastructure, runner & Podman stack
+│   ├── gpu-dev-machine/      # Podman + podman-compose stack (Ray Serve DeepSeek-V4.1-Flash, LiteLLM, DeepSeek Harness)
+│   ├── infra/                # Provider-specific GPU machine configs (gcp, azure, on-prem)
+│   └── scripts/              # deploy.sh (machine provisioning) & setup.sh (GitHub runner setup)
 ├── home-server/              # Home server / self-hosted services and maintenance (TBD)
 ├── linux/                    # Linux OS bootstrap, packages, and system configuration (TBD)
 └── workspace/                # Local ~/workspace repository inventory and synchronization
@@ -25,6 +29,7 @@ personal-infra/
 | :--- | :--- | :--- |
 | **[`documentation/`](./documentation)** | Guides: [Cloud Architecture](./documentation/cloud-architecture.md), [VM Provisioning](./documentation/vm-provisioning.md), [Pipeline Setup](./documentation/pipeline-setup.md), [Backup & Restore](./documentation/backup-restore.md), [Workspace Management](./documentation/workspace-setup.md). | Active |
 | **`cloud/`** | Provisioning and maintaining cloud resources, networking, and hosted workloads (`nobuffer-site`, `personal-portifolio`, `personal-blog`, `taiga`). | Active |
+| **[`development/`](./development)** | Provisioning GPU development machines (`scripts/deploy.sh`) and configuring self-hosted GitHub runners (`scripts/setup.sh`) across `gcp`, `azure`, and `on-prem`. | Active (GCP Terraform; Azure/on-prem planned) |
 | **`home-server/`** | Self-hosted services, container stacks, backups, and home lab automation. | _Planned (to be defined)_ |
 | **`linux/`** | Workstation/system setup, packages, dotfiles, and OS-level maintenance scripts. | _Planned (to be defined)_ |
 | **`workspace/`** | Automated discovery, organization, and cloning of GitHub repositories into `~/workspace`. | Active |
@@ -61,22 +66,38 @@ ssh deploy@<ip> 'python3 /opt/stacks/.ops/backup_stack.py --stack taiga --restor
 python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --services all --dry-run
 ```
 
-### 2. `home-server/`
+### 2. `development/`
+Provisions and configures GPU development workstations across cloud and on-prem targets:
+
+- **Infrastructure ([`development/infra/`](./development/infra))**:
+  - [`gcp/`](./development/infra/gcp): GCP Terraform pairing an always-on `e2-small` (`STANDARD`) Controller/Watchdog VM (`dev-gpu-controller`) with an auto-restarting Spot GPU VM (`dev-gpu-vm`, `g4-standard-192` by default) and persistent `3000 GB` Hyperdisk (`/mnt/data`).
+  - [`azure/`](./development/infra/azure) & [`on-prem/`](./development/infra/on-prem): Reserved target folders (`.gitkeep`) for Azure and on-premises GPU hosts.
+- **GPU Machine Container Stack ([`development/gpu-dev-machine/`](./development/gpu-dev-machine))**: Podman + `podman-compose` stack running `ray-server` (full unquantized `deepseek-ai/DeepSeek-V4.1-Flash` with CPU offload), `litellm`, and `deepseek-harness` pointed at LiteLLM.
+- **Scripts ([`development/scripts/`](./development/scripts))**:
+  - [`deploy.sh`](./development/scripts/deploy.sh): Unified Terraform provisioning entrypoint (`--provider=<gcp|azure|on-prem>`) using logged-in CLI credentials and active project.
+  - [`setup.sh`](./development/scripts/setup.sh): Configures and manages the persistent GitHub Actions self-hosted runner on the deployed machine.
+
+```bash
+./development/scripts/deploy.sh --provider=gcp --dry-run
+./development/scripts/setup.sh --provider=gcp --repo=vitorecomp/<repo> --dry-run
+```
+
+### 3. `home-server/`
 _Details to be added._ Will hold configurations, service definitions, and maintenance workflows for the home server.
 
-### 3. `linux/`
+### 4. `linux/`
 _Details to be added._ Will hold scripts and configuration files to bootstrap and maintain Linux environments.
 
-### 4. `workspace/`
+### 5. `workspace/`
 Manages the local `~/workspace` directory hierarchy based on a tracked inventory of GitHub repositories.
 
-- **Inventory ([`repo_stats.csv`](./workspace/documentation/repo_stats.csv))**: Tracks repository metadata (`name`, `link`, `ssh link`, `last updated`, `is a fork`) alongside manual curation fields (`folder`, `is-custom`, `is-template`).
-- **Update Inventory ([`update_repo_stats.py`](./workspace/scripts/update_repo_stats.py))**: Queries the GitHub API for `vitorecomp` repositories, updates metadata in `repo_stats.csv` while preserving manual columns (`folder`, `is-custom`, `is-template`), and orders all rows by `last updated` descending.
+- **Inventory ([`repo_stats.json`](./workspace/documentation/repo_stats.json))**: Tracks repository metadata (`last_updated`, `link`, `ssh_link`, `is_fork`) alongside manual curation fields (`folder`, `is_custom`, `is_template`), sorted alphabetically by repository name to avoid Git merge conflicts.
+- **Update Inventory ([`update_repo_stats.py`](./workspace/scripts/update_repo_stats.py))**: Queries the GitHub API for `vitorecomp` repositories, updates metadata in `repo_stats.json` while preserving manual fields (`folder`, `is_custom`, `is_template`), and keeps entries sorted alphabetically by repository name.
   ```bash
   # Optional: export GITHUB_TOKEN or METRICS_TOKEN to include private repos / avoid rate limits
   python3 workspace/scripts/update_repo_stats.py
   ```
-- **Sync Workspace ([`sync_workspace_repos.py`](./workspace/scripts/sync_workspace_repos.py))**: Organizes already-cloned repositories into `~/workspace/<folder>/<name>` and clones any missing repositories that have a target `folder` assigned in `repo_stats.csv`.
+- **Sync Workspace ([`sync_workspace_repos.py`](./workspace/scripts/sync_workspace_repos.py))**: Organizes already-cloned repositories into `~/workspace/<folder>/<name>` and clones any missing repositories that have a target `folder` assigned in `repo_stats.json`.
   ```bash
   # Preview moves and clones without modifying the filesystem
   python3 workspace/scripts/sync_workspace_repos.py --dry-run
@@ -101,7 +122,7 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
   python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
   python3 workspace/scripts/scan_repo_secrets.py --install-hook
   ```
-- **Enroll GitHub Repositories on Taiga ([`enroll_taiga_projects.py`](./workspace/scripts/enroll_taiga_projects.py))**: Idempotently enrolls GitHub repositories from `repo_stats.csv` as Scrum projects on `https://taiga.vitorx86.dev` and orders them with the most recently committed repository first.
+- **Enroll GitHub Repositories on Taiga ([`enroll_taiga_projects.py`](./workspace/scripts/enroll_taiga_projects.py))**: Idempotently enrolls GitHub repositories from `repo_stats.json` as Scrum projects on `https://taiga.vitorx86.dev` and orders them with the most recently committed repository first.
   ```bash
   python3 workspace/scripts/enroll_taiga_projects.py --dry-run
   python3 workspace/scripts/enroll_taiga_projects.py
@@ -123,12 +144,13 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
 | **CI Validation** | [`ci.yml`](./.github/workflows/ci.yml) | Push, PR, manual | Secret scan (files + history), Python syntax and `--dry-run` checks, `terraform fmt -check` / `validate` for every root (no plan/apply), stack validation (`docker compose config`, `caddy validate`, shell syntax). |
 | **Deploy the Personal Blog (GCP VM)** | [`deploy-blog.yml`](./.github/workflows/deploy-blog.yml) | Push on `cloud/personal-blog/**`, `cloud/edge/**`, `deploy_stack.py`, `backup_stack.py`, `seed_ghost_admin.py` or the workflow; `repository_dispatch` (`deploy-personal-blog`); manual | Runner builds the Ghost image from `vitorecomp/personal-blog` and pushes it to GHCR; SSH to the VM: edge + blog pull/restart via `deploy_stack.py`. Environment `blog-prod`. |
 | **Deploy Taiga (Cloud Run)** | [`deploy-taiga.yml`](./.github/workflows/deploy-taiga.yml) | Push on `cloud/taiga/**`, `cloud/edge/**`, `deploy_stack.py`, `backup_stack.py`, `seed_taiga_admin.py` or the workflow; `repository_dispatch` (`deploy-taiga`); manual | Runner (keyless, Workload Identity Federation): `deploy-cloudrun.sh` (build, migrations against Neon, Secret Manager sync, Cloud Run revision); then SSH to the VM for the edge stack and Taiga's backup `.env`. Environment `taiga-prod`. |
-| **Update Workspace Repo Stats** | [`update-repo-stats.yml`](./.github/workflows/update-repo-stats.yml) | Weekly (Mon 06:00 UTC), manual | Refreshes [`repo_stats.csv`](./workspace/documentation/repo_stats.csv). |
+| **Deploy GPU Dev Machine Stack** | [`deploy-gpu-machine.yml`](./.github/workflows/deploy-gpu-machine.yml) | Push on `development/gpu-dev-machine/**`, `deploy_gpu_stack.sh`, or the workflow; manual | Self-hosted runner selected by repo variable `GPU_RUNNER` (`gcp-gpu`, `azure-gpu`, `on-prem-gpu`): syncs and deploys the Podman + `podman-compose` stack (`ray-server`, `litellm`, `deepseek-harness`, reverse tunnels) via [`deploy_gpu_stack.sh`](./development/scripts/deploy_gpu_stack.sh). Environment `gpu`. |
+| **Update Workspace Repo Stats** | [`update-repo-stats.yml`](./.github/workflows/update-repo-stats.yml) | Weekly (Mon 06:00 UTC), manual | Refreshes [`repo_stats.json`](./workspace/documentation/repo_stats.json). |
 
 ### GitHub Secrets & Variables
 
-- **Environments `blog-prod` / `taiga-prod`** (deployments from `main` only): secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY`; variables `DEPLOY_KNOWN_HOSTS`, `DEPLOY_USER`. `taiga-prod` also holds `TAIGA_DB_HOST` / `TAIGA_DB_USER` / `TAIGA_DB_PASSWORD` (Neon), `TAIGA_ADMIN_PASSWORD`, and the variables `TAIGA_DB_NAME`, `TAIGA_ADMIN_EMAIL` (optional `TAIGA_ADMIN_USER`, default `admin`); `blog-prod` holds `BLOG_ADMIN_EMAIL`.
-- **Repository**: secret `BLOG_ADMIN_PASSWORD` (Ghost owner check after deploys), `METRICS_TOKEN` (repo stats); variables `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`.
+- **Environments `blog-prod` / `taiga-prod` / `gpu`** (deployments from `main` only): `blog-prod` and `taiga-prod` hold secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY` and variables `DEPLOY_KNOWN_HOSTS`, `DEPLOY_USER`. `taiga-prod` also holds `TAIGA_DB_HOST` / `TAIGA_DB_USER` / `TAIGA_DB_PASSWORD` (Neon), `TAIGA_ADMIN_PASSWORD`, and variables `TAIGA_DB_NAME`, `TAIGA_ADMIN_EMAIL` (optional `TAIGA_ADMIN_USER`, default `admin`); `blog-prod` holds `BLOG_ADMIN_EMAIL`. `gpu` (also gated by required reviewer `vitorecomp`) holds secrets `LITELLM_MASTER_KEY`, optional `HF_TOKEN`, `TUNNEL_SSH_PRIVATE_KEY` and variables `ENABLE_REVERSE_TUNNELS`, `TUNNEL_SSH_HOST`, `TUNNEL_SSH_USER`, `TUNNEL_SSH_PORT`, `TUNNEL_KNOWN_HOSTS`, `TUNNEL_BIND_ADDRESS`, `REMOTE_LITELLM_PORT`, `REMOTE_HARNESS_PORT` (model & offload parameters are configured directly in [`development/gpu-dev-machine/compose.yml`](./development/gpu-dev-machine/compose.yml)).
+- **Repository**: secrets `BLOG_ADMIN_PASSWORD` (Ghost owner check after deploys), `METRICS_TOKEN` (repo stats); variables `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`, and `GPU_RUNNER` (selects which self-hosted runner pool executes `deploy-gpu-machine.yml`, e.g. `gcp-gpu`, `azure-gpu`, `on-prem-gpu`; optional `GPU_RUNNER_LABELS`).
 - No cloud keys live in GitHub: Terraform runs from a workstation; the Taiga deploy impersonates `github-deployer` through Workload Identity Federation (this repo, `main`, `taiga-prod` only); the blog image goes to GHCR with the job's `GITHUB_TOKEN`.
 
 ---

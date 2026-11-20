@@ -1,0 +1,81 @@
+name: Deploy GPU Dev Machine Stack
+# Deploys the Podman + `podman-compose` stack (`development/gpu-dev-machine`) onto
+# the GPU development machine (`ray-server` serving full unquantized DeepSeek-V4.1-Flash
+# with CPU offload, `litellm`, `deepseek-harness`, and reverse SSH tunnels).
+#
+# Which self-hosted runner executes this job is controlled by the Repository Variable
+# `GPU_RUNNER` (e.g. `gcp-gpu`, `azure-gpu`, `on-prem-gpu`) or `GPU_RUNNER_LABELS`.
+# Runtime secrets and stack settings live in the protected `gpu` GitHub Environment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Optional runner label override (defaults to repo variable GPU_RUNNER, else gcp-gpu)"
+        required: false
+        default: ""
+      enable_tunnels:
+        description: "Optional override for reverse SSH tunnels (auto, true, false)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - "true"
+          - "false"
+  push:
+    branches: [ "main" ]
+    paths:
+      - "development/gpu-dev-machine/**"
+      - "development/scripts/deploy_gpu_stack.sh"
+      - ".github/workflows/deploy-gpu-machine.yml"
+
+concurrency:
+  group: deploy-gpu-dev-machine
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy Podman Stack to GPU Machine
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.event_name != 'pull_request_target' &&
+      github.repository_owner == 'vitorecomp'
+    runs-on: ${{ inputs.runner && fromJSON(format('["self-hosted","linux","x64","{0}"]', inputs.runner)) || (vars.GPU_RUNNER_LABELS && fromJSON(vars.GPU_RUNNER_LABELS)) || fromJSON(format('["self-hosted","linux","x64","{0}"]', vars.GPU_RUNNER || 'gcp-gpu')) }}
+    environment: gpu
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Deploy GPU Podman Compose Stack
+        env:
+          # Target routing (auto = `gpu-ssh` on GCP controller, `GPU_SSH_HOST` over SSH, or `local`)
+          GPU_TARGET_MODE: ${{ vars.GPU_TARGET_MODE || 'auto' }}
+          GPU_SSH_HOST: ${{ vars.GPU_SSH_HOST }}
+          GPU_SSH_KNOWN_HOSTS: ${{ vars.GPU_SSH_KNOWN_HOSTS }}
+          GPU_SSH_PRIVATE_KEY: ${{ secrets.GPU_SSH_PRIVATE_KEY }}
+
+          # Core authentication & Hugging Face (model parameters live in development/gpu-dev-machine/compose.yml)
+          LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+          # Reverse SSH tunnels (litellm-tunnel & deepseek-harness-tunnel)
+          ENABLE_REVERSE_TUNNELS: ${{ (inputs.enable_tunnels && inputs.enable_tunnels != 'auto' && inputs.enable_tunnels) || vars.ENABLE_REVERSE_TUNNELS || '' }}
+          TUNNEL_SSH_HOST: ${{ vars.TUNNEL_SSH_HOST }}
+          TUNNEL_SSH_PORT: ${{ vars.TUNNEL_SSH_PORT || '22' }}
+          TUNNEL_SSH_USER: ${{ vars.TUNNEL_SSH_USER }}
+          TUNNEL_BIND_ADDRESS: ${{ vars.TUNNEL_BIND_ADDRESS || '127.0.0.1' }}
+          REMOTE_LITELLM_PORT: ${{ vars.REMOTE_LITELLM_PORT || '4000' }}
+          REMOTE_HARNESS_PORT: ${{ vars.REMOTE_HARNESS_PORT || '3080' }}
+          TUNNEL_KNOWN_HOSTS: ${{ vars.TUNNEL_KNOWN_HOSTS }}
+          TUNNEL_SSH_PRIVATE_KEY: ${{ secrets.TUNNEL_SSH_PRIVATE_KEY }}
+          LITELLM_TUNNEL_SSH_HOST: ${{ vars.LITELLM_TUNNEL_SSH_HOST }}
+          LITELLM_TUNNEL_SSH_PORT: ${{ vars.LITELLM_TUNNEL_SSH_PORT }}
+          LITELLM_TUNNEL_SSH_USER: ${{ vars.LITELLM_TUNNEL_SSH_USER }}
+          HARNESS_TUNNEL_SSH_HOST: ${{ vars.HARNESS_TUNNEL_SSH_HOST }}
+          HARNESS_TUNNEL_SSH_PORT: ${{ vars.HARNESS_TUNNEL_SSH_PORT }}
+          HARNESS_TUNNEL_SSH_USER: ${{ vars.HARNESS_TUNNEL_SSH_USER }}
+        run: |
+          ./development/scripts/deploy_gpu_stack.sh

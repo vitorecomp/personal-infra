@@ -6,12 +6,13 @@ Instructions and context for AI coding agents working in `personal-infra`.
 
 `personal-infra` is the central automation repository responsible for provisioning, configuring, and maintaining all personal infrastructure for `vitorecomp`.
 
-The repository is organized into four top-level domains:
+The repository is organized into five top-level domains:
 
 1. **`cloud/`** — `nobuffer-site` + `personal-portifolio` on Vercel (Git integration on their repos); `personal-blog` (Ghost + local MySQL) on the GCE free-tier e2-micro VM `personal-host` behind a shared Caddy (`cloud/edge`); `taiga` on Cloud Run free tier (built and deployed from GitHub Actions by `cloud/taiga/deploy-cloudrun.sh` as `github-deployer` via Workload Identity Federation, database on Neon Postgres 15, media in GCS). The VM never builds images: the Ghost image is built in CI and pulled from GHCR. Terraform in `cloud/infra/envs/{gcp-taiga,oci-blog}` is applied from a workstation, never in CI (`documentation/vm-provisioning.md`); `oci-blog` is a spare OCI A1 VM still being acquired by `tf_apply_retry.sh`, run every 10 min by the `oci-blog-retry.service` unit on the VM (`documentation/vm-provisioning.md`). DNS is on Cloudflare.
-2. **`home-server/`** — Home server workloads, self-hosted services, networking, and maintenance _(specification pending)_.
-3. **`linux/`** — Linux system bootstrap, package installation, dotfiles, and OS configuration _(specification pending)_.
-4. **`workspace/`** — Local `~/workspace` directory orchestration and GitHub repository synchronization.
+2. **`development/`** — GPU development machine provisioning across `infra/{gcp,azure,on-prem}` via `development/scripts/deploy.sh` (starting with GCP Spot GPU VM + always-on STANDARD controller/watchdog + persistent Hyperdisk in `development/infra/gcp`) and persistent GitHub Actions runner setup via `development/scripts/setup.sh`.
+3. **`home-server/`** — Home server workloads, self-hosted services, networking, and maintenance _(specification pending)_.
+4. **`linux/`** — Linux system bootstrap, package installation, dotfiles, and OS configuration _(specification pending)_.
+5. **`workspace/`** — Local `~/workspace` directory orchestration and GitHub repository synchronization.
 
 > **Note for Agents:** `home-server/` and `linux/` will be specified incrementally by the user. Do not invent or scaffold opinionated tooling (e.g., Ansible, Nix, Docker Compose) inside those directories until the user defines the requirements for each domain.
 
@@ -42,7 +43,8 @@ personal-infra/
 │   ├── ci.yml                              # Secret scan, Python syntax/dry-run checks, Terraform fmt/validate (no apply), compose/Caddy validation
 │   ├── deploy-blog.yml                     # Runner builds Ghost -> GHCR; SSH: edge + blog pull/restart on the GCP VM
 │   ├── deploy-taiga.yml                    # Runner (WIF): Taiga build/migrate/Cloud Run; SSH: edge + Taiga backup .env
-│   └── update-repo-stats.yml               # Scheduled/manual sync of repo_stats.csv
+│   ├── deploy-gpu-machine.yml              # Self-hosted runner (vars.GPU_RUNNER, env gpu): deploys gpu-dev-machine via podman-compose
+│   └── update-repo-stats.yml               # Scheduled/manual sync of repo_stats.json
 ├── mise.toml                               # Workstation tool pins (terraform)
 ├── cloud/                                  # Cloud infrastructure and deployment automation
 │   ├── edge/                               # Shared Caddy (TLS + routing) for every stack on the GCP VM
@@ -71,17 +73,27 @@ personal-infra/
 │       ├── seed_ghost_admin.py             # Idempotently seeds/verifies the Ghost owner (--connect-ip/--insecure for VMs)
 │       ├── seed_taiga_admin.py             # Idempotently verifies Taiga API & admin login (--connect-ip/--insecure for VMs)
 │       └── configure_ai_spend_cap.py       # Idempotently configures GCP Cloud Billing Spend Cap budgets for AI services
+├── development/                            # Cloud & on-prem GPU development machine provisioning & Podman stack
+│   ├── gpu-dev-machine/                    # Podman + podman-compose stack (ray-server DeepSeek-V4.1-Flash, litellm, deepseek-harness)
+│   ├── infra/
+│   │   ├── gcp/                            # GCP Terraform: STANDARD controller/watchdog + Spot GPU VM + Hyperdisk
+│   │   ├── azure/                          # (Planned) Azure GPU VM infrastructure
+│   │   └── on-prem/                        # (Planned) On-prem GPU host infrastructure
+│   └── scripts/
+│       ├── deploy.sh                       # Unified machine provisioning entrypoint across GCP, Azure, and on-prem
+│       ├── setup.sh                        # Configures/manages the GitHub Actions runner on the deployed machine
+│       └── deploy_gpu_stack.sh             # Syncs & deploys development/gpu-dev-machine via podman-compose (CI & local)
 ├── home-server/                            # (Planned) Home server setup and maintenance
 ├── linux/                                  # (Planned) Linux workstation/system configuration
 └── workspace/                              # Local repository management
     ├── documentation/
-    │   └── repo_stats.csv                  # Source-of-truth repo inventory & folder mapping
+    │   └── repo_stats.json                 # Source-of-truth repo inventory & folder mapping (alphabetical JSON)
     └── scripts/
-        ├── update_repo_stats.py            # Syncs GitHub repo metadata into repo_stats.csv
+        ├── update_repo_stats.py            # Syncs GitHub repo metadata into repo_stats.json
         ├── sync_workspace_repos.py         # Moves/clones repos into ~/workspace/<folder>/<name>
         ├── validate_repos_pushed.py        # Validates whether git repos in a folder are clean and pushed
         ├── scan_repo_secrets.py            # Scans repos/history for leaked keys/secrets & installs pre-commit hook
-        ├── enroll_taiga_projects.py        # Idempotently enrolls GitHub repos from repo_stats.csv as Taiga projects
+        ├── enroll_taiga_projects.py        # Idempotently enrolls GitHub repos from repo_stats.json as Taiga projects
         └── taiga_cli.py                    # Wrapper CLI delegating to .agents/skills/taiga/scripts/taiga_cli.py
 ```
 
@@ -95,7 +107,7 @@ personal-infra/
 - Always test state-changing scripts with `--dry-run` before running them for real.
 
 ### 2. Preserve User-Curated State
-- When updating partially automated data files (such as `workspace/documentation/repo_stats.csv`), never overwrite manual columns (`folder`, `is-custom`, `is-template`); rows in `repo_stats.csv` are sorted by `last updated` descending.
+- When updating partially automated data files (such as `workspace/documentation/repo_stats.json`), never overwrite manual fields (`folder`, `is_custom`, `is_template`); entries in `repo_stats.json` are sorted alphabetically by repository name with stable fields separating `last_updated` from `folder` to avoid Git merge conflicts.
 - When moving or syncing local directories (such as `~/workspace`), never delete or overwrite existing repositories or untracked local folders that are omitted from configuration.
 
 ### 3. Secrets & Credentials
@@ -113,7 +125,7 @@ personal-infra/
 - **Paths**: Resolve paths relative to script locations (`Path(__file__).resolve()`) rather than relying on the caller's working directory, and allow CLI overrides via `argparse`.
 
 ### 6. Documentation Hygiene
-- When a new domain folder (`cloud/`, `home-server/`, `linux/`, `workspace/`) is populated or updated, update both `README.md` and `AGENTS.md` with its architecture, entrypoints, and verification commands.
+- When a new domain folder (`cloud/`, `development/`, `home-server/`, `linux/`, `workspace/`) is populated or updated, update both `README.md` and `AGENTS.md` with its architecture, entrypoints, and verification commands.
 
 ---
 
@@ -133,9 +145,13 @@ python3 cloud/scripts/backup_stack.py --stack-dir cloud/taiga --dry-run
 cloud/scripts/tf_apply_retry.sh --env oci-blog --dry-run
 docker compose -f cloud/personal-blog/compose.yml --env-file cloud/personal-blog/.env.example config -q
 terraform -chdir=cloud/infra/envs/gcp-taiga init -backend=false && terraform -chdir=cloud/infra/envs/gcp-taiga validate
+terraform -chdir=development/infra/gcp init -backend=false && terraform -chdir=development/infra/gcp validate
+./development/scripts/deploy.sh --provider=gcp --dry-run
+./development/scripts/setup.sh --provider=gcp --repo=vitorecomp/<repo> --dry-run
+LITELLM_MASTER_KEY=x ./development/scripts/deploy_gpu_stack.sh --dry-run
 
 
-# Refresh GitHub repository metadata in repo_stats.csv
+# Refresh GitHub repository metadata in repo_stats.json
 python3 workspace/scripts/update_repo_stats.py
 
 # Preview ~/workspace organization and cloning (safe, read-only)
@@ -153,7 +169,7 @@ python3 workspace/scripts/scan_repo_secrets.py --history
 python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
 python3 workspace/scripts/scan_repo_secrets.py --install-hook
 
-# Preview or enroll GitHub repositories from repo_stats.csv as projects on Taiga
+# Preview or enroll GitHub repositories from repo_stats.json as projects on Taiga
 python3 workspace/scripts/enroll_taiga_projects.py --dry-run
 TAIGA_ADMIN_PASSWORD=<password> python3 workspace/scripts/enroll_taiga_projects.py personal
 

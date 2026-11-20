@@ -182,8 +182,10 @@ cloud/*/repo/
 # Terraform
 **/.terraform/*
 **/.terraform.d/*
+**/terraform.tfstate.d/*
 .terraform/
 .terraform.d/
+terraform.tfstate.d/
 *.tfstate
 *.tfstate.*
 *.tfvars
@@ -200,6 +202,9 @@ override.tf.json
 .terraform.lock.hcl
 .terraformrc
 terraform.rc
+**/ssh-key
+**/ssh-key.pub
+**/known_hosts
 
 
 # Compose stacks: app checkouts cloned on the VMs and migration/backup artifacts
