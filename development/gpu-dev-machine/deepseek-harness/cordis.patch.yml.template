@@ -1,0 +1,13 @@
+- id: llm-pi-ai
+  config:
+    providers:
+      litellm:
+        displayName: LiteLLM (DeepSeek V4.1 Flash)
+        apiKeyEnv: LITELLM_API_KEY
+        api: openai-completions
+        baseURL: __LITELLM_BASE_URL__
+        models:
+          - id: deepseek-v4.1-flash
+            name: DeepSeek V4.1 Flash (Full Unquantized / CPU Offload)
+          - id: deepseek-ai/DeepSeek-V4.1-Flash
+            name: deepseek-ai/DeepSeek-V4.1-Flash

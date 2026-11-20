@@ -14,7 +14,8 @@ workstation ([vm-provisioning.md](./vm-provisioning.md)).
 | `vitorecomp/personal-blog` (Ghost theme/image) | Its `trigger-deploy.yml` sends `repository_dispatch: deploy-personal-blog` with `client_payload.sha` → [`deploy-blog.yml`](../.github/workflows/deploy-blog.yml) |
 | `cloud/personal-blog/**`, `cloud/edge/**`, `cloud/scripts/{deploy_stack,backup_stack,seed_ghost_admin}.py`, the workflow | push to `main` → `deploy-blog.yml` |
 | `cloud/taiga/**`, `cloud/edge/**`, `cloud/scripts/{deploy_stack,backup_stack,seed_taiga_admin}.py`, the workflow | push to `main` → [`deploy-taiga.yml`](../.github/workflows/deploy-taiga.yml) |
-| `cloud/infra/**` | CI validates only; apply by hand |
+| `development/gpu-dev-machine/**`, `development/scripts/deploy_gpu_stack.sh`, the workflow | push to `main` (or manual dispatch) → [`deploy-gpu-machine.yml`](../.github/workflows/deploy-gpu-machine.yml) (self-hosted runner selected by repo variable `GPU_RUNNER`, environment `gpu`) |
+| `cloud/infra/**`, `development/infra/**` | CI validates only; apply from workstation (`development/scripts/deploy.sh`) |
 
 Both deploy workflows share the `deploy-gcp-vm` concurrency group (one VM) and refresh the edge stack in their VM job.
 
@@ -25,15 +26,19 @@ Both deploy workflows share the `deploy-gcp-vm` concurrency group (one VM) and r
 | [`ci.yml`](../.github/workflows/ci.yml) | Secret scan (files + full history), Python syntax and `--dry-run` checks, `terraform fmt -check` / `validate` for `gcp-taiga` and `oci-blog`, stack validation (`docker compose config`, `caddy validate`, `bash -n`). |
 | [`deploy-blog.yml`](../.github/workflows/deploy-blog.yml) | **build** (runner): checks out `vitorecomp/personal-blog` at the dispatched SHA (default `main`), validates the theme, builds and pushes `ghcr.io/vitorecomp/personal-blog:<sha>`. **deploy** (SSH): `deploy_stack.py --stack edge`, then `--stack personal-blog --sync-env GHOST_IMAGE` (digest-pinned image into the VM `.env`, `compose pull` with a throwaway login using the job's `GITHUB_TOKEN`, `up --wait`, HTTPS check, Ghost owner check). |
 | [`deploy-taiga.yml`](../.github/workflows/deploy-taiga.yml) | **cloud-run** (runner, WIF): [`cloud/taiga/deploy-cloudrun.sh`](../cloud/taiga/deploy-cloudrun.sh) builds the image (skipped if this build context is already in Artifact Registry), runs migrations against Neon, syncs the DB/admin passwords into Secret Manager and rolls out a Cloud Run revision. **vm** (SSH): edge stack, then `deploy_stack.py --stack taiga --sync-env TAIGA_DB_*` (keeps the VM's backup credentials current), HTTPS + admin login checks through the VM. |
-| [`update-repo-stats.yml`](../.github/workflows/update-repo-stats.yml) | Weekly refresh of `workspace/documentation/repo_stats.csv`. |
+| [`deploy-gpu-machine.yml`](../.github/workflows/deploy-gpu-machine.yml) | Runs on the self-hosted runner selected by `vars.GPU_RUNNER` (default `gcp-gpu`) in environment `gpu`: [`deploy_gpu_stack.sh`](../development/scripts/deploy_gpu_stack.sh) waits for Spot GPU VM SSH (`gpu-wait-ssh`), bootstraps Podman + NVIDIA CDI + `/mnt/data` storage if missing, syncs `development/gpu-dev-machine/`, writes `.env` (`0600`) + tunnel SSH key, and runs `podman-compose up -d --build`. |
+| [`update-repo-stats.yml`](../.github/workflows/update-repo-stats.yml) | Weekly refresh of `workspace/documentation/repo_stats.json`. |
 
 ## 3. Secrets and variables
 
 | Where | Name | Kind | Purpose |
 | :--- | :--- | :--- | :--- |
 | Repository | `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA` | variable | `terraform output github_wif_provider` / `github_deployer_email` in `cloud/infra/envs/gcp-taiga` (identifiers, not credentials) |
+| Repository | `GPU_RUNNER` *(optional `GPU_RUNNER_LABELS`)* | variable | Selects which self-hosted runner executes `deploy-gpu-machine.yml` (`gcp-gpu`, `azure-gpu`, or `on-prem-gpu`; evaluated in `runs-on:`) |
 | Repository | `BLOG_ADMIN_PASSWORD` | secret | Ghost owner login check after deploys |
 | Repository | `METRICS_TOKEN` | secret | repo stats |
+| `gpu` (branch `main` + reviewer `vitorecomp`) | `LITELLM_MASTER_KEY`, optional `HF_TOKEN`, `TUNNEL_SSH_PRIVATE_KEY`, `GPU_SSH_PRIVATE_KEY` | secret | LiteLLM/Harness API key, Hugging Face token, reverse-SSH private key, and non-GCP GPU SSH key |
+| `gpu` | `ENABLE_REVERSE_TUNNELS`, `TUNNEL_SSH_HOST`, `TUNNEL_SSH_USER`, `TUNNEL_SSH_PORT`, `TUNNEL_KNOWN_HOSTS`, `TUNNEL_BIND_ADDRESS`, `REMOTE_LITELLM_PORT`, `REMOTE_HARNESS_PORT`, optional `GPU_TARGET_MODE` | variable | Reverse-tunnel destination/ports and runner target mode (model & CPU-offload settings live directly in `development/gpu-dev-machine/compose.yml`; full reference in [`development/README.md`](../development/README.md)) |
 | `blog-prod`, `taiga-prod` (branch `main` only) | `DEPLOY_HOST`, `DEPLOY_SSH_KEY` | secret | VM address and per-stack deploy key (`~/.ssh/blog_deploy`, `~/.ssh/taiga_deploy`) |
 | `blog-prod`, `taiga-prod` | `DEPLOY_KNOWN_HOSTS`, `DEPLOY_USER` | variable | pinned VM host key, `deploy` |
 | `blog-prod` | `BLOG_ADMIN_EMAIL` | variable | Ghost owner check |

@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   update-stats:
-    name: Sync GitHub Metadata into repo_stats.csv
+    name: Sync GitHub Metadata into repo_stats.json
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
@@ -30,14 +30,14 @@ jobs:
       run: |
         python3 workspace/scripts/update_repo_stats.py
 
-    - name: Commit and push updated repo_stats.csv
+    - name: Commit and push updated repo_stats.json
       run: |
-        if git diff --quiet workspace/documentation/repo_stats.csv; then
-          echo "No changes to repo_stats.csv"
+        if git diff --quiet workspace/documentation/repo_stats.json; then
+          echo "No changes to repo_stats.json"
           exit 0
         fi
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add workspace/documentation/repo_stats.csv
-        git commit -m "chore(workspace): update repo_stats.csv metadata"
+        git add workspace/documentation/repo_stats.json
+        git commit -m "chore(workspace): update repo_stats.json metadata"
         git push

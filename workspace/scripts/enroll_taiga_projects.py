@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Enrolls GitHub repositories from workspace/documentation/repo_stats.csv as projects on Taiga.
+"""Enrolls GitHub repositories from workspace/documentation/repo_stats.json as projects on Taiga.
 
 Behavior:
-1. Reads `workspace/documentation/repo_stats.csv`.
+1. Reads `workspace/documentation/repo_stats.json`.
 2. Filters repositories by:
    - Assigned `folder` (by default only repos with a non-empty `folder`, or a specific
      folder when passed via positional `folder` / `--folder`, unless `--include-unassigned` is set).
@@ -16,7 +16,6 @@ Behavior:
 """
 
 import argparse
-import csv
 import importlib.util
 import http.client
 import json
@@ -33,7 +32,7 @@ import urllib.request
 
 USER = "vitorecomp"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CSV_PATH = REPO_ROOT / "documentation" / "repo_stats.csv"
+DEFAULT_JSON_PATH = REPO_ROOT / "documentation" / "repo_stats.json"
 DEFAULT_TAIGA_URL = "https://taiga.example.com"
 DEFAULT_ADMIN_USER = "admin"
 DEFAULT_ADMIN_EMAIL = ""  # optional login fallback; set TAIGA_ADMIN_EMAIL in the Taiga skill .env
@@ -132,50 +131,60 @@ def slugify_name(name: str) -> str:
     return slug or name.lower()
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() == "true"
+
+
 def load_candidate_repos(
-    csv_path: Path,
+    json_path: Path,
     folder_filter: str | None = None,
     include_unassigned: bool = False,
     include_forks: bool = False,
     repo_names: set[str] | None = None,
 ) -> list[dict[str, str]]:
-    if not csv_path.exists():
-        sys.exit(f"[error] CSV file not found: {csv_path}")
+    if not json_path.exists():
+        sys.exit(f"[error] JSON file not found: {json_path}")
+
+    raw = json.loads(json_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        sys.exit(f"[error] Expected top-level JSON object in: {json_path}")
 
     candidates: list[dict[str, str]] = []
-    with csv_path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            name = (row.get("name") or "").strip()
-            if not name:
+    for raw_name, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        name = str(raw_name).strip()
+        if not name:
+            continue
+
+        if repo_names and name not in repo_names:
+            continue
+
+        folder = str(entry.get("folder") or "").strip()
+        is_fork = _as_bool(entry.get("is_fork"))
+
+        if not repo_names:
+            if folder_filter and folder != folder_filter:
+                continue
+            if not folder_filter and not include_unassigned and not folder:
+                continue
+            if is_fork and not include_forks:
                 continue
 
-            if repo_names and name not in repo_names:
-                continue
-
-            folder = (row.get("folder") or "").strip()
-            is_fork = (row.get("is a fork") or "").strip().lower() == "true"
-
-            if not repo_names:
-                if folder_filter and folder != folder_filter:
-                    continue
-                if not folder_filter and not include_unassigned and not folder:
-                    continue
-                if is_fork and not include_forks:
-                    continue
-
-            candidates.append(
-                {
-                    "name": name,
-                    "link": (row.get("link") or "").strip(),
-                    "ssh_link": (row.get("ssh link") or "").strip(),
-                    "last_updated": (row.get("last updated") or "").strip(),
-                    "is_fork": str(is_fork),
-                    "folder": folder,
-                    "is_custom": (row.get("is-custom") or "").strip(),
-                    "is_template": (row.get("is-template") or "").strip(),
-                }
-            )
+        candidates.append(
+            {
+                "name": name,
+                "link": str(entry.get("link") or "").strip(),
+                "ssh_link": str(entry.get("ssh_link") or "").strip(),
+                "last_updated": str(entry.get("last_updated") or "").strip(),
+                "is_fork": str(is_fork),
+                "folder": folder,
+                "is_custom": str(_as_bool(entry.get("is_custom"))),
+                "is_template": str(_as_bool(entry.get("is_template"))),
+            }
+        )
 
     candidates.sort(key=lambda r: r.get("last_updated", ""), reverse=True)
     return candidates
@@ -519,7 +528,7 @@ def sync_project_order(
 
 
 def enroll_projects(
-    csv_path: Path,
+    json_path: Path,
     taiga_url: str,
     username: str,
     email: str,
@@ -537,7 +546,7 @@ def enroll_projects(
     dry_run: bool = False,
 ) -> int:
     candidates = load_candidate_repos(
-        csv_path=csv_path,
+        json_path=json_path,
         folder_filter=folder_filter,
         include_unassigned=include_unassigned,
         include_forks=include_forks,
@@ -545,7 +554,7 @@ def enroll_projects(
     )
 
     if not candidates:
-        print("[ok] No matching repositories found in repo_stats.csv to enroll.")
+        print("[ok] No matching repositories found in repo_stats.json to enroll.")
         return 0
 
     gh_token = _resolve_github_token()
@@ -556,7 +565,7 @@ def enroll_projects(
     visibility_label = "private" if is_private else "public"
     if dry_run:
         print(
-            f"[dry-run] Would enroll {len(candidates)} repositories from {csv_path} "
+            f"[dry-run] Would enroll {len(candidates)} repositories from {json_path} "
             f"onto {taiga_url} (template={template_slug}, visibility={visibility_label}):"
         )
         for repo in candidates:
@@ -691,7 +700,7 @@ def enroll_projects(
 def main() -> None:
     _load_taiga_env(sys.argv[1:])  # before argparse: its defaults read os.environ
     parser = argparse.ArgumentParser(
-        description="Idempotently enroll GitHub repositories from repo_stats.csv as projects on the Taiga server."
+        description="Idempotently enroll GitHub repositories from repo_stats.json as projects on the Taiga server."
     )
     parser.add_argument(
         "folder",
@@ -704,7 +713,7 @@ def main() -> None:
         dest="folder_flag",
         type=str,
         default=None,
-        help="Filter repositories by a specific folder column value in repo_stats.csv.",
+        help="Filter repositories by a specific folder value in repo_stats.json.",
     )
     parser.add_argument(
         "--repo",
@@ -716,7 +725,7 @@ def main() -> None:
     parser.add_argument(
         "--include-unassigned",
         action="store_true",
-        help="Also enroll repositories that do not have a folder assigned in repo_stats.csv.",
+        help="Also enroll repositories that do not have a folder assigned in repo_stats.json.",
     )
     parser.add_argument(
         "--include-forks",
@@ -745,10 +754,10 @@ def main() -> None:
         help="Skip fetching live repository descriptions and topics from the GitHub API.",
     )
     parser.add_argument(
-        "--csv",
+        "--json",
         type=Path,
-        default=DEFAULT_CSV_PATH,
-        help=f"Path to repo_stats.csv (default: {DEFAULT_CSV_PATH}).",
+        default=DEFAULT_JSON_PATH,
+        help=f"Path to repo_stats.json (default: {DEFAULT_JSON_PATH}).",
     )
     parser.add_argument(
         "--taiga-url",
@@ -792,7 +801,7 @@ def main() -> None:
 
     sys.exit(
         enroll_projects(
-            csv_path=args.csv.expanduser().resolve(),
+            json_path=args.json.expanduser().resolve(),
             taiga_url=args.taiga_url,
             username=args.username,
             email=args.email,

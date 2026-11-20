@@ -22,7 +22,7 @@ When the user invokes `/taiga ...`, interpret their arguments as follows:
 - `/taiga sprint <project> <name> <start> <end>` -> Create a sprint in `<project>`.
 - `/taiga task <project> <subject>` -> Create a task in `<project>`.
 - `/taiga issue <project> <subject>` -> Create an issue/bug in `<project>`.
-- `/taiga sync` -> Sync and reorder GitHub repositories from `repo_stats.csv` onto Taiga (`enroll_taiga_projects.py`).
+- `/taiga sync` -> Sync and reorder GitHub repositories from `repo_stats.json` onto Taiga (`enroll_taiga_projects.py`).
 - `/taiga <natural language instruction>` -> Execute the requested Taiga operation using `taiga_cli.py`.
 
 ## Helper Scripts

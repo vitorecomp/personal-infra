@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Organizes and clones repositories listed in documentation/repo_stats.csv into ~/workspace.
+"""Organizes and clones repositories listed in documentation/repo_stats.json into ~/workspace.
 
 Behavior:
-1. Reads `documentation/repo_stats.csv`.
-2. Ignores any row where `folder` is empty, as well as any local folder/repo in
-   `~/workspace` that is not described with a target `folder` in the CSV.
+1. Reads `documentation/repo_stats.json`.
+2. Ignores any entry where `folder` is empty, as well as any local folder/repo in
+   `~/workspace` that is not described with a target `folder` in the JSON.
 3. Scans `~/workspace` for already-cloned repositories and moves them to
    `~/workspace/<folder>/<name>` if they are currently in a different folder.
-4. Clones any remaining repositories that have a `folder` assigned in the CSV
+4. Clones any remaining repositories that have a `folder` assigned in the JSON
    into `~/workspace/<folder>/<name>`.
 
 SSH keys with a passphrase are supported: before cloning, SSH access is checked
@@ -18,7 +18,7 @@ clones never prompt on the terminal. Keys without a passphrase skip this step.
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import csv
+import json
 import os
 from pathlib import Path
 import re
@@ -27,29 +27,33 @@ import subprocess
 import sys
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CSV_PATH = REPO_ROOT / "documentation" / "repo_stats.csv"
+DEFAULT_JSON_PATH = REPO_ROOT / "documentation" / "repo_stats.json"
 DEFAULT_WORKSPACE = Path.home() / "workspace"
 
 
-def load_csv_repos(csv_path: Path) -> dict[str, dict[str, str]]:
-    if not csv_path.exists():
-        sys.exit(f"CSV file not found: {csv_path}")
+def load_json_repos(json_path: Path) -> dict[str, dict[str, str]]:
+    if not json_path.exists():
+        sys.exit(f"JSON file not found: {json_path}")
+
+    raw = json.loads(json_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        sys.exit(f"Expected top-level JSON object in: {json_path}")
 
     repos: dict[str, dict[str, str]] = {}
-    with csv_path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            name = (row.get("name") or "").strip()
-            folder = (row.get("folder") or "").strip()
-            # Only manage repos that have both a name and a target folder in the CSV.
-            if not name or not folder:
-                continue
-            repos[name] = {
-                "name": name,
-                "folder": folder,
-                "link": (row.get("link") or "").strip(),
-                "ssh_link": (row.get("ssh link") or "").strip(),
-            }
+    for name, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        clean_name = str(name).strip()
+        folder = str(entry.get("folder") or "").strip()
+        # Only manage repos that have both a name and a target folder in the JSON.
+        if not clean_name or not folder:
+            continue
+        repos[clean_name] = {
+            "name": clean_name,
+            "folder": folder,
+            "link": str(entry.get("link") or "").strip(),
+            "ssh_link": str(entry.get("ssh_link") or "").strip(),
+        }
     return repos
 
 
@@ -180,7 +184,7 @@ def stop_ssh_agent(pid: str) -> None:
 def clone_repo(repo: dict[str, str], target_path: Path, dry_run: bool = False) -> bool:
     clone_url = repo["ssh_link"] or repo["link"]
     if not clone_url:
-        print(f"[skip] {repo['name']}: no clone URL in CSV", file=sys.stderr)
+        print(f"[skip] {repo['name']}: no clone URL in JSON", file=sys.stderr)
         return False
 
     if dry_run:
@@ -227,13 +231,13 @@ def clone_repo(repo: dict[str, str], target_path: Path, dry_run: bool = False) -
 
 
 def sync_workspace(
-    csv_path: Path,
+    json_path: Path,
     workspace: Path,
     dry_run: bool = False,
     jobs: int = 4,
     ssh_key: Path | None = None,
 ) -> None:
-    managed_repos = load_csv_repos(csv_path)
+    managed_repos = load_json_repos(json_path)
     workspace.mkdir(parents=True, exist_ok=True)
 
     existing_repos, repo_symlinks = find_existing_cloned_repos(workspace)
@@ -252,7 +256,7 @@ def sync_workspace(
                 link_path.unlink(missing_ok=True)
                 print(f"[unlink] Removed symlink {link_path}")
 
-    # Step 1: Organize already-cloned repos that are described in the CSV (move directly, never symlink).
+    # Step 1: Organize already-cloned repos that are described in the JSON (move directly, never symlink).
     for name, repo in managed_repos.items():
         target_dir = workspace / repo["folder"] / name
         locations = existing_repos.get(name, [])
@@ -289,7 +293,7 @@ def sync_workspace(
     if not dry_run:
         existing_repos, _ = find_existing_cloned_repos(workspace)
 
-    # Step 2: Clone missing repos that have a target folder in the CSV.
+    # Step 2: Clone missing repos that have a target folder in the JSON.
     to_clone: list[tuple[dict[str, str], Path]] = []
     for name, repo in managed_repos.items():
         target_dir = workspace / repo["folder"] / name
@@ -331,7 +335,7 @@ def sync_workspace(
             stop_ssh_agent(agent_pid)
 
     print(
-        f"\nSummary: configured_in_csv={len(managed_repos)}, "
+        f"\nSummary: configured_in_json={len(managed_repos)}, "
         f"already_in_place={already_in_place}, moved={moved_count}, "
         f"cloned={cloned_count}, failed={failed_count}"
     )
@@ -339,13 +343,13 @@ def sync_workspace(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Organize and clone repositories in ~/workspace based on documentation/repo_stats.csv."
+        description="Organize and clone repositories in ~/workspace based on documentation/repo_stats.json."
     )
     parser.add_argument(
-        "--csv",
+        "--json",
         type=Path,
-        default=DEFAULT_CSV_PATH,
-        help=f"Path to repo_stats.csv (default: {DEFAULT_CSV_PATH})",
+        default=DEFAULT_JSON_PATH,
+        help=f"Path to repo_stats.json (default: {DEFAULT_JSON_PATH})",
     )
     parser.add_argument(
         "--workspace",
@@ -372,7 +376,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     sync_workspace(
-        args.csv.resolve(),
+        args.json.resolve(),
         args.workspace.expanduser().resolve(),
         dry_run=args.dry_run,
         jobs=args.jobs,

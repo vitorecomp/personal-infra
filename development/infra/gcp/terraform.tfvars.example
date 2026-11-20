@@ -1,0 +1,21 @@
+# Optional: deploy.sh automatically uses your logged-in gcloud credentials and active project.
+# Copy to terraform.tfvars only if you want persistent overrides.
+# project_id = "your-gcp-project-id"
+region      = "europe-west4"
+zone        = "europe-west4-a"
+name_prefix = "dev-gpu"
+
+controller_machine_type = "e2-small"
+controller_disk_size_gb = 100
+machine_type            = "g4-standard-192"
+provisioning_model      = "SPOT"
+
+# Public internet ingress is disabled by default; SSH connects via `gcloud compute ssh --tunnel-through-iap`.
+# enable_public_ingress = false
+
+# Disable if external policy controllers manage VPC ingress rules:
+# enable_ingress_firewalls = false
+
+# Cloud OS Login defaults to true so projects enforcing constraints/compute.requireOsLogin work cleanly.
+# Set to false on non-restricted projects to always use `dev` (var.ssh_username) as the SSH user:
+# enable_os_login = false
