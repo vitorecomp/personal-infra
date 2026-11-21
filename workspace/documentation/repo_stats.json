@@ -512,10 +512,10 @@
     "is_custom": false,
     "is_template": false
   },
-  "Neovim-from-scratch": {
-    "last_updated": "2022-11-08T19:19:35Z",
-    "link": "https://github.com/vitorecomp/Neovim-from-scratch",
-    "ssh_link": "git@github.com:vitorecomp/Neovim-from-scratch.git",
+  "neovim-ricing": {
+    "last_updated": "2026-11-20T19:05:48Z",
+    "link": "https://github.com/vitorecomp/neovim-ricing",
+    "ssh_link": "git@github.com:vitorecomp/neovim-ricing.git",
     "is_fork": true,
     "folder": "personal",
     "is_custom": false,
@@ -648,7 +648,7 @@
     "is_template": false
   },
   "personal-infra": {
-    "last_updated": "2026-11-13T00:48:01Z",
+    "last_updated": "2026-11-20T19:30:39Z",
     "link": "https://github.com/vitorecomp/personal-infra",
     "ssh_link": "git@github.com:vitorecomp/personal-infra.git",
     "is_fork": false,
@@ -657,7 +657,7 @@
     "is_template": false
   },
   "personal-life-manager": {
-    "last_updated": "2026-11-07T20:34:35Z",
+    "last_updated": "2026-11-16T05:27:47Z",
     "link": "https://github.com/vitorecomp/personal-life-manager",
     "ssh_link": "git@github.com:vitorecomp/personal-life-manager.git",
     "is_fork": false,
@@ -873,7 +873,7 @@
     "is_template": false
   },
   "spaceinvasion-autoplayer": {
-    "last_updated": "2026-11-15T00:35:58Z",
+    "last_updated": "2026-11-19T01:02:03Z",
     "link": "https://github.com/vitorecomp/spaceinvasion-autoplayer",
     "ssh_link": "git@github.com:vitorecomp/spaceinvasion-autoplayer.git",
     "is_fork": false,
@@ -990,7 +990,7 @@
     "is_template": false
   },
   "vitorecomp": {
-    "last_updated": "2026-11-14T12:43:33Z",
+    "last_updated": "2026-11-20T14:37:14Z",
     "link": "https://github.com/vitorecomp/vitorecomp",
     "ssh_link": "git@github.com:vitorecomp/vitorecomp.git",
     "is_fork": false,
