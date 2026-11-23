@@ -9,7 +9,7 @@
     "is_template": false
   },
   "ai-advanced-ocr": {
-    "last_updated": "2026-05-12T01:38:05Z",
+    "last_updated": "2026-11-20T21:34:41Z",
     "link": "https://github.com/vitorecomp/ai-advanced-ocr",
     "ssh_link": "git@github.com:vitorecomp/ai-advanced-ocr.git",
     "is_fork": false,
@@ -45,7 +45,7 @@
     "is_template": false
   },
   "android-course": {
-    "last_updated": "2020-06-02T20:05:37Z",
+    "last_updated": "2026-11-20T21:34:45Z",
     "link": "https://github.com/vitorecomp/android-course",
     "ssh_link": "git@github.com:vitorecomp/android-course.git",
     "is_fork": false,
@@ -54,7 +54,7 @@
     "is_template": false
   },
   "aplicacao-template-quarkus": {
-    "last_updated": "2026-09-30T14:18:37Z",
+    "last_updated": "2026-11-20T21:34:46Z",
     "link": "https://github.com/vitorecomp/aplicacao-template-quarkus",
     "ssh_link": "git@github.com:vitorecomp/aplicacao-template-quarkus.git",
     "is_fork": true,
@@ -63,7 +63,7 @@
     "is_template": true
   },
   "App50Anos": {
-    "last_updated": "2014-01-14T22:26:17Z",
+    "last_updated": "2026-11-20T21:34:47Z",
     "link": "https://github.com/vitorecomp/App50Anos",
     "ssh_link": "git@github.com:vitorecomp/App50Anos.git",
     "is_fork": false,
@@ -72,7 +72,7 @@
     "is_template": false
   },
   "asm-steganography": {
-    "last_updated": "2019-06-25T23:17:30Z",
+    "last_updated": "2026-11-20T21:34:48Z",
     "link": "https://github.com/vitorecomp/asm-steganography",
     "ssh_link": "git@github.com:vitorecomp/asm-steganography.git",
     "is_fork": false,
@@ -81,7 +81,7 @@
     "is_template": false
   },
   "auth-test": {
-    "last_updated": "2024-05-31T14:58:57Z",
+    "last_updated": "2026-11-20T21:34:49Z",
     "link": "https://github.com/vitorecomp/auth-test",
     "ssh_link": "git@github.com:vitorecomp/auth-test.git",
     "is_fork": false,
@@ -117,7 +117,7 @@
     "is_template": false
   },
   "backend-todoapp": {
-    "last_updated": "2019-05-21T07:27:37Z",
+    "last_updated": "2026-11-20T21:34:50Z",
     "link": "https://github.com/vitorecomp/backend-todoapp",
     "ssh_link": "git@github.com:vitorecomp/backend-todoapp.git",
     "is_fork": false,
@@ -144,7 +144,7 @@
     "is_template": false
   },
   "certification-reniew-pipeline-container": {
-    "last_updated": "2023-03-22T20:33:09Z",
+    "last_updated": "2026-11-20T21:34:51Z",
     "link": "https://github.com/vitorecomp/certification-reniew-pipeline-container",
     "ssh_link": "git@github.com:vitorecomp/certification-reniew-pipeline-container.git",
     "is_fork": false,
@@ -153,7 +153,7 @@
     "is_template": false
   },
   "cloudform": {
-    "last_updated": "2019-08-10T14:27:01Z",
+    "last_updated": "2026-11-20T21:34:52Z",
     "link": "https://github.com/vitorecomp/cloudform",
     "ssh_link": "git@github.com:vitorecomp/cloudform.git",
     "is_fork": false,
@@ -171,7 +171,7 @@
     "is_template": false
   },
   "computer-companion": {
-    "last_updated": "2023-05-28T00:05:18Z",
+    "last_updated": "2026-11-20T21:34:54Z",
     "link": "https://github.com/vitorecomp/computer-companion",
     "ssh_link": "git@github.com:vitorecomp/computer-companion.git",
     "is_fork": false,
@@ -180,7 +180,7 @@
     "is_template": false
   },
   "controller-tools": {
-    "last_updated": "2020-05-09T01:27:33Z",
+    "last_updated": "2026-11-20T21:34:55Z",
     "link": "https://github.com/vitorecomp/controller-tools",
     "ssh_link": "git@github.com:vitorecomp/controller-tools.git",
     "is_fork": false,
@@ -189,7 +189,7 @@
     "is_template": false
   },
   "cpp-ai-libs": {
-    "last_updated": "2021-04-24T07:06:42Z",
+    "last_updated": "2026-11-20T21:34:56Z",
     "link": "https://github.com/vitorecomp/cpp-ai-libs",
     "ssh_link": "git@github.com:vitorecomp/cpp-ai-libs.git",
     "is_fork": false,
@@ -198,7 +198,7 @@
     "is_template": false
   },
   "cpp-multi-thread-output-lib": {
-    "last_updated": "2021-04-24T07:08:36Z",
+    "last_updated": "2026-11-20T21:34:57Z",
     "link": "https://github.com/vitorecomp/cpp-multi-thread-output-lib",
     "ssh_link": "git@github.com:vitorecomp/cpp-multi-thread-output-lib.git",
     "is_fork": false,
@@ -234,7 +234,7 @@
     "is_template": false
   },
   "DO288-apps": {
-    "last_updated": "2022-09-22T19:43:46Z",
+    "last_updated": "2026-11-20T21:35:00Z",
     "link": "https://github.com/vitorecomp/DO288-apps",
     "ssh_link": "git@github.com:vitorecomp/DO288-apps.git",
     "is_fork": true,
@@ -243,7 +243,7 @@
     "is_template": false
   },
   "DO378-apps": {
-    "last_updated": "2023-02-11T07:31:03Z",
+    "last_updated": "2026-11-20T21:35:01Z",
     "link": "https://github.com/vitorecomp/DO378-apps",
     "ssh_link": "git@github.com:vitorecomp/DO378-apps.git",
     "is_fork": true,
@@ -252,7 +252,7 @@
     "is_template": false
   },
   "dotfiles": {
-    "last_updated": "2016-10-23T05:10:37Z",
+    "last_updated": "2026-11-20T21:34:59Z",
     "link": "https://github.com/vitorecomp/dotfiles",
     "ssh_link": "git@github.com:vitorecomp/dotfiles.git",
     "is_fork": false,
@@ -261,7 +261,7 @@
     "is_template": false
   },
   "esp32-watch-so": {
-    "last_updated": "2023-07-31T17:24:04Z",
+    "last_updated": "2026-11-20T21:35:03Z",
     "link": "https://github.com/vitorecomp/esp32-watch-so",
     "ssh_link": "git@github.com:vitorecomp/esp32-watch-so.git",
     "is_fork": false,
@@ -270,7 +270,7 @@
     "is_template": false
   },
   "gemini-document-search": {
-    "last_updated": "2025-10-02T15:30:58Z",
+    "last_updated": "2026-11-20T21:35:04Z",
     "link": "https://github.com/vitorecomp/gemini-document-search",
     "ssh_link": "git@github.com:vitorecomp/gemini-document-search.git",
     "is_fork": false,
@@ -279,7 +279,7 @@
     "is_template": false
   },
   "gemini-enterprise-utils": {
-    "last_updated": "2026-10-01T15:01:39Z",
+    "last_updated": "2026-11-20T21:35:05Z",
     "link": "https://github.com/vitorecomp/gemini-enterprise-utils",
     "ssh_link": "git@github.com:vitorecomp/gemini-enterprise-utils.git",
     "is_fork": false,
@@ -288,7 +288,7 @@
     "is_template": false
   },
   "gemini-query-statistics": {
-    "last_updated": "2025-10-02T20:48:22Z",
+    "last_updated": "2026-11-20T21:35:06Z",
     "link": "https://github.com/vitorecomp/gemini-query-statistics",
     "ssh_link": "git@github.com:vitorecomp/gemini-query-statistics.git",
     "is_fork": false,
@@ -297,7 +297,7 @@
     "is_template": false
   },
   "gemini-tests": {
-    "last_updated": "2026-07-24T00:04:26Z",
+    "last_updated": "2026-11-20T21:35:07Z",
     "link": "https://github.com/vitorecomp/gemini-tests",
     "ssh_link": "git@github.com:vitorecomp/gemini-tests.git",
     "is_fork": false,
@@ -306,7 +306,7 @@
     "is_template": false
   },
   "genetic-training": {
-    "last_updated": "2025-02-12T14:01:58Z",
+    "last_updated": "2026-11-20T21:35:08Z",
     "link": "https://github.com/vitorecomp/genetic-training",
     "ssh_link": "git@github.com:vitorecomp/genetic-training.git",
     "is_fork": false,
@@ -315,7 +315,7 @@
     "is_template": false
   },
   "go-ls": {
-    "last_updated": "2026-11-02T22:32:39Z",
+    "last_updated": "2026-11-20T21:35:10Z",
     "link": "https://github.com/vitorecomp/go-ls",
     "ssh_link": "git@github.com:vitorecomp/go-ls.git",
     "is_fork": false,
@@ -324,7 +324,7 @@
     "is_template": false
   },
   "godoro": {
-    "last_updated": "2020-09-09T07:03:11Z",
+    "last_updated": "2026-11-20T21:35:09Z",
     "link": "https://github.com/vitorecomp/godoro",
     "ssh_link": "git@github.com:vitorecomp/godoro.git",
     "is_fork": false,
@@ -333,7 +333,7 @@
     "is_template": false
   },
   "green-credit": {
-    "last_updated": "2025-06-06T09:19:40Z",
+    "last_updated": "2026-11-20T21:35:10Z",
     "link": "https://github.com/vitorecomp/green-credit",
     "ssh_link": "git@github.com:vitorecomp/green-credit.git",
     "is_fork": false,
@@ -342,7 +342,7 @@
     "is_template": false
   },
   "hackaton-deep-learn": {
-    "last_updated": "2018-09-23T18:16:01Z",
+    "last_updated": "2026-11-20T21:35:12Z",
     "link": "https://github.com/vitorecomp/hackaton-deep-learn",
     "ssh_link": "git@github.com:vitorecomp/hackaton-deep-learn.git",
     "is_fork": false,
@@ -351,7 +351,7 @@
     "is_template": false
   },
   "health-moon": {
-    "last_updated": "2022-07-12T05:43:09Z",
+    "last_updated": "2026-11-20T21:35:13Z",
     "link": "https://github.com/vitorecomp/health-moon",
     "ssh_link": "git@github.com:vitorecomp/health-moon.git",
     "is_fork": false,
@@ -369,7 +369,7 @@
     "is_template": false
   },
   "home-drive": {
-    "last_updated": "2022-07-12T05:54:21Z",
+    "last_updated": "2026-11-20T21:35:14Z",
     "link": "https://github.com/vitorecomp/home-drive",
     "ssh_link": "git@github.com:vitorecomp/home-drive.git",
     "is_fork": false,
@@ -387,7 +387,7 @@
     "is_template": false
   },
   "kong-api-client": {
-    "last_updated": "2024-01-10T07:14:52Z",
+    "last_updated": "2026-11-20T21:35:15Z",
     "link": "https://github.com/vitorecomp/kong-api-client",
     "ssh_link": "git@github.com:vitorecomp/kong-api-client.git",
     "is_fork": false,
@@ -396,7 +396,7 @@
     "is_template": false
   },
   "learning-projects": {
-    "last_updated": "2023-05-24T04:43:20Z",
+    "last_updated": "2026-11-20T21:35:16Z",
     "link": "https://github.com/vitorecomp/learning-projects",
     "ssh_link": "git@github.com:vitorecomp/learning-projects.git",
     "is_fork": false,
@@ -405,7 +405,7 @@
     "is_template": false
   },
   "linux-setup": {
-    "last_updated": "2022-08-26T21:48:33Z",
+    "last_updated": "2026-11-20T21:35:17Z",
     "link": "https://github.com/vitorecomp/linux-setup",
     "ssh_link": "git@github.com:vitorecomp/linux-setup.git",
     "is_fork": false,
@@ -414,7 +414,7 @@
     "is_template": false
   },
   "livro-java-exemplos": {
-    "last_updated": "2020-04-28T08:28:50Z",
+    "last_updated": "2026-11-20T21:35:17Z",
     "link": "https://github.com/vitorecomp/livro-java-exemplos",
     "ssh_link": "git@github.com:vitorecomp/livro-java-exemplos.git",
     "is_fork": true,
@@ -450,7 +450,7 @@
     "is_template": false
   },
   "microgen": {
-    "last_updated": "2023-07-18T19:14:36Z",
+    "last_updated": "2026-11-20T21:35:21Z",
     "link": "https://github.com/vitorecomp/microgen",
     "ssh_link": "git@github.com:vitorecomp/microgen.git",
     "is_fork": false,
@@ -495,7 +495,7 @@
     "is_template": false
   },
   "nanobanana-harness": {
-    "last_updated": "2026-11-13T12:13:10Z",
+    "last_updated": "2026-11-20T21:35:23Z",
     "link": "https://github.com/vitorecomp/nanobanana-harness",
     "ssh_link": "git@github.com:vitorecomp/nanobanana-harness.git",
     "is_fork": false,
@@ -513,7 +513,7 @@
     "is_template": false
   },
   "neovim-ricing": {
-    "last_updated": "2026-11-20T19:05:48Z",
+    "last_updated": "2026-11-20T21:35:24Z",
     "link": "https://github.com/vitorecomp/neovim-ricing",
     "ssh_link": "git@github.com:vitorecomp/neovim-ricing.git",
     "is_fork": true,
@@ -531,7 +531,7 @@
     "is_template": false
   },
   "nn-intro": {
-    "last_updated": "2023-06-23T19:05:12Z",
+    "last_updated": "2026-11-20T21:35:25Z",
     "link": "https://github.com/vitorecomp/nn-intro",
     "ssh_link": "git@github.com:vitorecomp/nn-intro.git",
     "is_fork": false,
@@ -540,7 +540,7 @@
     "is_template": false
   },
   "nobuffer-site": {
-    "last_updated": "2026-11-12T07:58:24Z",
+    "last_updated": "2026-11-20T21:35:26Z",
     "link": "https://github.com/vitorecomp/nobuffer-site",
     "ssh_link": "git@github.com:vitorecomp/nobuffer-site.git",
     "is_fork": false,
@@ -567,7 +567,7 @@
     "is_template": false
   },
   "Nos-System": {
-    "last_updated": "2013-12-20T00:25:56Z",
+    "last_updated": "2026-11-20T21:35:27Z",
     "link": "https://github.com/vitorecomp/Nos-System",
     "ssh_link": "git@github.com:vitorecomp/Nos-System.git",
     "is_fork": false,
@@ -576,7 +576,7 @@
     "is_template": false
   },
   "ocp-workshop": {
-    "last_updated": "2020-01-13T12:34:54Z",
+    "last_updated": "2026-11-20T21:35:28Z",
     "link": "https://github.com/vitorecomp/ocp-workshop",
     "ssh_link": "git@github.com:vitorecomp/ocp-workshop.git",
     "is_fork": false,
@@ -585,7 +585,7 @@
     "is_template": false
   },
   "OOLpParser": {
-    "last_updated": "2013-07-22T17:56:46Z",
+    "last_updated": "2026-11-20T21:35:28Z",
     "link": "https://github.com/vitorecomp/OOLpParser",
     "ssh_link": "git@github.com:vitorecomp/OOLpParser.git",
     "is_fork": false,
@@ -594,7 +594,7 @@
     "is_template": false
   },
   "open-car": {
-    "last_updated": "2023-01-24T20:07:04Z",
+    "last_updated": "2026-11-20T21:35:29Z",
     "link": "https://github.com/vitorecomp/open-car",
     "ssh_link": "git@github.com:vitorecomp/open-car.git",
     "is_fork": false,
@@ -603,7 +603,7 @@
     "is_template": false
   },
   "open-judy": {
-    "last_updated": "2026-10-30T12:59:23Z",
+    "last_updated": "2026-11-20T21:35:30Z",
     "link": "https://github.com/vitorecomp/open-judy",
     "ssh_link": "git@github.com:vitorecomp/open-judy.git",
     "is_fork": false,
@@ -612,7 +612,7 @@
     "is_template": false
   },
   "openshift-env-setup": {
-    "last_updated": "2023-07-17T14:27:03Z",
+    "last_updated": "2026-11-20T21:35:31Z",
     "link": "https://github.com/vitorecomp/openshift-env-setup",
     "ssh_link": "git@github.com:vitorecomp/openshift-env-setup.git",
     "is_fork": false,
@@ -621,7 +621,7 @@
     "is_template": false
   },
   "opentelemetry-kafka-load-tests": {
-    "last_updated": "2023-06-13T13:50:21Z",
+    "last_updated": "2026-11-20T21:35:32Z",
     "link": "https://github.com/vitorecomp/opentelemetry-kafka-load-tests",
     "ssh_link": "git@github.com:vitorecomp/opentelemetry-kafka-load-tests.git",
     "is_fork": true,
@@ -630,7 +630,7 @@
     "is_template": false
   },
   "performace-com": {
-    "last_updated": "2026-09-30T14:18:38Z",
+    "last_updated": "2026-11-20T21:35:33Z",
     "link": "https://github.com/vitorecomp/performace-com",
     "ssh_link": "git@github.com:vitorecomp/performace-com.git",
     "is_fork": false,
@@ -639,7 +639,7 @@
     "is_template": false
   },
   "personal-blog": {
-    "last_updated": "2026-10-29T22:47:57Z",
+    "last_updated": "2026-11-20T21:35:34Z",
     "link": "https://github.com/vitorecomp/personal-blog",
     "ssh_link": "git@github.com:vitorecomp/personal-blog.git",
     "is_fork": false,
@@ -648,7 +648,7 @@
     "is_template": false
   },
   "personal-infra": {
-    "last_updated": "2026-11-20T19:30:39Z",
+    "last_updated": "2026-11-21T01:08:34Z",
     "link": "https://github.com/vitorecomp/personal-infra",
     "ssh_link": "git@github.com:vitorecomp/personal-infra.git",
     "is_fork": false,
@@ -657,7 +657,7 @@
     "is_template": false
   },
   "personal-life-manager": {
-    "last_updated": "2026-11-16T05:27:47Z",
+    "last_updated": "2026-11-23T05:39:12Z",
     "link": "https://github.com/vitorecomp/personal-life-manager",
     "ssh_link": "git@github.com:vitorecomp/personal-life-manager.git",
     "is_fork": false,
@@ -666,7 +666,7 @@
     "is_template": false
   },
   "personal-portifolio": {
-    "last_updated": "2026-11-12T08:00:17Z",
+    "last_updated": "2026-11-20T21:35:36Z",
     "link": "https://github.com/vitorecomp/personal-portifolio",
     "ssh_link": "git@github.com:vitorecomp/personal-portifolio.git",
     "is_fork": false,
@@ -702,7 +702,7 @@
     "is_template": false
   },
   "polybar-themes": {
-    "last_updated": "2022-05-13T15:35:17Z",
+    "last_updated": "2026-11-20T21:26:53Z",
     "link": "https://github.com/vitorecomp/polybar-themes",
     "ssh_link": "git@github.com:vitorecomp/polybar-themes.git",
     "is_fork": true,
@@ -711,7 +711,7 @@
     "is_template": false
   },
   "PooProject": {
-    "last_updated": "2013-03-01T01:53:18Z",
+    "last_updated": "2026-11-20T21:35:40Z",
     "link": "https://github.com/vitorecomp/PooProject",
     "ssh_link": "git@github.com:vitorecomp/PooProject.git",
     "is_fork": false,
@@ -729,7 +729,7 @@
     "is_template": false
   },
   "ProjetoBD": {
-    "last_updated": "2014-03-03T21:05:49Z",
+    "last_updated": "2026-11-20T21:35:42Z",
     "link": "https://github.com/vitorecomp/ProjetoBD",
     "ssh_link": "git@github.com:vitorecomp/ProjetoBD.git",
     "is_fork": false,
@@ -738,7 +738,7 @@
     "is_template": false
   },
   "python-stack": {
-    "last_updated": "2024-04-23T10:08:16Z",
+    "last_updated": "2026-11-20T21:35:43Z",
     "link": "https://github.com/vitorecomp/python-stack",
     "ssh_link": "git@github.com:vitorecomp/python-stack.git",
     "is_fork": false,
@@ -747,7 +747,7 @@
     "is_template": true
   },
   "quarkus-microservices-social-net": {
-    "last_updated": "2023-05-01T05:12:58Z",
+    "last_updated": "2026-11-20T21:35:44Z",
     "link": "https://github.com/vitorecomp/quarkus-microservices-social-net",
     "ssh_link": "git@github.com:vitorecomp/quarkus-microservices-social-net.git",
     "is_fork": false,
@@ -756,7 +756,7 @@
     "is_template": false
   },
   "quarkus-warehouse": {
-    "last_updated": "2022-08-25T16:41:46Z",
+    "last_updated": "2026-11-20T21:35:46Z",
     "link": "https://github.com/vitorecomp/quarkus-warehouse",
     "ssh_link": "git@github.com:vitorecomp/quarkus-warehouse.git",
     "is_fork": false,
@@ -774,7 +774,7 @@
     "is_template": false
   },
   "regularexpression-automata": {
-    "last_updated": "2023-07-26T17:33:18Z",
+    "last_updated": "2026-11-20T21:35:48Z",
     "link": "https://github.com/vitorecomp/regularexpression-automata",
     "ssh_link": "git@github.com:vitorecomp/regularexpression-automata.git",
     "is_fork": false,
@@ -783,7 +783,7 @@
     "is_template": false
   },
   "ros-blender": {
-    "last_updated": "2023-06-07T05:13:24Z",
+    "last_updated": "2026-11-20T21:35:49Z",
     "link": "https://github.com/vitorecomp/ros-blender",
     "ssh_link": "git@github.com:vitorecomp/ros-blender.git",
     "is_fork": false,
@@ -792,7 +792,7 @@
     "is_template": false
   },
   "ros-pioneer3at": {
-    "last_updated": "2015-02-07T05:24:01Z",
+    "last_updated": "2026-11-20T21:35:50Z",
     "link": "https://github.com/vitorecomp/ros-pioneer3at",
     "ssh_link": "git@github.com:vitorecomp/ros-pioneer3at.git",
     "is_fork": true,
@@ -801,7 +801,7 @@
     "is_template": false
   },
   "rover-rev-controller": {
-    "last_updated": "2023-07-07T13:26:47Z",
+    "last_updated": "2026-11-20T21:35:51Z",
     "link": "https://github.com/vitorecomp/rover-rev-controller",
     "ssh_link": "git@github.com:vitorecomp/rover-rev-controller.git",
     "is_fork": false,
@@ -810,7 +810,7 @@
     "is_template": false
   },
   "ruscene": {
-    "last_updated": "2023-05-17T11:44:11Z",
+    "last_updated": "2026-11-20T21:35:53Z",
     "link": "https://github.com/vitorecomp/ruscene",
     "ssh_link": "git@github.com:vitorecomp/ruscene.git",
     "is_fork": false,
@@ -837,7 +837,7 @@
     "is_template": false
   },
   "sei-mcp": {
-    "last_updated": "2026-10-14T16:10:44Z",
+    "last_updated": "2026-11-20T21:35:56Z",
     "link": "https://github.com/vitorecomp/sei-mcp",
     "ssh_link": "git@github.com:vitorecomp/sei-mcp.git",
     "is_fork": false,
@@ -846,7 +846,7 @@
     "is_template": false
   },
   "sei-mcp-prodesp": {
-    "last_updated": "2026-10-14T14:53:12Z",
+    "last_updated": "2026-11-20T21:35:57Z",
     "link": "https://github.com/vitorecomp/sei-mcp-prodesp",
     "ssh_link": "git@github.com:vitorecomp/sei-mcp-prodesp.git",
     "is_fork": false,
@@ -855,7 +855,7 @@
     "is_template": false
   },
   "simple-react-projects": {
-    "last_updated": "2023-01-07T07:38:28Z",
+    "last_updated": "2026-11-20T21:35:58Z",
     "link": "https://github.com/vitorecomp/simple-react-projects",
     "ssh_link": "git@github.com:vitorecomp/simple-react-projects.git",
     "is_fork": false,
@@ -864,7 +864,7 @@
     "is_template": false
   },
   "soImpl": {
-    "last_updated": "2014-06-20T13:29:35Z",
+    "last_updated": "2026-11-20T21:35:58Z",
     "link": "https://github.com/vitorecomp/soImpl",
     "ssh_link": "git@github.com:vitorecomp/soImpl.git",
     "is_fork": false,
@@ -873,7 +873,7 @@
     "is_template": false
   },
   "spaceinvasion-autoplayer": {
-    "last_updated": "2026-11-19T01:02:03Z",
+    "last_updated": "2026-11-21T03:04:57Z",
     "link": "https://github.com/vitorecomp/spaceinvasion-autoplayer",
     "ssh_link": "git@github.com:vitorecomp/spaceinvasion-autoplayer.git",
     "is_fork": false,
@@ -891,7 +891,7 @@
     "is_template": false
   },
   "sudoku-solver": {
-    "last_updated": "2021-04-24T07:12:58Z",
+    "last_updated": "2026-11-20T21:36:00Z",
     "link": "https://github.com/vitorecomp/sudoku-solver",
     "ssh_link": "git@github.com:vitorecomp/sudoku-solver.git",
     "is_fork": false,
@@ -900,7 +900,7 @@
     "is_template": false
   },
   "sway-dotfiles-cloud-top": {
-    "last_updated": "2026-07-26T15:07:14Z",
+    "last_updated": "2026-11-20T21:36:01Z",
     "link": "https://github.com/vitorecomp/sway-dotfiles-cloud-top",
     "ssh_link": "git@github.com:vitorecomp/sway-dotfiles-cloud-top.git",
     "is_fork": true,
@@ -909,7 +909,7 @@
     "is_template": false
   },
   "telegram-datahoarding": {
-    "last_updated": "2026-11-14T23:58:26Z",
+    "last_updated": "2026-11-20T21:36:02Z",
     "link": "https://github.com/vitorecomp/telegram-datahoarding",
     "ssh_link": "git@github.com:vitorecomp/telegram-datahoarding.git",
     "is_fork": false,
@@ -927,7 +927,7 @@
     "is_template": false
   },
   "Trabalho-de-Tr1": {
-    "last_updated": "2013-12-23T22:24:19Z",
+    "last_updated": "2026-11-20T21:36:04Z",
     "link": "https://github.com/vitorecomp/Trabalho-de-Tr1",
     "ssh_link": "git@github.com:vitorecomp/Trabalho-de-Tr1.git",
     "is_fork": false,
@@ -936,7 +936,7 @@
     "is_template": false
   },
   "trabalhoSb": {
-    "last_updated": "2013-12-23T22:23:09Z",
+    "last_updated": "2026-11-20T21:36:05Z",
     "link": "https://github.com/vitorecomp/trabalhoSb",
     "ssh_link": "git@github.com:vitorecomp/trabalhoSb.git",
     "is_fork": false,
@@ -945,7 +945,7 @@
     "is_template": false
   },
   "tracking-system": {
-    "last_updated": "2021-04-24T07:09:57Z",
+    "last_updated": "2026-11-20T21:36:06Z",
     "link": "https://github.com/vitorecomp/tracking-system",
     "ssh_link": "git@github.com:vitorecomp/tracking-system.git",
     "is_fork": false,
@@ -954,7 +954,7 @@
     "is_template": false
   },
   "tum_simulator": {
-    "last_updated": "2015-04-26T20:06:47Z",
+    "last_updated": "2026-11-20T21:36:07Z",
     "link": "https://github.com/vitorecomp/tum_simulator",
     "ssh_link": "git@github.com:vitorecomp/tum_simulator.git",
     "is_fork": true,
@@ -963,7 +963,7 @@
     "is_template": false
   },
   "tuning.car": {
-    "last_updated": "2021-12-11T05:12:02Z",
+    "last_updated": "2026-11-20T21:36:08Z",
     "link": "https://github.com/vitorecomp/tuning.car",
     "ssh_link": "git@github.com:vitorecomp/tuning.car.git",
     "is_fork": false,
@@ -981,7 +981,7 @@
     "is_template": false
   },
   "url-shortener": {
-    "last_updated": "2023-01-31T19:11:54Z",
+    "last_updated": "2026-11-20T21:36:09Z",
     "link": "https://github.com/vitorecomp/url-shortener",
     "ssh_link": "git@github.com:vitorecomp/url-shortener.git",
     "is_fork": false,
@@ -990,7 +990,7 @@
     "is_template": false
   },
   "vitorecomp": {
-    "last_updated": "2026-11-20T14:37:14Z",
+    "last_updated": "2026-11-23T02:46:32Z",
     "link": "https://github.com/vitorecomp/vitorecomp",
     "ssh_link": "git@github.com:vitorecomp/vitorecomp.git",
     "is_fork": false,
@@ -999,7 +999,7 @@
     "is_template": false
   },
   "WhileLang": {
-    "last_updated": "2021-08-17T05:30:16Z",
+    "last_updated": "2026-11-20T21:36:11Z",
     "link": "https://github.com/vitorecomp/WhileLang",
     "ssh_link": "git@github.com:vitorecomp/WhileLang.git",
     "is_fork": true,
