@@ -1,8 +1,11 @@
 # Copy to terraform.tfvars (gitignored) and fill in.
-# project_id   = "my-gcp-project"
-# region       = "us-central1"
-# zone         = "us-central1-a"
-# machine_type = "e2-micro"
+project_id              = "my-gcp-project"
+backup_bucket_name      = "my-infra-backups"
+taiga_media_bucket_name = "my-taiga-media"
+github_repository_id    = "000000000"
+# region                = "us-central1"
+# zone                  = "us-central1-a"
+# machine_type          = "e2-micro"
 
 admin_ssh_public_key = "ssh-ed25519 AAAA... you@workstation"
 

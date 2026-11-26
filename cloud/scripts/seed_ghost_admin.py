@@ -7,7 +7,7 @@ container startup).
    - If `setup[0].status` is `false`, sends `POST /ghost/api/admin/authentication/setup/`
      using `BLOG_ADMIN_EMAIL` and `BLOG_ADMIN_PASSWORD` from environment variables.
 2. Logs into `POST /ghost/api/admin/session/` to obtain a session cookie and:
-   - Activates the `custom-blog-theme` theme (`PUT /ghost/api/admin/themes/custom-blog-theme/activate/`).
+   - Activates the configured custom theme (`PUT /ghost/api/admin/themes/<theme>/activate/`) when `BLOG_THEME_NAME` is set.
    - Removes Ghost's default `"Coming soon"` post (`slug:coming-soon`) if present.
 """
 
@@ -15,19 +15,38 @@ import argparse
 import http.client
 import json
 import os
+from pathlib import Path
+import re
 import socket
 import ssl
 import sys
 import time
 from urllib.parse import urlparse
 
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BLOG_URL = "https://blog.example.com"
-DEFAULT_ADMIN_NAME = "Admin User"
-DEFAULT_BLOG_TITLE = "example.com // blog"
-DEFAULT_THEME_NAME = "custom-blog-theme"
+DEFAULT_ADMIN_NAME = "Admin"
+DEFAULT_BLOG_TITLE = "Personal Blog"
+DEFAULT_THEME_NAME = ""
 DEFAULT_FALLBACK_SNI = ""  # opt-in only: a second SNI weakens hostname verification
 SETUP_ENDPOINT = "/ghost/api/admin/authentication/setup/"
 SESSION_ENDPOINT = "/ghost/api/admin/session/"
+
+
+def _load_root_dotenv() -> None:
+    env_file = REPO_ROOT / ".env"
+    if not env_file.is_file():
+        return
+    for raw in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, val = line.split("=", 1)
+        key, val = key.strip(), val.strip().strip("'").strip('"')
+        if val and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) and key not in os.environ:
+            os.environ[key] = val
 
 # Optional connection overrides set by --connect-ip / --insecure. They let the
 # post-deploy check talk to a new VM by IP (keeping the real Host header and SNI)
@@ -153,21 +172,22 @@ def _reconcile_theme_and_posts(
             print("[warn] Ghost Admin session did not return a Set-Cookie header.")
             return
 
-        # 1. Activate custom theme
-        theme_status, theme_data, _ = _request_ghost_api(
-            blog_url=blog_url,
-            method="PUT",
-            path=f"/ghost/api/admin/themes/{theme_name}/activate/",
-            payload={},
-            cookie=cookie,
-            fallback_sni=fallback_sni,
-        )
-        if theme_status == 200:
-            print(f"[ok] Activated Ghost theme '{theme_name}'.")
-        else:
-            print(
-                f"[warn] Could not activate theme '{theme_name}' via API (HTTP {theme_status}: {theme_data})."
+        # 1. Activate custom theme (when configured)
+        if theme_name:
+            theme_status, theme_data, _ = _request_ghost_api(
+                blog_url=blog_url,
+                method="PUT",
+                path=f"/ghost/api/admin/themes/{theme_name}/activate/",
+                payload={},
+                cookie=cookie,
+                fallback_sni=fallback_sni,
             )
+            if theme_status == 200:
+                print(f"[ok] Activated Ghost theme '{theme_name}'.")
+            else:
+                print(
+                    f"[warn] Could not activate theme '{theme_name}' via API (HTTP {theme_status}: {theme_data})."
+                )
 
         # 2. Delete default "Coming soon" post if present
         posts_status, posts_data, _ = _request_ghost_api(
@@ -251,8 +271,8 @@ def seed_ghost_admin(
     if setup_completed is None:
         if saw_forbidden:
             print(
-                "[warn] Cloud Run service returned HTTP 403 Forbidden (public invoker IAM / --no-invoker-iam-check "
-                "requires roles/run.admin on legacy-gcp-project). Skipping Ghost Admin seed until public invoker is enabled."
+                "[warn] Service returned HTTP 403 Forbidden (public invoker IAM not enabled yet). "
+                "Skipping Ghost Admin seed until public invoker is enabled."
             )
             return 0
         print(
@@ -315,14 +335,19 @@ def seed_ghost_admin(
 
 
 def main() -> None:
+    _load_root_dotenv()
+    default_url = (
+        os.environ.get("BLOG_URL")
+        or (f"https://{os.environ['BLOG_DOMAIN']}" if os.environ.get("BLOG_DOMAIN") else DEFAULT_BLOG_URL)
+    )
     parser = argparse.ArgumentParser(
         description="Idempotently seed the initial Ghost Admin Owner account and activate the custom theme."
     )
     parser.add_argument(
         "--blog-url",
         type=str,
-        default=os.environ.get("BLOG_URL", DEFAULT_BLOG_URL),
-        help=f"Canonical Ghost URL (default: {DEFAULT_BLOG_URL})",
+        default=default_url,
+        help="Canonical Ghost URL (defaults to $BLOG_URL or https://$BLOG_DOMAIN).",
     )
     parser.add_argument(
         "--email",
@@ -333,20 +358,20 @@ def main() -> None:
     parser.add_argument(
         "--name",
         type=str,
-        default=os.environ.get("BLOG_ADMIN_NAME", DEFAULT_ADMIN_NAME),
-        help=f"Ghost Admin Owner display name (default: {DEFAULT_ADMIN_NAME}).",
+        default=os.environ.get("BLOG_ADMIN_NAME") or os.environ.get("ADMIN_NAME", DEFAULT_ADMIN_NAME),
+        help=f"Ghost Admin Owner display name (default: $BLOG_ADMIN_NAME or {DEFAULT_ADMIN_NAME}).",
     )
     parser.add_argument(
         "--blog-title",
         type=str,
         default=os.environ.get("BLOG_TITLE", DEFAULT_BLOG_TITLE),
-        help=f"Ghost publication title (default: {DEFAULT_BLOG_TITLE}).",
+        help=f"Ghost publication title (default: $BLOG_TITLE or {DEFAULT_BLOG_TITLE}).",
     )
     parser.add_argument(
         "--theme",
         type=str,
         default=os.environ.get("BLOG_THEME_NAME", DEFAULT_THEME_NAME),
-        help=f"Ghost theme to activate (default: {DEFAULT_THEME_NAME}).",
+        help="Ghost theme to activate when non-empty (defaults to $BLOG_THEME_NAME).",
     )
     parser.add_argument(
         "--fallback-sni",

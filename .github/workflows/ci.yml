@@ -45,7 +45,7 @@ jobs:
 
     - name: Verify workspace sync dry-run
       run: |
-        python3 workspace/scripts/sync_workspace_repos.py --dry-run
+        python3 workspace/scripts/download_workspace_repos.py --dry-run
         python3 workspace/scripts/validate_repos_pushed.py --dry-run
         python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
         python3 workspace/scripts/enroll_taiga_projects.py --dry-run
@@ -53,28 +53,29 @@ jobs:
 
     - name: Verify cloud and workspace scripts dry-run
       run: |
-        BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --dry-run
-        TAIGA_ADMIN_EMAIL=ci@example.com TAIGA_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_taiga_admin.py --dry-run
-        python3 cloud/scripts/configure_ai_spend_cap.py legacy-gcp-project --billing-account 000000-000000-000000 --project-number 1234567890 --amount 1200 --services all --dry-run
+        BLOG_URL=https://blog.example.com BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --dry-run
+        TAIGA_URL=https://taiga.example.com TAIGA_ADMIN_EMAIL=ci@example.com TAIGA_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_taiga_admin.py --dry-run
+        python3 cloud/scripts/configure_ai_spend_cap.py example-project --billing-account 000000-000000-000000 --project-number 1234567890 --amount 1200 --services all --dry-run
+        python3 cloud/scripts/sync_github_secrets.py --dry-run
 
     - name: Verify VM stack scripts dry-run
       run: |
         python3 cloud/scripts/bootstrap_vm.py --host ci@example.invalid --provider oracle --deploy-pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly ci" --backup-stack personal-blog --dry-run
         python3 cloud/scripts/bootstrap_vm.py --host ci@example.invalid --provider gce --deploy-pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly ci" --swap-gb 3 --backup-stack taiga --dry-run
-        python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@example.invalid --dry-run
-        GHOST_IMAGE=ghcr.io/example/personal-blog@sha256:0000 REGISTRY_USER=ci REGISTRY_TOKEN=ci python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@example.invalid --sync-env GHOST_IMAGE --dry-run
-        python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --dry-run
+        BLOG_DOMAIN=blog.example.com python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@example.invalid --dry-run
+        BLOG_DOMAIN=blog.example.com STACK_DOMAIN=blog.example.com GHOST_IMAGE=ghcr.io/example/personal-blog@sha256:0000 REGISTRY_USER=ci REGISTRY_TOKEN=ci python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@example.invalid --sync-env GHOST_IMAGE,STACK_DOMAIN --dry-run
+        TAIGA_DOMAIN=taiga.example.com python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --dry-run
         python3 cloud/scripts/deploy_stack.py --stack edge --host deploy@example.invalid --dry-run
-        TAIGA_DB_HOST=db.example TAIGA_DB_NAME=taiga TAIGA_DB_USER=ci TAIGA_DB_PASSWORD=ci python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --sync-env TAIGA_DB_HOST,TAIGA_DB_NAME,TAIGA_DB_USER,TAIGA_DB_PASSWORD --dry-run
+        TAIGA_DOMAIN=taiga.example.com TAIGA_DB_HOST=db.example TAIGA_DB_NAME=taiga TAIGA_DB_USER=ci TAIGA_DB_PASSWORD=ci TAIGA_MEDIA_BUCKET=example-taiga-media python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --sync-env TAIGA_DB_HOST,TAIGA_DB_NAME,TAIGA_DB_USER,TAIGA_DB_PASSWORD,TAIGA_MEDIA_BUCKET --dry-run
         python3 cloud/scripts/backup_stack.py --stack-dir cloud/personal-blog --dry-run
         python3 cloud/scripts/backup_stack.py --stack-dir cloud/taiga --restore-test --dry-run
         bash -n cloud/scripts/tf_apply_retry.sh && cloud/scripts/tf_apply_retry.sh --env oci-blog --dry-run
-        bash -n development/scripts/deploy.sh && ./development/scripts/deploy.sh --provider=gcp --dry-run && ./development/scripts/deploy.sh --provider=azure --dry-run && ./development/scripts/deploy.sh --provider=on-prem --dry-run
+        bash -n development/scripts/deploy.sh && ./development/scripts/deploy.sh --provider=gcp --loop=5 --dry-run && ./development/scripts/deploy.sh --provider=azure --dry-run && ./development/scripts/deploy.sh --provider=on-prem --dry-run
         bash -n development/scripts/setup.sh && ./development/scripts/setup.sh --provider=gcp --repo=vitorecomp/example --dry-run && ./development/scripts/setup.sh --provider=on-prem --host=dev@example.invalid --repo=vitorecomp/example --dry-run
         bash -n development/scripts/deploy_gpu_stack.sh && LITELLM_MASTER_KEY=ci-placeholder ./development/scripts/deploy_gpu_stack.sh --dry-run
         bash -n development/gpu-dev-machine/deepseek-harness/entrypoint.sh && bash -n development/gpu-dev-machine/reverse-tunnel/entrypoint.sh
-        TAIGA_DB_HOST=db.example TAIGA_DB_USER=ci TAIGA_DB_PASSWORD=ci TAIGA_ADMIN_PASSWORD=ci cloud/taiga/deploy-cloudrun.sh --dry-run
-        BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --connect-ip 192.0.2.10 --insecure --dry-run
+        GCP_PROJECT_ID=example-project TAIGA_MEDIA_BUCKET=example-taiga-media STACK_DOMAIN=taiga.example.com TAIGA_DB_HOST=db.example TAIGA_DB_USER=ci TAIGA_DB_PASSWORD=ci TAIGA_ADMIN_PASSWORD=ci cloud/taiga/deploy-cloudrun.sh --dry-run
+        BLOG_URL=https://blog.example.com BLOG_ADMIN_EMAIL=ci@example.com BLOG_ADMIN_PASSWORD=ci-pass python3 cloud/scripts/seed_ghost_admin.py --connect-ip 192.0.2.10 --insecure --dry-run
 
   terraform-validate:
     name: Validate Terraform (${{ matrix.root }})
@@ -125,7 +126,8 @@ jobs:
         missing = [f for f in meta["required_files"] if not (stack / f).exists()]
         if missing:
             sys.exit(f"missing required files: {missing}")
-        print(f"stack.json ok: {meta['name']} -> {meta['domain']}")
+        domain_label = meta.get("domain") or (f"${{{meta['domain_env']}}}" if meta.get("domain_env") else None)
+        print(f"stack.json ok: {meta['name']} -> {domain_label}")
         PY
 
     - name: docker compose config
@@ -144,6 +146,8 @@ jobs:
       run: |
         for tls in internal ci@example.com; do
           docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -e TAIGA_DOMAIN=taiga.example.com -e BLOG_DOMAIN=blog.example.com \
             -e ACME_EMAIL=ci@example.com -e TAIGA_TLS="$tls" -e BLOG_TLS="$tls" \
+            -e TAIGA_UPSTREAM=https://taiga.example.invalid \
             caddy:2.11.9-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
         done

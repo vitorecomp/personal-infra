@@ -2,15 +2,15 @@
 name: taiga
 description: >-
   Manage projects, Scrum sprints (milestones), user stories, backlog items, tasks,
-  issues, epics, and wiki pages on the self-hosted Taiga server (https://taiga.example.com)
+  issues, epics, and wiki pages on the self-hosted Taiga server ($TAIGA_URL)
   via the Taiga REST API (/api/v1). Use when the user types "/taiga" or asks to inspect,
   create, update, plan, or organize Taiga projects, sprints, user stories, tasks,
   bugs/issues, epics, or wiki documentation, or sync GitHub repositories with Taiga.
 ---
 
-# Taiga Project Management Skill (`https://taiga.example.com`)
+# Taiga Project Management Skill
 
-This skill provides a zero-dependency CLI tool and REST API runbook for interacting with `vitorecomp`'s self-hosted Taiga instance at `https://taiga.example.com`.
+This skill provides a zero-dependency CLI tool and REST API runbook for interacting with `vitorecomp`'s self-hosted Taiga instance (configured via `TAIGA_URL` / `TAIGA_DOMAIN` in the gitignored root `.env` or `.agents/skills/taiga/.env`).
 
 ## `/taiga` Slash Command Shorthands
 
@@ -40,20 +40,19 @@ When the user invokes `/taiga ...`, interpret their arguments as follows:
 
 ## Configuration (`.env`)
 
-Both scripts read [`.agents/skills/taiga/.env`](./.env.example) (gitignored, mode `0600`) at startup. Create it
-from the template once:
+Both scripts read the gitignored repository root [`.env`](../../../.env.example) (and optional [`.agents/skills/taiga/.env`](./.env.example), mode `0600`) at startup:
 
 ```bash
-cp .agents/skills/taiga/.env.example .agents/skills/taiga/.env && chmod 600 .agents/skills/taiga/.env
-# then fill in TAIGA_ADMIN_PASSWORD (or leave it empty to use the Secret Manager fallback)
+cp -n .env.example .env && chmod 600 .env
+# fill in TAIGA_URL / TAIGA_DOMAIN (and optional TAIGA_ADMIN_PASSWORD, or rely on Secret Manager via GCP_PROJECT_ID)
 ```
 
 | Key | Purpose |
 | :--- | :--- |
-| `TAIGA_URL` | Taiga base URL (default `https://taiga.example.com`). |
+| `TAIGA_URL` *(or `TAIGA_DOMAIN`)* | Taiga base URL (required on live calls). |
 | `TAIGA_ADMIN_USER` / `TAIGA_ADMIN_EMAIL` | Login id, and an optional second login id. |
 | `TAIGA_ADMIN_PASSWORD` / `TAIGA_AUTH_TOKEN` | Credentials (a token skips the login). |
-| `TAIGA_SECRET_PROJECT` / `TAIGA_SECRET_NAME` | Secret Manager fallback (`my-gcp-project` / `taiga-admin-password`, read with `gcloud`). |
+| `TAIGA_SECRET_PROJECT` *(or `GCP_PROJECT_ID`)* / `TAIGA_SECRET_NAME` | Secret Manager fallback (`taiga-admin-password`, read with `gcloud`). |
 
 Precedence: CLI flags > real environment variables > `.env` > Secret Manager. Use `--env-file PATH` (or
 `TAIGA_ENV_FILE`) for another file. Auth tokens are cached in `~/.cache/taiga_cli/token.json` (mode `0600`) and

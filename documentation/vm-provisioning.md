@@ -6,10 +6,10 @@ Workload Identity Federation, created by the `gcp-taiga` root).
 
 | Root | Cloud | Creates | State (GCS) |
 | :--- | :--- | :--- | :--- |
-| [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga) | GCP project `my-gcp-project` | `taiga-vpc` + subnet + firewall (22, 80/443, ICMP), static IP `taiga-ip`, **e2-micro** VM `personal-host` (30 GB pd-standard, Ubuntu 24.04 amd64, SA `taiga-vm`; hosts the blog + edge Caddy and runs both stacks' backups), **Cloud Run** `taiga` (SA `taiga-run`) + Artifact Registry `taiga` + Secret Manager + bucket `my-taiga-media`, Workload Identity pool `github` / provider `personal-infra` + SA `github-deployer` (CI deploys), backup bucket `my-infra-backups` + SA `stack-backup-writer` | `gs://my-gcp-project-tfstate/vms/gcp-taiga` |
-| [`cloud/infra/envs/oci-blog`](../cloud/infra/envs/oci-blog) (spare, not used by any stack yet) | OCI compartment `vitorecomp` | VCN + IGW + route table + security list + public subnet, **A1.Flex 1 OCPU / 6 GB** VM `blog` (50 GB boot, Ubuntu 24.04 aarch64), reserved public IP (+ an empty `taiga-backups` bucket from the old cross-cloud design, removed once the VM exists) | `gs://my-gcp-project-tfstate/vms/oci-blog` |
+| [`cloud/infra/envs/gcp-taiga`](../cloud/infra/envs/gcp-taiga) | GCP project `$GCP_PROJECT_ID` | `taiga-vpc` + subnet + firewall (22, 80/443, ICMP), static IP `taiga-ip`, **e2-micro** VM `personal-host` (30 GB pd-standard, Ubuntu 24.04 amd64, SA `taiga-vm`; hosts the blog + edge Caddy and runs both stacks' backups), **Cloud Run** `taiga` (SA `taiga-run`) + Artifact Registry `taiga` + Secret Manager + bucket `$TAIGA_MEDIA_BUCKET`, Workload Identity pool `github` / provider `personal-infra` + SA `github-deployer` (CI deploys), backup bucket `$BACKUP_BUCKET` + SA `stack-backup-writer` | `gs://$TF_STATE_BUCKET/vms/gcp-taiga` |
+| [`cloud/infra/envs/oci-blog`](../cloud/infra/envs/oci-blog) (spare, not used by any stack yet) | OCI compartment `vitorecomp` | VCN + IGW + route table + security list + public subnet, **A1.Flex 1 OCPU / 6 GB** VM `blog` (50 GB boot, Ubuntu 24.04 aarch64), reserved public IP | `gs://$TF_STATE_BUCKET/vms/oci-blog` |
 
-Both stacks back up with restic to the GCS bucket `my-infra-backups` ([backup-restore.md](./backup-restore.md)).
+Both stacks back up with restic to the GCS bucket `$BACKUP_BUCKET` ([backup-restore.md](./backup-restore.md)).
 
 **Expected cost:** GCP e2-micro + 30 GB pd-standard are free tier; the in-use static IPv4 is billed
 (~US$3.60/month). OCI A1 (≤ 2 OCPU / 12 GB per tenancy), 200 GB block storage and 20 GB object
@@ -31,25 +31,25 @@ mise trust && mise install          # terraform 1.17.1 from mise.toml
 terraform version                   # if mise is not activated in your shell: mise exec -- terraform version
 ```
 
-### 1.2 GCP (`my-gcp-project`)
+### 1.2 GCP (`$GCP_PROJECT_ID`)
 
-Billing is currently **disabled** on this project, and every billing account you own is closed.
-Link an *open* billing account first (the free tier requires one):
+Link an open billing account first (the free tier requires one):
 
 ```bash
+source .env
 gcloud billing accounts list --filter=open=true
-gcloud billing projects link my-gcp-project --billing-account=<OPEN_ACCOUNT_ID>
+gcloud billing projects link "$GCP_PROJECT_ID" --billing-account=<OPEN_ACCOUNT_ID>
 
 gcloud services enable serviceusage.googleapis.com cloudresourcemanager.googleapis.com \
   compute.googleapis.com iam.googleapis.com storage.googleapis.com \
-  --project my-gcp-project
+  --project "$GCP_PROJECT_ID"
 
 gcloud auth application-default login   # Terraform uses your ADC; no service-account keys
 
-gcloud storage buckets create gs://my-gcp-project-tfstate \
-  --project my-gcp-project --location us-central1 \
+gcloud storage buckets create "gs://$TF_STATE_BUCKET" \
+  --project "$GCP_PROJECT_ID" --location us-central1 \
   --uniform-bucket-level-access --public-access-prevention
-gcloud storage buckets update gs://my-gcp-project-tfstate --versioning
+gcloud storage buckets update "gs://$TF_STATE_BUCKET" --versioning
 ```
 
 > Free-tier hours are counted per billing account. Don't run another e2-micro on the same account.
@@ -89,7 +89,8 @@ done
 curl -s https://api.ipify.org; echo     # your public IP -> web_source_cidrs = ["<ip>/32"]
 ```
 
-Fill in `admin_ssh_public_key` (contents of `~/.ssh/infra_admin.pub`), `web_source_cidrs`, and for
+Fill in `project_id`, `backup_bucket_name`, `taiga_media_bucket_name`, `github_repository_id`,
+`admin_ssh_public_key` (contents of `~/.ssh/infra_admin.pub`), `web_source_cidrs`, and for
 OCI `region` (home region), `tenancy_ocid`, `compartment_ocid`.
 
 ---
@@ -97,8 +98,9 @@ OCI `region` (home region), `tenancy_ocid`, `compartment_ocid`.
 ## 2. First apply
 
 ```bash
+source .env
 cd cloud/infra/envs/gcp-taiga       # or oci-blog (spare)
-terraform init
+terraform init -backend-config="bucket=$TF_STATE_BUCKET"
 terraform plan -out tfplan          # review (see §3)
 terraform apply tfplan
 terraform output                    # public_ip, admin_ssh, backup bucket/repositories
@@ -117,23 +119,19 @@ python3 cloud/scripts/bootstrap_vm.py --host ubuntu@$IP --identity-file ~/.ssh/i
 ```
 
 `bootstrap_vm.py` prints the VM's SSH host-key fingerprint. Compare it with
-`ssh-keyscan -t ed25519 $IP | ssh-keygen -lf -` before storing the keyscan output as `DEPLOY_KNOWN_HOSTS`.
+`ssh-keyscan -t ed25519 $IP | ssh-keygen -lf -` before storing the keyscan output in `.env` (`DEPLOY_KNOWN_HOSTS`).
 
 **OCI "Out of host capacity"** (common for Always Free A1): Always Free only exists in the home region, and
 `sa-saopaulo-1` has a single availability domain, so the fix is retrying until capacity frees up (hours to
 days). Run the retry loop by hand (`cloud/scripts/tf_apply_retry.sh --env oci-blog`, every 5 min by default;
 `--interval 600`, `--max-attempts N`) or as the systemd unit below.
 
-It retries on capacity errors and on transient errors (plugin start timeouts, state lock, network resets, 429s),
-tolerates up to 3 consecutive plan failures, refuses any plan that deletes or replaces something, stops on any
-other error, sends a desktop notification on success and prints the outputs (including `public_ip`).
-
 #### OCI capacity retry loop on the VM
 
-The loop currently runs on `personal-host` as `oci-blog-retry.service` (outside CI, low priority). It uses a clone of
+The loop runs on `personal-host` as `oci-blog-retry.service` (outside CI, low priority). It uses a clone of
 this repo in `~ubuntu/personal-infra` (`git pull` to update), your OCI API key in `~ubuntu/.oci/`, a
-`terraform.tfvars` in `envs/oci-blog`, and the VM service account (`--adc`), which may only read/write the
-`vms/oci-blog/` state prefix. After every attempt it times one request to the blog into `~ubuntu/blog-timing.log`.
+`terraform.tfvars` (and `.env` or `backend.hcl` with `TF_STATE_BUCKET`) in `envs/oci-blog`, and the VM service
+account (`--adc`), which may only read/write the `vms/oci-blog/` state prefix.
 
 ```ini
 # /etc/systemd/system/oci-blog-retry.service   (then: systemctl daemon-reload && systemctl enable --now oci-blog-retry)
@@ -159,15 +157,15 @@ WantedBy=multi-user.target
 ```
 
 Logs: `journalctl -u oci-blog-retry -f`; stop it with `sudo systemctl disable --now oci-blog-retry` once the VM exists.
-In regions with several ADs you can also try `availability_domain_index = 1` (or 2).
 
 ---
 
 ## 3. Every change: plan, review, apply
 
 ```bash
+source .env
 cd cloud/infra/envs/<env>
-terraform init                      # after provider/module changes
+terraform init -backend-config="bucket=$TF_STATE_BUCKET"
 terraform plan -out tfplan
 terraform apply tfplan
 rm -f tfplan                        # plan files can contain sensitive values (they are gitignored anyway)
@@ -187,36 +185,30 @@ guard to "make the plan pass". In-place updates (`~`) of firewall rules, labels 
 | **Open 80/443 at DNS cutover** | `web_source_cidrs = ["0.0.0.0/0"]` → plan → apply (in-place firewall/security-list update). Let's Encrypt validates from many IPs, so it must be open to the world. |
 | **VM too small** | `machine_type = "e2-small"` in `gcp-taiga/terraform.tfvars` → plan → apply. In-place stop/start (`allow_stopping_for_update`); the static IP is kept. e2-small is not free tier (~US$13/month). |
 | **Spare OCI VM size** | `ocpus` / `memory_in_gbs` (stay ≤ 2 / 12 for Always Free). Flex shape changes are in-place (reboot). |
-| **CPU limits (e2-micro)** | The VM sustains only ~25% of its 2 vCPUs, so it never builds images or runs Taiga migrations (both happen on GitHub runners); deploys there are just `compose pull`/`up`. Restores and the OCI retry loop's Terraform runs are still slow and must not overlap (`deploy_stack.py` deploys are serialized by the `deploy-gcp-vm` concurrency group). If deploys become painful, `machine_type = "e2-small"` is an in-place change. |
-| **Rename the VM** | GCE names change only while stopped and Terraform would replace the instance, so: `gcloud compute instances stop <vm>`, `gcloud compute instances set-name <vm> --new-name=<new>`, `gcloud compute instances start <new>`, then set `instance_name` in `envs/gcp-taiga/main.tf`, `terraform state rm module.taiga_vm.google_compute_instance.this` and `terraform import module.taiga_vm.google_compute_instance.this projects/my-gcp-project/zones/us-central1-a/instances/<new>`; the next plan must show no replacement. |
+| **CPU limits (e2-micro)** | The VM sustains only ~25% of its 2 vCPUs, so it never builds images or runs Taiga migrations (both happen on GitHub runners); deploys there are just `compose pull`/`up`. |
+| **Rename the VM** | GCE names change only while stopped and Terraform would replace the instance, so: `gcloud compute instances stop <vm>`, `gcloud compute instances set-name <vm> --new-name=<new>`, `gcloud compute instances start <new>`, then set `instance_name` in `envs/gcp-taiga/main.tf`, `terraform state rm module.taiga_vm.google_compute_instance.this` and `terraform import module.taiga_vm.google_compute_instance.this projects/$GCP_PROJECT_ID/zones/us-central1-a/instances/<new>`; the next plan must show no replacement. |
 | **Disk snapshots (GCE)** | `enable_snapshots = true` → daily snapshots kept 7 days (billed per GB). restic backups remain the primary safety net. |
 | **Rotate the admin key** | Instance metadata keys are ignored after creation on OCI. Edit `~ubuntu/.ssh/authorized_keys` over SSH, or for GCE change `admin_ssh_public_key` (in-place metadata update). Deploy keys are managed by `bootstrap_vm.py`. |
-| **Backup credentials (per VM)** | `gcloud storage hmac create $(terraform -chdir=cloud/infra/envs/gcp-taiga output -raw backup_writer_email) --project my-gcp-project` → put the access ID/secret in that VM's `.env` as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. Create one key per VM so either can be revoked on its own (`gcloud storage hmac update <ACCESS_ID> --deactivate`). |
+| **Backup credentials (per VM)** | `gcloud storage hmac create $(terraform -chdir=cloud/infra/envs/gcp-taiga output -raw backup_writer_email) --project "$GCP_PROJECT_ID"` → put the access ID/secret in that VM's `.env` as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. |
 | **Deliberately rebuild a VM** | Restore from restic onto a new VM: comment out `prevent_destroy` *in a dedicated commit*, `terraform apply -replace=module.<vm>.<resource>`, restore `prevent_destroy`, bootstrap, deploy, `backup_stack.py` restore (see [backup-restore.md](./backup-restore.md)). The reserved/static IP is kept, so DNS does not change. |
 
 ---
 
 ## 5. Hand-off to CI/CD
 
-After the first apply and bootstrap, configure the GitHub Environment for the stack
-(`blog-prod` or `taiga-prod`). Details: [pipeline-setup.md](./pipeline-setup.md#3-secrets-and-variables).
+After the first apply and bootstrap, record the outputs in your gitignored root `.env` (`GCP_WIF_PROVIDER`,
+`GCP_DEPLOY_SA`, `TAIGA_UPSTREAM`, `DEPLOY_KNOWN_HOSTS`) and sync all GitHub Secrets via
+[`sync_github_secrets.py`](../cloud/scripts/sync_github_secrets.py):
 
 ```bash
 gh secret set DEPLOY_HOST    --env blog-prod --body "$IP"
 gh secret set DEPLOY_SSH_KEY --env blog-prod < ~/.ssh/blog_deploy
-gh variable set DEPLOY_KNOWN_HOSTS --env blog-prod --body "$(ssh-keyscan -t ed25519 $IP 2>/dev/null)"
 gh variable set DEPLOY_USER  --env blog-prod --body deploy
+
+python3 cloud/scripts/sync_github_secrets.py
 ```
 
-The Taiga job deploys to Cloud Run as `github-deployer` through Workload Identity Federation (pool `github`,
-provider `personal-infra`, accepted only for this repository's numeric ID on `main`, bound to the `taiga-prod`
-environment). Its identifiers are not secrets; store them as repository variables after the `gcp-taiga` apply:
-
-```bash
-cd cloud/infra/envs/gcp-taiga
-gh variable set GCP_WIF_PROVIDER --body "$(terraform output -raw github_wif_provider)"
-gh variable set GCP_DEPLOY_SA    --body "$(terraform output -raw github_deployer_email)"
-```
+Details: [pipeline-setup.md](./pipeline-setup.md#3-secrets-and-variables).
 
 ---
 
@@ -225,8 +217,8 @@ gh variable set GCP_DEPLOY_SA    --body "$(terraform output -raw github_deployer
 | Symptom | Fix |
 | :--- | :--- |
 | `Error 403: Billing account for project ... is not found` / `billing is disabled` | §1.2: link an open billing account. |
-| `<other-account> does not have storage.objects.list access to ... my-gcp-project-tfstate` | Terraform's GCS backend uses Application Default Credentials, which can belong to a different Google account than the `gcloud` CLI. Either `gcloud auth application-default login` with `admin@example.com` (+ `gcloud auth application-default set-quota-project my-gcp-project`), or prefix commands with `GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)`. `tf_apply_retry.sh` does the latter automatically. |
-| `storage: bucket doesn't exist` on `terraform init` | Create the state bucket (§1.2). |
+| `<other-account> does not have storage.objects.list access to ... <tfstate-bucket>` | Terraform's GCS backend uses Application Default Credentials, which can belong to a different Google account than the `gcloud` CLI. Either `gcloud auth application-default login` (+ `gcloud auth application-default set-quota-project "$GCP_PROJECT_ID"`), or prefix commands with `GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)`. `tf_apply_retry.sh` does the latter automatically. |
+| `storage: bucket doesn't exist` on `terraform init` | Create the state bucket (§1.2) and pass `-backend-config="bucket=$TF_STATE_BUCKET"`. |
 | `Error acquiring the state lock` | Another apply is running, or one crashed: `terraform force-unlock <ID>` only if you are sure. |
 | OCI `401 NotAuthenticated` | Wrong `fingerprint`/`key_file` in `~/.oci/config`, or the key was not added to your user. |
 | OCI `404 NotAuthorizedOrNotFound` on the compartment | Wrong `compartment_ocid`, or `vitorecomp` is the root (use the tenancy OCID). |
@@ -238,6 +230,6 @@ gh variable set GCP_DEPLOY_SA    --body "$(terraform output -raw github_deployer
 
 ## 7. Legacy stack (done)
 
-The old `legacy-gcp-project` stack (Global LB, Cloud CDN, Cloud Run, Cloud SQL, Cloud Build) was destroyed on
+The legacy GCP stack (Global LB, Cloud CDN, Cloud Run, Cloud SQL, Cloud Build) was destroyed on
 2026-11-12 with Terraform (46 resources), its state removed and its code deleted. Final Cloud SQL exports and
-content are kept in `gs://my-infra-backups/migration/<stack>/` ([migration runbook](./migration-runbook.md)).
+content are kept in `gs://$BACKUP_BUCKET/migration/<stack>/` ([migration runbook](./migration-runbook.md)).

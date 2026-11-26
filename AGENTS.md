@@ -25,11 +25,12 @@ personal-infra/
 ├── README.md
 ├── AGENTS.md
 ├── LICENSE
+├── .env.example                            # Template for gitignored root `.env` (private domains, emails, project/bucket IDs)
 ├── documentation/
 │   ├── README.md                           # Documentation index
 │   ├── cloud-architecture.md               # Vercel, the GCE VM + edge Caddy, Taiga on Cloud Run + Neon, deploys & backups
 │   ├── pipeline-setup.md                   # GitHub Actions, SSH deploys & secrets/variables guide
-│   ├── migration-runbook.md                # History: the 2026-11 move off the legacy-gcp-project GCP stack (completed)
+│   ├── migration-runbook.md                # History: the 2026-11 move off the legacy GCP stack (completed)
 │   ├── vm-provisioning.md                  # Manual Terraform runbook for the VM roots
 │   ├── backup-restore.md                   # restic backups of the compose stacks (GCS bucket) & restores
 │   └── workspace-setup.md                  # Local ~/workspace inventory & sync documentation
@@ -51,7 +52,7 @@ personal-infra/
 │   ├── infra/
 │   │   ├── modules/gce-vm/                 # GCE VM + dedicated VPC/firewall + static IP + runtime SA
 │   │   ├── modules/oci-vm/                 # OCI A1 VM + VCN/security list + reserved IP
-│   │   ├── envs/gcp-taiga/                 # VM + Taiga Cloud Run/AR/secrets/media bucket + backup bucket (my-gcp-project); applied by hand
+│   │   ├── envs/gcp-taiga/                 # VM + Taiga Cloud Run/AR/secrets/media bucket + backup bucket (var.project_id); applied by hand
 │   │   └── envs/oci-blog/                  # Spare OCI A1 VM (capacity retry loop); applied by hand, not used yet
 │   ├── nobuffer-site/                      # The site itself deploys to Vercel from its own repo
 │   │   └── maintenance/                    # Containerized static maintenance page
@@ -66,22 +67,24 @@ personal-infra/
 │   │   ├── .env.example, stack.json        # VM .env template & deploy/backup metadata
 │   │   └── compose.local.yml               # Local dev compose stack (127.0.0.1:8080)
 │   └── scripts/
+│       ├── sync_github_secrets.py          # Syncs private domains, emails & GCP IDs from root `.env` to GitHub Secrets via `gh`
 │       ├── bootstrap_vm.py                 # Idempotent host setup over SSH (Docker, deploy user, swap, sshd, firewall, backup timers)
 │       ├── deploy_stack.py                 # rsync + remote .env preflight + compose pull/up --wait (never builds) + HTTPS check (CI & local)
-│       ├── backup_stack.py                 # Runs on the VM: DB dump + volumes -> restic in gs://my-infra-backups
+│       ├── backup_stack.py                 # Runs on the VM: DB dump + volumes -> restic in gs://$BACKUP_BUCKET
 │       ├── tf_apply_retry.sh               # Retries plan+apply on OCI 'Out of host capacity' (refuses destructive plans)
 │       ├── seed_ghost_admin.py             # Idempotently seeds/verifies the Ghost owner (--connect-ip/--insecure for VMs)
 │       ├── seed_taiga_admin.py             # Idempotently verifies Taiga API & admin login (--connect-ip/--insecure for VMs)
 │       └── configure_ai_spend_cap.py       # Idempotently configures GCP Cloud Billing Spend Cap budgets for AI services
 ├── development/                            # Cloud & on-prem GPU development machine provisioning & Podman stack
+│   ├── README.md, .env.example             # Full GPU workflow runbook & template for gitignored `development/.env`
 │   ├── gpu-dev-machine/                    # Podman + podman-compose stack (ray-server DeepSeek-V4.1-Flash, litellm, deepseek-harness)
 │   ├── infra/
 │   │   ├── gcp/                            # GCP Terraform: STANDARD controller/watchdog + Spot GPU VM + Hyperdisk
 │   │   ├── azure/                          # (Planned) Azure GPU VM infrastructure
 │   │   └── on-prem/                        # (Planned) On-prem GPU host infrastructure
 │   └── scripts/
-│       ├── deploy.sh                       # Unified machine provisioning entrypoint across GCP, Azure, and on-prem
-│       ├── setup.sh                        # Configures/manages the GitHub Actions runner on the deployed machine
+│       ├── deploy.sh                       # Unified machine provisioning entrypoint across GCP, Azure, and on-prem (--loop, --cycle-regions)
+│       ├── setup.sh                        # Syncs `development/.env` to GitHub via `gh` & manages the self-hosted runner on the machine
 │       └── deploy_gpu_stack.sh             # Syncs & deploys development/gpu-dev-machine via podman-compose (CI & local)
 ├── home-server/                            # (Planned) Home server setup and maintenance
 ├── linux/                                  # (Planned) Linux workstation/system configuration
@@ -135,6 +138,7 @@ personal-infra/
 python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --services all --dry-run
 
 # Spend caps and VM stacks (Terraform is applied from a workstation, never in CI: documentation/vm-provisioning.md)
+python3 cloud/scripts/sync_github_secrets.py --dry-run
 python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --services all --dry-run
 python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<ip> --provider oracle --deploy-pubkey-file ~/.ssh/blog_deploy.pub --backup-stack personal-blog --dry-run
 python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<ip> --provider gce --deploy-pubkey-file ~/.ssh/taiga_deploy.pub --swap-gb 3 --backup-stack taiga --check
@@ -146,8 +150,8 @@ cloud/scripts/tf_apply_retry.sh --env oci-blog --dry-run
 docker compose -f cloud/personal-blog/compose.yml --env-file cloud/personal-blog/.env.example config -q
 terraform -chdir=cloud/infra/envs/gcp-taiga init -backend=false && terraform -chdir=cloud/infra/envs/gcp-taiga validate
 terraform -chdir=development/infra/gcp init -backend=false && terraform -chdir=development/infra/gcp validate
-./development/scripts/deploy.sh --provider=gcp --dry-run
-./development/scripts/setup.sh --provider=gcp --repo=vitorecomp/<repo> --dry-run
+./development/scripts/deploy.sh --provider=gcp --loop=5 --dry-run
+./development/scripts/setup.sh --provider=gcp --dry-run
 LITELLM_MASTER_KEY=x ./development/scripts/deploy_gpu_stack.sh --dry-run
 
 

@@ -3,9 +3,9 @@ name: Deploy Taiga (Cloud Run)
 #    Manager and rolls out Cloud Run, as the github-deployer service account through Workload
 #    Identity Federation (no keys stored anywhere). The e2-micro VM does none of this work.
 # 2. vm: refreshes the shared edge proxy and Taiga's backup .env on the VM over SSH (rsync + a
-#    Caddy `compose up`), then checks https://taiga.example.com end to end through the VM.
-# Secrets/variables live in the GitHub Environment "taiga-prod"; GCP_WIF_PROVIDER / GCP_DEPLOY_SA are repository variables
-# (terraform output in cloud/infra/envs/gcp-taiga; see documentation/pipeline-setup.md).
+#    Caddy `compose up`), then checks the public Taiga HTTPS endpoint end to end through the VM.
+# Secrets live in the repository and the "taiga-prod" GitHub Environment
+# (synced from gitignored `.env` by cloud/scripts/sync_github_secrets.py; see documentation/pipeline-setup.md).
 on:
   workflow_dispatch:
   repository_dispatch:
@@ -31,9 +31,7 @@ jobs:
   cloud-run:
     name: Build, migrate and deploy to Cloud Run
     runs-on: ubuntu-latest
-    environment:
-      name: taiga-prod
-      url: https://taiga.example.com
+    environment: taiga-prod
     permissions:
       contents: read
       id-token: write # GitHub OIDC token -> Workload Identity Federation
@@ -43,15 +41,21 @@ jobs:
     - name: Authenticate to Google Cloud (keyless)
       uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
       with:
-        workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-        service_account: ${{ vars.GCP_DEPLOY_SA }}
+        workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+        service_account: ${{ secrets.GCP_DEPLOY_SA }}
 
     - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
     - name: Build, migrate and roll out
       env:
+        GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        GCP_REGION: ${{ secrets.GCP_REGION || 'us-central1' }}
+        TAIGA_RUN_SA: ${{ secrets.TAIGA_RUN_SA }}
+        TAIGA_MEDIA_BUCKET: ${{ secrets.TAIGA_MEDIA_BUCKET }}
+        STACK_DOMAIN: ${{ secrets.TAIGA_DOMAIN }}
         TAIGA_ADMIN_USER: ${{ vars.TAIGA_ADMIN_USER || 'admin' }}
-        TAIGA_ADMIN_EMAIL: ${{ vars.TAIGA_ADMIN_EMAIL }}
+        TAIGA_ADMIN_NAME: ${{ secrets.ADMIN_NAME }}
+        TAIGA_ADMIN_EMAIL: ${{ secrets.TAIGA_ADMIN_EMAIL }}
         TAIGA_ADMIN_PASSWORD: ${{ secrets.TAIGA_ADMIN_PASSWORD }}
         TAIGA_DB_HOST: ${{ secrets.TAIGA_DB_HOST }}
         TAIGA_DB_USER: ${{ secrets.TAIGA_DB_USER }}
@@ -63,16 +67,14 @@ jobs:
     name: Edge proxy + Taiga backup config on the VM
     needs: cloud-run
     runs-on: ubuntu-latest
-    environment:
-      name: taiga-prod
-      url: https://taiga.example.com
+    environment: taiga-prod
     steps:
     - uses: actions/checkout@v7
 
     - name: Load deploy key and pin the host key
       env:
         DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+        DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
       run: |
         set -euo pipefail
         test -n "$DEPLOY_SSH_KEY" || { echo "::error::DEPLOY_SSH_KEY is not set in environment taiga-prod"; exit 1; }
@@ -89,16 +91,22 @@ jobs:
       env:
         DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
+        TAIGA_DOMAIN: ${{ secrets.TAIGA_DOMAIN }}
+        BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
+        ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
+        TAIGA_UPSTREAM: ${{ secrets.TAIGA_UPSTREAM }}
+        TAIGA_MEDIA_BUCKET: ${{ secrets.TAIGA_MEDIA_BUCKET }}
         TAIGA_ADMIN_USER: ${{ vars.TAIGA_ADMIN_USER || 'admin' }}
+        TAIGA_ADMIN_EMAIL: ${{ secrets.TAIGA_ADMIN_EMAIL }}
         TAIGA_ADMIN_PASSWORD: ${{ secrets.TAIGA_ADMIN_PASSWORD }}
         TAIGA_DB_HOST: ${{ secrets.TAIGA_DB_HOST }}
         TAIGA_DB_USER: ${{ secrets.TAIGA_DB_USER }}
         TAIGA_DB_PASSWORD: ${{ secrets.TAIGA_DB_PASSWORD }}
         TAIGA_DB_NAME: ${{ vars.TAIGA_DB_NAME || 'taiga' }}
       run: |
-        python3 cloud/scripts/deploy_stack.py --stack edge
-        # The VM dumps Neon nightly (backup_stack.py), so it keeps the current DB credentials.
-        python3 cloud/scripts/deploy_stack.py --stack taiga --sync-env TAIGA_DB_HOST,TAIGA_DB_NAME,TAIGA_DB_USER,TAIGA_DB_PASSWORD
+        python3 cloud/scripts/deploy_stack.py --stack edge --sync-env TAIGA_DOMAIN,BLOG_DOMAIN,ACME_EMAIL,TAIGA_UPSTREAM
+        # The VM dumps Neon and mirrors the media bucket nightly (backup_stack.py).
+        python3 cloud/scripts/deploy_stack.py --stack taiga --sync-env TAIGA_DB_HOST,TAIGA_DB_NAME,TAIGA_DB_USER,TAIGA_DB_PASSWORD,TAIGA_MEDIA_BUCKET
 
     - name: Stop ssh-agent
       if: always()

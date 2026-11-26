@@ -1,9 +1,11 @@
 # Edge (`cloud/edge`)
 
-Shared Caddy for the GCP VM: terminates TLS for `blog.example.com` (proxied to the Ghost container over
-the `edge` docker network, alias `blog-ghost`) and `taiga.example.com` (proxied to Taiga's Cloud Run URL,
+Shared Caddy for the GCP VM: terminates TLS for `$BLOG_DOMAIN` (proxied to the Ghost container over
+the `edge` docker network, alias `blog-ghost`) and `$TAIGA_DOMAIN` (proxied to Taiga's Cloud Run URL,
 `TAIGA_UPSTREAM` in the edge `.env`, with the Host header Cloud Run expects).
 
+- Hostnames (`TAIGA_DOMAIN`, `BLOG_DOMAIN`), `ACME_EMAIL`, and `TAIGA_UPSTREAM` are synced from GitHub Secrets
+  into `/opt/stacks/edge/.env` by the deploy workflows (`--sync-env`).
 - Per-site TLS mode lives in `/opt/stacks/edge/.env` (`TAIGA_TLS`, `BLOG_TLS`): the ACME email for
   Let's Encrypt, or `internal` while a hostname's DNS does not point at the VM yet.
 - Certificates persist in the `edge_caddy-data` volume (included in the Taiga backup job on the VM).

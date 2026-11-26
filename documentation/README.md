@@ -8,8 +8,8 @@ Centralized technical documentation for provisioning, operating, and maintaining
 | :--- | :--- |
 | **[Cloud Architecture](./cloud-architecture.md)** | What runs where: Vercel (static sites), the GCE e2-micro `personal-host` (edge Caddy + Ghost/MySQL), Cloud Run (Taiga) with Neon Postgres, backups, free-tier guardrails. |
 | **[VM Provisioning (manual Terraform)](./vm-provisioning.md)** | Prerequisites, plan/review/apply procedure and day-2 operations for `cloud/infra/envs/{gcp-taiga,oci-blog}` (resize, rename, backup keys, OCI capacity retry). |
-| **[Pipeline & CI/CD Setup](./pipeline-setup.md)** | CI validation, deploy workflows (images built on runners; blog pulled on the VM over SSH, Taiga to Cloud Run via Workload Identity Federation), GitHub environments, secrets and variables. |
-| **[Backup & Restore](./backup-restore.md)** | Daily restic backups of both stacks to `gs://my-infra-backups`, restore tests and full-restore procedure. |
+| **[Pipeline & CI/CD Setup](./pipeline-setup.md)** | CI validation, deploy workflows (images built on runners; blog pulled on the VM over SSH, Taiga to Cloud Run via Workload Identity Federation), GitHub environments, and masked GitHub Secrets synced from `.env`. |
+| **[Backup & Restore](./backup-restore.md)** | Daily restic backups of both stacks to `gs://$BACKUP_BUCKET`, restore tests and full-restore procedure. |
 | **[Workspace Management](./workspace-setup.md)** | Maintaining the GitHub repository inventory (`repo_stats.json`) and synchronizing local `~/workspace` checkouts. |
 | **[GPU Development Machines](../development/README.md)** | End-to-end flow for provisioning cloud/on-prem GPU machines (`deploy.sh --provider=gcp`), Spot watchdog management, and GitHub Actions runner configuration (`setup.sh`). |
-| **[Migration Runbook](./migration-runbook.md)** | History: how everything moved off the `legacy-gcp-project` GCP stack in November 2026 (completed). |
+| **[Migration Runbook](./migration-runbook.md)** | History: how everything moved off the legacy GCP stack in November 2026 (completed). |

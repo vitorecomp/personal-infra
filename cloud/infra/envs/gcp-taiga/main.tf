@@ -1,4 +1,4 @@
-# GCP free-tier footprint (project my-gcp-project):
+# GCP free-tier footprint:
 #   * e2-micro VM running the blog + the shared edge Caddy (docker compose)
 #   * Taiga on Cloud Run (scale to zero), image in Artifact Registry, media in GCS,
 #     secrets in Secret Manager; database on Neon (outside GCP)

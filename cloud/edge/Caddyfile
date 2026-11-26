@@ -10,7 +10,7 @@
 # Taiga runs on Cloud Run (free tier); Caddy terminates TLS for the custom domain and
 # forwards to the run.app URL with the Host Cloud Run expects (X-Forwarded-Host keeps the
 # public name for Django).
-taiga.example.com {
+{$TAIGA_DOMAIN} {
 	tls {$TAIGA_TLS}
 	encode zstd gzip
 	reverse_proxy {$TAIGA_UPSTREAM} {
@@ -18,7 +18,7 @@ taiga.example.com {
 	}
 }
 
-blog.example.com {
+{$BLOG_DOMAIN} {
 	tls {$BLOG_TLS}
 	encode zstd gzip
 	reverse_proxy blog-ghost:2368

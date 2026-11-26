@@ -1,6 +1,6 @@
 {
   "name": "personal-blog",
-  "domain": "blog.example.com",
+  "domain_env": "BLOG_DOMAIN",
   "edge_tls_key": "BLOG_TLS",
   "registry": "ghcr.io",
   "health_path": "/ghost/api/admin/site/",

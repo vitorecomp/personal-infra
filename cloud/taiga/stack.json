@@ -1,6 +1,6 @@
 {
   "name": "taiga",
-  "domain": "taiga.example.com",
+  "domain_env": "TAIGA_DOMAIN",
   "edge_tls_key": "TAIGA_TLS",
   "health_path": "/api/v1/project-templates",
   "required_files": [
@@ -22,7 +22,7 @@
       "edge_caddy-data"
     ],
     "gcs": [
-      "gs://my-taiga-media"
+      "gs://${TAIGA_MEDIA_BUCKET}"
     ]
   }
 }

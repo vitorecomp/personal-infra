@@ -1,9 +1,10 @@
 name: Deploy the Personal Blog (GCP VM)
 # 1. build: builds the Ghost image from vitorecomp/personal-blog on the GitHub runner (theme check
 #    included) and pushes it to GHCR, so the e2-micro VM never builds anything.
-# 2. deploy: over SSH, refreshes the shared edge proxy, writes the digest-pinned GHOST_IMAGE into the
-#    VM .env, pulls it (throwaway login with this job's GITHUB_TOKEN) and restarts Ghost.
-# Secrets/variables live in the GitHub Environment "blog-prod" (see documentation/pipeline-setup.md).
+# 2. deploy: over SSH, refreshes the shared edge proxy, writes the digest-pinned GHOST_IMAGE and
+#    STACK_DOMAIN into the VM .env, pulls it (throwaway login with this job's GITHUB_TOKEN) and restarts Ghost.
+# Secrets live in the repository and the "blog-prod" GitHub Environment
+# (synced from gitignored `.env` by cloud/scripts/sync_github_secrets.py; see documentation/pipeline-setup.md).
 on:
   workflow_dispatch:
     inputs:
@@ -69,6 +70,7 @@ jobs:
       id: push
       env:
         REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        BLOG_THEME_NAME: ${{ secrets.BLOG_THEME_NAME || 'custom' }}
       run: |
         set -euo pipefail
         sha="$(git -C app rev-parse HEAD)"
@@ -77,7 +79,7 @@ jobs:
         BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker build --pull -q \
           --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
           --label "org.opencontainers.image.revision=${sha}" \
-          --label "org.opencontainers.image.description=Ghost + custom-blog-theme theme (vitorecomp/personal-blog)" \
+          --label "org.opencontainers.image.description=Ghost + ${BLOG_THEME_NAME} theme (vitorecomp/personal-blog)" \
           -t "${repo}:${sha}" -t "${repo}:latest" app >/dev/null
         docker push -q "${repo}:${sha}" >/dev/null
         docker push -q "${repo}:latest" >/dev/null
@@ -90,9 +92,7 @@ jobs:
     name: Deploy personal-blog over SSH
     needs: build
     runs-on: ubuntu-latest
-    environment:
-      name: blog-prod
-      url: https://blog.example.com
+    environment: blog-prod
     permissions:
       contents: read
       packages: read # the VM pulls the image with this job's short-lived GITHUB_TOKEN
@@ -102,7 +102,7 @@ jobs:
     - name: Load deploy key and pin the host key
       env:
         DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+        DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
       run: |
         set -euo pipefail
         test -n "$DEPLOY_SSH_KEY" || { echo "::error::DEPLOY_SSH_KEY is not set in environment blog-prod"; exit 1; }
@@ -119,14 +119,22 @@ jobs:
       env:
         DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
+        TAIGA_DOMAIN: ${{ secrets.TAIGA_DOMAIN }}
+        BLOG_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
+        STACK_DOMAIN: ${{ secrets.BLOG_DOMAIN }}
+        ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
+        TAIGA_UPSTREAM: ${{ secrets.TAIGA_UPSTREAM }}
         GHOST_IMAGE: ${{ needs.build.outputs.image }}
         REGISTRY_USER: ${{ github.actor }}
         REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        BLOG_ADMIN_EMAIL: ${{ vars.BLOG_ADMIN_EMAIL }}
+        BLOG_ADMIN_EMAIL: ${{ secrets.BLOG_ADMIN_EMAIL }}
+        BLOG_ADMIN_NAME: ${{ secrets.BLOG_ADMIN_NAME || secrets.ADMIN_NAME }}
+        BLOG_TITLE: ${{ secrets.BLOG_TITLE }}
+        BLOG_THEME_NAME: ${{ secrets.BLOG_THEME_NAME }}
         BLOG_ADMIN_PASSWORD: ${{ secrets.BLOG_ADMIN_PASSWORD }}
       run: |
-        python3 cloud/scripts/deploy_stack.py --stack edge
-        python3 cloud/scripts/deploy_stack.py --stack personal-blog --sync-env GHOST_IMAGE
+        python3 cloud/scripts/deploy_stack.py --stack edge --sync-env TAIGA_DOMAIN,BLOG_DOMAIN,ACME_EMAIL,TAIGA_UPSTREAM
+        python3 cloud/scripts/deploy_stack.py --stack personal-blog --sync-env GHOST_IMAGE,STACK_DOMAIN
 
     - name: Stop ssh-agent
       if: always()

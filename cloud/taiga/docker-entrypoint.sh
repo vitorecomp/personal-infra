@@ -2,7 +2,7 @@
 set -euo pipefail
 
 export TAIGA_SITES_SCHEME="${TAIGA_SITES_SCHEME:-https}"
-export TAIGA_SITES_DOMAIN="${TAIGA_SITES_DOMAIN:-taiga.example.com}"
+export TAIGA_SITES_DOMAIN="${TAIGA_SITES_DOMAIN:-localhost}"
 export TAIGA_SUBPATH="${TAIGA_SUBPATH:-}"
 export TAIGA_URL="${TAIGA_URL:-${TAIGA_SITES_SCHEME}://${TAIGA_SITES_DOMAIN}}"
 export PUBLIC_REGISTER_ENABLED="${PUBLIC_REGISTER_ENABLED:-False}"
@@ -103,7 +103,7 @@ if broken_ids:
 admin_username = os.environ.get("TAIGA_ADMIN_USER", "admin").strip() or "admin"
 admin_email = os.environ.get("TAIGA_ADMIN_EMAIL", "admin@example.com").strip()
 admin_password = os.environ.get("TAIGA_ADMIN_PASSWORD", "").strip()
-admin_full_name = os.environ.get("TAIGA_ADMIN_NAME", "Admin User").strip()
+admin_full_name = os.environ.get("TAIGA_ADMIN_NAME", "Admin").strip()
 
 if admin_email and admin_password:
     User = get_user_model()

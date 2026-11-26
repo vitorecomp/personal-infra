@@ -12,18 +12,37 @@ import argparse
 import http.client
 import json
 import os
+from pathlib import Path
+import re
 import socket
 import ssl
 import sys
 import time
 from urllib.parse import urlparse
 
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_TAIGA_URL = "https://taiga.example.com"
 DEFAULT_ADMIN_USER = "admin"
-DEFAULT_ADMIN_EMAIL = "admin@example.com"
+DEFAULT_ADMIN_EMAIL = ""
 DEFAULT_FALLBACK_SNI = ""  # opt-in only: a second SNI weakens hostname verification
 TEMPLATES_ENDPOINT = "/api/v1/project-templates"
 AUTH_ENDPOINT = "/api/v1/auth"
+
+
+def _load_root_dotenv() -> None:
+    env_file = REPO_ROOT / ".env"
+    if not env_file.is_file():
+        return
+    for raw in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, val = line.split("=", 1)
+        key, val = key.strip(), val.strip().strip("'").strip('"')
+        if val and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) and key not in os.environ:
+            os.environ[key] = val
 
 # Optional connection overrides set by --connect-ip / --insecure. They let the
 # post-deploy check talk to a new VM by IP (keeping the real Host header and SNI)
@@ -170,8 +189,8 @@ def verify_taiga_admin(
     if not api_ready:
         if saw_forbidden:
             print(
-                "[warn] Cloud Run service returned HTTP 403 Forbidden (public invoker IAM / --no-invoker-iam-check "
-                "requires roles/run.admin on legacy-gcp-project). Skipping Taiga Admin verification until public invoker is enabled."
+                "[warn] Cloud Run service returned HTTP 403 Forbidden (public invoker IAM not enabled yet). "
+                "Skipping Taiga Admin verification until public invoker is enabled."
             )
             return 0
         print(
@@ -210,14 +229,19 @@ def verify_taiga_admin(
 
 
 def main() -> None:
+    _load_root_dotenv()
+    default_url = (
+        os.environ.get("TAIGA_URL")
+        or (f"https://{os.environ['TAIGA_DOMAIN']}" if os.environ.get("TAIGA_DOMAIN") else DEFAULT_TAIGA_URL)
+    )
     parser = argparse.ArgumentParser(
         description="Idempotently verify the Taiga API and initial admin account readiness."
     )
     parser.add_argument(
         "--taiga-url",
         type=str,
-        default=os.environ.get("TAIGA_URL", DEFAULT_TAIGA_URL),
-        help=f"Canonical Taiga URL (default: {DEFAULT_TAIGA_URL})",
+        default=default_url,
+        help="Canonical Taiga URL (defaults to $TAIGA_URL or https://$TAIGA_DOMAIN).",
     )
     parser.add_argument(
         "--username",
@@ -228,8 +252,8 @@ def main() -> None:
     parser.add_argument(
         "--email",
         type=str,
-        default=os.environ.get("TAIGA_ADMIN_EMAIL", DEFAULT_ADMIN_EMAIL),
-        help=f"Taiga Admin email (default: {DEFAULT_ADMIN_EMAIL}).",
+        default=os.environ.get("TAIGA_ADMIN_EMAIL") or os.environ.get("ACME_EMAIL", DEFAULT_ADMIN_EMAIL),
+        help="Taiga Admin email (defaults to $TAIGA_ADMIN_EMAIL).",
     )
     parser.add_argument(
         "--fallback-sni",

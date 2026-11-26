@@ -1,27 +1,29 @@
 # Cloud Architecture
 
-Everything is on free tiers except the VM's IPv4 address (~US$3.60/month). DNS for `example.com` is on
-**Cloudflare** (DNS-only records, managed by hand).
+Everything is on free tiers except the VM's IPv4 address (~US$3.60/month). DNS for `$ROOT_DOMAIN` is on
+**Cloudflare** (DNS-only records, managed by hand). Private domains, emails, Cloud Run URLs, and GCP project/bucket
+names live in the gitignored root [`.env`](../.env.example) and are synced to GitHub Secrets via
+[`cloud/scripts/sync_github_secrets.py`](../cloud/scripts/sync_github_secrets.py).
 
 ```mermaid
 flowchart LR
     U[Visitors] --> CF[Cloudflare DNS]
-    CF -->|example.com, www, me, cases| V[Vercel]
-    CF -->|blog, taiga| E[edge Caddy on GCE e2-micro personal-host]
+    CF -->|"ROOT_DOMAIN, www, me, cases"| V[Vercel]
+    CF -->|"BLOG_DOMAIN, TAIGA_DOMAIN"| E[edge Caddy on GCE e2-micro personal-host]
     E -->|blog-ghost:2368| G[Ghost 5.130]
     G --> M[(MySQL 8.0, local)]
     E -->|https run.app| R[Cloud Run: taiga]
     R --> N[(Neon Postgres 15, AWS us-east-2)]
-    R --> B[(GCS my-taiga-media)]
-    E -.nightly restic.-> K[(GCS my-infra-backups)]
+    R --> B[(GCS TAIGA_MEDIA_BUCKET)]
+    E -.nightly restic.-> K[(GCS BACKUP_BUCKET)]
 ```
 
 | Domain | Runs on | Code |
 | :--- | :--- | :--- |
-| `example.com`, `www` | Vercel, Git integration on `vitorecomp/nobuffer-site` (static `build/`) | app repo `vercel.json` |
+| `$ROOT_DOMAIN`, `www` | Vercel, Git integration on `vitorecomp/nobuffer-site` (static `build/`) | app repo `vercel.json` |
 | `me.`, `cases.` | Vercel, Git integration on `vitorecomp/personal-portifolio` (static export `out/`) | app repo `vercel.json` |
-| `blog.` | GCE e2-micro `personal-host` (`my-gcp-project`, us-central1): edge Caddy → Ghost → local MySQL | [`cloud/edge`](../cloud/edge), [`cloud/personal-blog`](../cloud/personal-blog) |
-| `taiga.` | Cloud Run `taiga` (1 vCPU / 512 MiB, 0..1 instances), proxied by the edge Caddy; Neon database; uploads in GCS | [`cloud/taiga`](../cloud/taiga) |
+| `blog.` (`$BLOG_DOMAIN`) | GCE e2-micro `personal-host` (`$GCP_PROJECT_ID`, us-central1): edge Caddy → Ghost → local MySQL | [`cloud/edge`](../cloud/edge), [`cloud/personal-blog`](../cloud/personal-blog) |
+| `taiga.` (`$TAIGA_DOMAIN`) | Cloud Run `taiga` (1 vCPU / 512 MiB, 0..1 instances), proxied by the edge Caddy; Neon database; uploads in GCS | [`cloud/taiga`](../cloud/taiga) |
 
 ## Components
 
@@ -31,14 +33,14 @@ flowchart LR
   `edge` and `personal-blog` compose stacks. It builds nothing: images are built on GitHub runners, and Taiga is
   deployed to Cloud Run from GitHub Actions via Workload Identity Federation (`github-deployer`, no keys anywhere).
 - **Edge Caddy** ([`cloud/edge`](../cloud/edge)): only container publishing 80/443; Let's Encrypt certificates
-  (persisted in `edge_caddy-data`); per-site TLS mode in its `.env`.
+  (persisted in `edge_caddy-data`); hostnames, upstream URL, and per-site TLS mode live in its `.env`.
 - **Ghost** ([`cloud/personal-blog`](../cloud/personal-blog)): image from `vitorecomp/personal-blog`, built in CI and pulled from GHCR (digest-pinned);
   MySQL 8.0 tuned for 1 GB RAM; content volume `personal-blog_ghost-content`.
 - **Taiga on Cloud Run** ([`cloud/taiga`](../cloud/taiga)): image in Artifact Registry (only the newest kept),
-  `TAIGA_SECRET_KEY` / DB password in Secret Manager, uploads mounted from `gs://my-taiga-media`, migrations
+  `TAIGA_SECRET_KEY` / DB password in Secret Manager, uploads mounted from `gs://$TAIGA_MEDIA_BUCKET`, migrations
   run from the GitHub runner at deploy time (instances skip them, so cold starts stay short). Taiga 6.10 needs Postgres ≤ 15.
 - **Neon**: managed Postgres 15 (free plan; compute scales to zero, the container health check never touches it).
-- **Backups** ([backup-restore.md](./backup-restore.md)): daily restic snapshots to `gs://my-infra-backups`
+- **Backups** ([backup-restore.md](./backup-restore.md)): daily restic snapshots to `gs://$BACKUP_BUCKET`
   (blog MySQL + content; Taiga Neon dump + media bucket mirror + edge certificates).
 - **Spare OCI VM** ([`cloud/infra/envs/oci-blog`](../cloud/infra/envs/oci-blog)): Always Free A1 in `sa-saopaulo-1`,
   compartment `vitorecomp`; no capacity yet, a retry loop keeps trying (`oci-blog-retry.service` on the VM, see [vm-provisioning.md](./vm-provisioning.md#oci-capacity-retry-loop-on-the-vm)).

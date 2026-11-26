@@ -4,31 +4,30 @@ The GCE VM `personal-host` backs up both stacks with [`cloud/scripts/backup_stac
 shipped to `/opt/stacks/.ops/` by `deploy_stack.py` and run daily (03:17 UTC ± 15 min) by the
 `stack-backup@<stack>.timer` unit that `bootstrap_vm.py` installs.
 
-All stacks write to one GCS bucket, **`gs://my-infra-backups`** (project `my-gcp-project`,
-us-central1, inside the 5 GB free tier), one restic repository per stack. VMs authenticate with HMAC keys
+All stacks write to one GCS bucket, **`gs://$BACKUP_BUCKET`** (project `$GCP_PROJECT_ID`,
+`us-central1`, inside the 5 GB free tier), one restic repository per stack. VMs authenticate with HMAC keys
 of the `stack-backup-writer` service account (S3-compatible API), one key per VM.
 
 | Stack | VM | What is backed up | restic repository |
 | :--- | :--- | :--- | :--- |
-| `personal-blog` | GCE e2-micro | `mysqldump` of the local `ghost` MySQL, volume `personal-blog_ghost-content`, `.env` | `s3:https://storage.googleapis.com/my-infra-backups/personal-blog` |
-| `taiga` | runs on Cloud Run; backed up from the VM | `pg_dump -Fc` of the **Neon** `taiga` database (`postgres:15` client), mirror of `gs://my-taiga-media`, volume `edge_caddy-data`, `.env` | `s3:https://storage.googleapis.com/my-infra-backups/taiga` |
+| `personal-blog` | GCE e2-micro | `mysqldump` of the local `ghost` MySQL, volume `personal-blog_ghost-content`, `.env` | `s3:https://storage.googleapis.com/<BACKUP_BUCKET>/personal-blog` |
+| `taiga` | runs on Cloud Run; backed up from the VM | `pg_dump -Fc` of the **Neon** `taiga` database (`postgres:15` client), mirror of `gs://$TAIGA_MEDIA_BUCKET`, volume `edge_caddy-data`, `.env` | `s3:https://storage.googleapis.com/<BACKUP_BUCKET>/taiga` |
 
 - restic encrypts everything client-side with `RESTIC_PASSWORD`, which lives in the VM `.env` **and in your
   password manager** (the `.env` copy inside the snapshots is useless without it).
 - Retention: 7 daily, 4 weekly, 6 monthly; `restic check` every Sunday.
 - The newest 7 dumps also stay on the VM in `/var/backups/stacks/<stack>/` for quick restores.
-- The one-off migration exports and archives (final dumps + content of the old GCP stack, restorable with `mysql` / `pg_restore`) are kept under
-  `gs://my-infra-backups/migration/<stack>/export-<timestamp>/` (outside the restic repositories).
+- The one-off migration exports and archives (final dumps + content of the legacy GCP stack, restorable with `mysql` / `pg_restore`) are kept under
+  `gs://$BACKUP_BUCKET/migration/<stack>/export-<timestamp>/` (outside the restic repositories).
 - Optional: set `BACKUP_PING_URL` (e.g. healthchecks.io) in the `.env` to get alerted when a daily run is missed.
 
 ## Setup (once per VM)
 
-1. Create an HMAC key for the VM and set `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in `/opt/stacks/<stack>/.env`
-   (`RESTIC_REPOSITORY` and `AWS_DEFAULT_REGION=us-central1` already come from `.env.example`):
+1. Create an HMAC key for the VM and set `RESTIC_REPOSITORY`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY` in `/opt/stacks/<stack>/.env`:
 
    ```bash
-   gcloud storage hmac create stack-backup-writer@my-gcp-project.iam.gserviceaccount.com \
-     --project my-gcp-project      # prints the access ID and the secret ONCE
+   gcloud storage hmac create "stack-backup-writer@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+     --project "$GCP_PROJECT_ID"      # prints the access ID and the secret ONCE
    ```
 2. Initialise and test:
 
@@ -60,7 +59,7 @@ cd /opt/stacks/taiga && set -a && . ./.env && set +a
 docker run --rm -i -e PGPASSWORD="$TAIGA_DB_PASSWORD" -e PGSSLMODE="${TAIGA_DB_SSLMODE:-require}" postgres:15.19-alpine \
   pg_restore -h "$TAIGA_DB_HOST" -p "${TAIGA_DB_PORT:-5432}" -U "$TAIGA_DB_USER" -d "$TAIGA_DB_NAME" \
   --clean --if-exists --no-owner --no-acl < /var/backups/stacks/taiga/taiga-db-<ts>.dump
-# media: gcloud storage rsync <restored taiga-media dir> gs://my-taiga-media   (from a workstation)
+# media: gcloud storage rsync <restored taiga-media dir> "gs://$TAIGA_MEDIA_BUCKET"   (from a workstation)
 ```
 
 ### Full restore from restic (new VM or lost disk)

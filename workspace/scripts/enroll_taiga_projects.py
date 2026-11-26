@@ -32,12 +32,13 @@ import urllib.request
 
 USER = "vitorecomp"
 REPO_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = REPO_ROOT.parent
 DEFAULT_JSON_PATH = REPO_ROOT / "documentation" / "repo_stats.json"
 DEFAULT_TAIGA_URL = "https://taiga.example.com"
 DEFAULT_ADMIN_USER = "admin"
-DEFAULT_ADMIN_EMAIL = ""  # optional login fallback; set TAIGA_ADMIN_EMAIL in the Taiga skill .env
+DEFAULT_ADMIN_EMAIL = ""  # optional login fallback; set TAIGA_ADMIN_EMAIL in .env
 DEFAULT_FALLBACK_SNI = ""  # opt-in only: a second SNI weakens hostname verification
-TAIGA_SKILL_CLI = REPO_ROOT.parent / ".agents" / "skills" / "taiga" / "scripts" / "taiga_cli.py"
+TAIGA_SKILL_CLI = PROJECT_ROOT / ".agents" / "skills" / "taiga" / "scripts" / "taiga_cli.py"
 DEFAULT_TEMPLATE = "scrum"
 
 
@@ -70,7 +71,9 @@ def _request_taiga_api(
     timeout: float = 25.0,
 ) -> tuple[int, object]:
     parsed = urllib.parse.urlparse(taiga_url)
-    host = parsed.hostname or "taiga.example.com"
+    host = parsed.hostname or ""
+    if not host or host == "taiga.example.com":
+        raise SystemExit("[error] Set TAIGA_URL or TAIGA_DOMAIN in .env (see .env.example)")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
 
     headers: dict[str, str] = {
@@ -323,14 +326,14 @@ def build_project_payload(
 
 
 def _load_taiga_env(argv: list[str]) -> None:
-    """Loads the Taiga skill .env (same file and rules as taiga_cli.py: --env-file, $TAIGA_ENV_FILE,
-    else .agents/skills/taiga/.env; real environment variables win)."""
+    """Loads the Taiga skill .env and repo root .env (real environment variables win)."""
     spec = importlib.util.spec_from_file_location("taiga_skill_cli", TAIGA_SKILL_CLI)
     if spec is None or spec.loader is None:
         return
     cli = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cli)
     cli.load_env_file(cli.resolve_env_file(argv))
+    cli.load_env_file(PROJECT_ROOT / ".env")
 
 
 def _resolve_password_from_secret_manager(
@@ -338,7 +341,9 @@ def _resolve_password_from_secret_manager(
     secret: str = "",
 ) -> str:
     """Falls back to the Taiga admin password stored in Secret Manager (gcloud must be authenticated)."""
-    project_id = project_id or os.environ.get("TAIGA_SECRET_PROJECT", "my-gcp-project")
+    project_id = project_id or os.environ.get("TAIGA_SECRET_PROJECT") or os.environ.get("GCP_PROJECT_ID", "")
+    if not project_id:
+        return ""
     secret = secret or os.environ.get("TAIGA_SECRET_NAME", "taiga-admin-password")
     try:
         res = subprocess.run(
@@ -762,8 +767,9 @@ def main() -> None:
     parser.add_argument(
         "--taiga-url",
         type=str,
-        default=os.environ.get("TAIGA_URL", DEFAULT_TAIGA_URL),
-        help=f"Base URL of the Taiga server (default: {DEFAULT_TAIGA_URL}).",
+        default=os.environ.get("TAIGA_URL")
+        or (f"https://{os.environ['TAIGA_DOMAIN']}" if os.environ.get("TAIGA_DOMAIN") else DEFAULT_TAIGA_URL),
+        help="Base URL of the Taiga server (defaults to $TAIGA_URL or https://$TAIGA_DOMAIN).",
     )
     parser.add_argument(
         "--username",

@@ -39,7 +39,7 @@ output "blog_restic_repository" {
 }
 
 output "taiga_run_url" {
-  description = "Cloud Run URL of the taiga service (edge Caddy proxies taiga.example.com here)"
+  description = "Cloud Run URL of the taiga service (edge Caddy proxies TAIGA_DOMAIN here)"
   value       = google_cloud_run_v2_service.taiga.uri
 }
 

@@ -53,8 +53,9 @@ PLACEHOLDERS = ("__generate__", "__required__")
 class Stack:
     name: str
     path: Path
-    domain: str
-    health_path: str
+    domain: str | None
+    domain_env: str | None
+    health_path: str | None
     required_files: list[str]
     post_deploy: dict[str, str] | None
     edge_tls_key: str | None
@@ -63,6 +64,23 @@ class Stack:
     @property
     def has_compose(self) -> bool:
         return (self.path / "compose.yml").is_file()
+
+
+def load_root_dotenv() -> None:
+    """Loads defaults from the gitignored root .env when present (process env wins)."""
+    env_file = REPO_ROOT / ".env"
+    if not env_file.is_file():
+        return
+    for raw in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, val = line.split("=", 1)
+        key, val = key.strip(), val.strip().strip("'").strip('"')
+        if val and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) and key not in os.environ:
+            os.environ[key] = val
 
 
 def available_stacks() -> list[str]:
@@ -75,10 +93,18 @@ def load_stack(name: str) -> Stack:
     if not meta_file.is_file():
         raise SystemExit(f"[error] {meta_file} not found (available: {', '.join(available_stacks())})")
     meta = json.loads(meta_file.read_text())
+    domain_env = meta.get("domain_env")
+    domain = (
+        meta.get("domain")
+        or (os.environ.get(domain_env, "").strip() if domain_env else "")
+        or os.environ.get("STACK_DOMAIN", "").strip()
+        or None
+    )
     return Stack(
         name=meta["name"],
         path=path,
-        domain=meta.get("domain"),
+        domain=domain,
+        domain_env=domain_env,
         health_path=meta.get("health_path"),
         required_files=list(meta.get("required_files", [])),
         post_deploy=meta.get("post_deploy"),
@@ -436,6 +462,15 @@ def deploy(args: argparse.Namespace) -> int:
     stack = load_stack(args.stack)
     if not validate_stack_files(stack):
         return 1
+    if stack.domain_env and not stack.domain:
+        if args.dry_run:
+            stack.domain = f"{stack.name}.example.com"
+        elif not args.skip_health_check or not args.skip_seed:
+            print(
+                f"[error] Set {stack.domain_env} (in root .env or environment) for stack {stack.name!r}",
+                file=sys.stderr,
+            )
+            return 1
 
     registry_token = os.environ.get("REGISTRY_TOKEN", "")
     registry_user = os.environ.get("REGISTRY_USER", "") or None
@@ -542,6 +577,7 @@ def deploy(args: argparse.Namespace) -> int:
 
 def main() -> None:
     sys.stdout.reconfigure(line_buffering=True)  # keep our lines ordered with child process output
+    load_root_dotenv()
     parser = argparse.ArgumentParser(description="Deploy a cloud/<stack> docker compose stack to a VM over SSH.")
     parser.add_argument("--stack", required=True, choices=available_stacks(), help="Stack directory under cloud/")
     parser.add_argument(

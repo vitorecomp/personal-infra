@@ -1,10 +1,10 @@
-# Ghost 5 blog stack for the GCP VM (blog.example.com).
+# Ghost 5 blog stack for the GCP VM ($BLOG_DOMAIN).
 #
 # TLS and ports are handled by the shared edge stack (cloud/edge); Ghost joins the `edge`
 # network as `blog-ghost`. MySQL runs locally on a private network, tuned for the e2-micro
 # (1 GB RAM). The Ghost image is built from github.com/vitorecomp/personal-blog on the GitHub
 # runner (deploy-blog.yml), pushed to GHCR and pinned by digest in GHOST_IMAGE; the VM only
-# pulls it. `.env` (mode 0600) holds the secrets; CI only writes GHOST_IMAGE into it.
+# pulls it. `.env` (mode 0600) holds the secrets; CI writes GHOST_IMAGE and STACK_DOMAIN into it.
 #
 # Rules: every volume has an explicit name; never run `docker compose down -v`.
 name: personal-blog
@@ -17,7 +17,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      url: https://${STACK_DOMAIN:-blog.example.com}
+      url: https://${STACK_DOMAIN:?set STACK_DOMAIN in .env}
       database__client: mysql
       database__connection__host: db
       database__connection__port: "3306"

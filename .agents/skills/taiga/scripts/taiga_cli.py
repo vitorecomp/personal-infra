@@ -20,9 +20,11 @@ import urllib.parse
 
 DEFAULT_TAIGA_URL = "https://taiga.example.com"
 DEFAULT_ADMIN_USER = "admin"
-DEFAULT_ADMIN_EMAIL = ""  # optional login fallback; set TAIGA_ADMIN_EMAIL in the skill .env
+DEFAULT_ADMIN_EMAIL = ""  # optional login fallback; set TAIGA_ADMIN_EMAIL in .env
 DEFAULT_FALLBACK_SNI = ""  # opt-in only: a second SNI weakens hostname verification
 SKILL_DIR = Path(__file__).resolve().parent.parent
+REPO_ROOT = SKILL_DIR.parent.parent.parent
+ROOT_ENV_FILE = REPO_ROOT / ".env"
 DEFAULT_ENV_FILE = SKILL_DIR / ".env"  # gitignored; template: .env.example next to SKILL.md
 TOKEN_CACHE_PATH = Path.home() / ".cache" / "taiga_cli" / "token.json"
 
@@ -90,7 +92,9 @@ def _resolve_password_from_secret_manager(
     secret: str = "",
 ) -> str:
     """Falls back to the Taiga admin password stored in Secret Manager (gcloud must be authenticated)."""
-    project_id = project_id or os.environ.get("TAIGA_SECRET_PROJECT", "my-gcp-project")
+    project_id = project_id or os.environ.get("TAIGA_SECRET_PROJECT") or os.environ.get("GCP_PROJECT_ID", "")
+    if not project_id:
+        return ""
     secret = secret or os.environ.get("TAIGA_SECRET_NAME", "taiga-admin-password")
     try:
         res = subprocess.run(
@@ -174,7 +178,9 @@ class TaigaClient:
         timeout: float = 25.0,
     ) -> tuple[int, Any]:
         parsed = urllib.parse.urlparse(self.taiga_url)
-        host = parsed.hostname or "taiga.example.com"
+        host = parsed.hostname or ""
+        if not host or host == "taiga.example.com":
+            raise SystemExit("[error] Set TAIGA_URL or TAIGA_DOMAIN in .env (see .env.example)")
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
 
         headers: dict[str, str] = {
@@ -1311,8 +1317,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--taiga-url",
-        default=os.environ.get("TAIGA_URL", DEFAULT_TAIGA_URL),
-        help=f"Base URL of the Taiga server (default: {DEFAULT_TAIGA_URL}).",
+        default=os.environ.get("TAIGA_URL")
+        or (f"https://{os.environ['TAIGA_DOMAIN']}" if os.environ.get("TAIGA_DOMAIN") else DEFAULT_TAIGA_URL),
+        help="Base URL of the Taiga server (defaults to $TAIGA_URL or https://$TAIGA_DOMAIN).",
     )
     parser.add_argument(
         "--username",
@@ -1627,8 +1634,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    # Load the skill .env before building the parser: argparse defaults read os.environ.
+    # Load the skill .env and repo root .env before building the parser: argparse defaults read os.environ.
     load_env_file(resolve_env_file(sys.argv[1:]))
+    load_env_file(ROOT_ENV_FILE)
     parser = build_parser()
     args = parser.parse_args()
 

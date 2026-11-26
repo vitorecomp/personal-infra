@@ -191,6 +191,10 @@ terraform.tfstate.d/
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
+*.tfbackend
+!*.tfbackend.example
+backend.hcl
+!backend.hcl.example
 tfplan
 *.tfplan
 crash.log

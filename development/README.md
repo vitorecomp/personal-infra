@@ -195,15 +195,17 @@ All supported keys in `development/.env`:
 | **`GITHUB_ENV`** | `gpu` | Local `gh --env` | GitHub Environment holding GPU stack secrets and variables. |
 | **`GH_TOKEN`** | *(empty)* | Local `gh` auth | Optional token override when `gh auth login` is not already active (also falls back to root `.env` `GH_TOKEN`/`GITHUB_TOKEN`). |
 | **`GPU_RUNNER`** | `gcp-gpu` | **Repo Variable** `GPU_RUNNER` + runner label | Selects which runner pool runs `deploy-gpu-machine.yml` (`gcp-gpu`, `azure-gpu`, `on-prem-gpu`). |
-| **`GPU_RUNNER_LABELS`** | *(empty)* | **Repo Variable** `GPU_RUNNER_LABELS` *(if set)* | Optional full JSON array override for `runs-on:` (e.g. `["self-hosted","linux","x64","gcp-gpu"]`). |
-| **`RUNNER_TOKEN`** / **`RUNNER_PAT`** | *(empty)* | Runner registration only | Leave empty—`setup.sh` automatically mints short-lived registration/removal tokens via `gh api`. |
+| **`GPU_RUNNER_LABELS`** | `["self-hosted","linux","x64","gcp-gpu"]` | **Repo Variable** `GPU_RUNNER_LABELS` | Full JSON array synced for `runs-on:`. |
+| **`RUNNER_NAME`** / **`RUNNER_LABELS`** | `gcp-gpu-controller` / `self-hosted,linux,x64,gcp-gpu` | Runner registration | Runner name and labels registered on the controller VM. |
+| **`RUNNER_TOKEN`** / **`RUNNER_TOKEN_EXPIRES_AT`** | `__generate__` | Runner registration + saved in `.env` | `setup.sh` mints a registration token via `gh api`, writes `RUNNER_TOKEN` + `RUNNER_TOKEN_EXPIRES_AT` into `development/.env`, and refreshes it automatically whenever expired. |
+| **`PROJECT_ID`** / **`ZONE`** / **`INSTANCE_NAME`** | *(auto-resolved)* | Local `gcloud compute ssh` + saved in `.env` | Auto-resolved from the active GCP Terraform workspace / `gcloud` and written into `development/.env`. |
 | **`LITELLM_MASTER_KEY`** | `__generate__` | **`gpu` Secret** `LITELLM_MASTER_KEY` | Master Bearer key for `litellm` and `deepseek-harness`. When left as `__generate__` (or empty), `setup.sh` generates a cryptographically random `sk-...` key once, **saves it back into `development/.env` (`0600`)**, and uploads it to GitHub Secrets. |
 | **`HF_TOKEN`** | *(empty)* | **`gpu` Secret** `HF_TOKEN` *(if set)* | Optional Hugging Face read token to avoid rate limits pulling `deepseek-ai/DeepSeek-V4.1-Flash`. |
 | **`ENABLE_REVERSE_TUNNELS`** | `false` | **`gpu` Variable** `ENABLE_REVERSE_TUNNELS` | `true` starts `litellm-tunnel` + `deepseek-harness-tunnel`; `false` starts only `ray-server`, `litellm`, and `deepseek-harness`. |
 | **`TUNNEL_SSH_HOST`** | *(empty)* | **`gpu` Variable** `TUNNEL_SSH_HOST` | Bastion/workstation hostname or IP receiving the reverse SSH tunnels (required when `ENABLE_REVERSE_TUNNELS=true`). |
 | **`TUNNEL_SSH_PORT`** | `22` | **`gpu` Variable** `TUNNEL_SSH_PORT` | SSH port on `TUNNEL_SSH_HOST`. |
 | **`TUNNEL_SSH_USER`** | *(empty)* | **`gpu` Variable** `TUNNEL_SSH_USER` | SSH username on `TUNNEL_SSH_HOST` (required when `ENABLE_REVERSE_TUNNELS=true`). |
-| **`TUNNEL_SSH_KEY_FILE`** | *(empty)* | **`gpu` Secret** `TUNNEL_SSH_PRIVATE_KEY` | **Local workstation path** (e.g. `~/.ssh/gpu_tunnel_ed25519`) whose file contents `setup.sh` uploads as GitHub Secret `TUNNEL_SSH_PRIVATE_KEY`. |
+| **`TUNNEL_SSH_KEY_FILE`** | `__generate__` | **`gpu` Secret** `TUNNEL_SSH_PRIVATE_KEY` | When left as `__generate__`, `setup.sh` creates `~/.ssh/gpu_tunnel_ed25519` (+ `.pub`), saves its path in `development/.env`, and uploads the private key as GitHub Secret `TUNNEL_SSH_PRIVATE_KEY`. |
 | **`TUNNEL_KNOWN_HOSTS`** | *(empty)* | **`gpu` Variable** `TUNNEL_KNOWN_HOSTS` | Pinned `ssh-keyscan` line(s) **or** a local file path (if the value points to an existing local file, `setup.sh` reads and uploads its contents). |
 | **`TUNNEL_BIND_ADDRESS`** | `127.0.0.1` | **`gpu` Variable** `TUNNEL_BIND_ADDRESS` | Address bound on `TUNNEL_SSH_HOST` (`127.0.0.1` or `0.0.0.0`). |
 | **`REMOTE_LITELLM_PORT`** | `4000` | **`gpu` Variable** `REMOTE_LITELLM_PORT` | Remote port opened on `TUNNEL_SSH_HOST` forwarding to `litellm:4000`. |

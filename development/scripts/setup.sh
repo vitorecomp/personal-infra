@@ -234,6 +234,7 @@ INSTANCE_NAME="${CLI_INSTANCE_NAME:-${CALLER_INSTANCE_NAME:-${DOTENV[INSTANCE_NA
 REPO_SPEC="${CLI_REPO_SPEC:-${CALLER_REPO_SPEC:-${DOTENV[GITHUB_REPO]:-vitorecomp/personal-infra}}}"
 GITHUB_ENV_NAME="${CLI_GITHUB_ENV:-$(env_or_dotenv GITHUB_ENV gpu)}"
 RUNNER_TOKEN_VAL="${CLI_RUNNER_TOKEN:-${CALLER_RUNNER_TOKEN:-${DOTENV[RUNNER_TOKEN]:-}}}"
+RUNNER_TOKEN_EXPIRES_VAL="${DOTENV[RUNNER_TOKEN_EXPIRES_AT]:-}"
 RUNNER_PAT_VAL="${CLI_RUNNER_PAT:-${CALLER_RUNNER_PAT:-${DOTENV[RUNNER_PAT]:-}}}"
 RUNNER_NAME="${CLI_RUNNER_NAME:-${CALLER_RUNNER_NAME:-${DOTENV[RUNNER_NAME]:-}}}"
 RUNNER_LABELS="${CLI_RUNNER_LABELS:-${CALLER_RUNNER_LABELS:-${DOTENV[RUNNER_LABELS]:-}}}"
@@ -333,7 +334,12 @@ ENABLE_TUNNELS_VAL="$(env_or_dotenv ENABLE_REVERSE_TUNNELS "false")"
 TUNNEL_HOST_VAL="$(env_or_dotenv TUNNEL_SSH_HOST "")"
 TUNNEL_PORT_VAL="$(env_or_dotenv TUNNEL_SSH_PORT "22")"
 TUNNEL_USER_VAL="$(env_or_dotenv TUNNEL_SSH_USER "")"
-TUNNEL_KEY_FILE_VAL="$(expand_tilde "$(env_or_dotenv TUNNEL_SSH_KEY_FILE "")")"
+TUNNEL_KEY_RAW="$(env_or_dotenv TUNNEL_SSH_KEY_FILE "__generate__")"
+if [[ "$TUNNEL_KEY_RAW" == "__generate__" ]]; then
+  TUNNEL_KEY_FILE_VAL="$HOME/.ssh/gpu_tunnel_ed25519"
+else
+  TUNNEL_KEY_FILE_VAL="$(expand_tilde "$TUNNEL_KEY_RAW")"
+fi
 TUNNEL_PRIV_KEY_INLINE="$(env_or_dotenv TUNNEL_SSH_PRIVATE_KEY "")"
 TUNNEL_KH_RAW="$(env_or_dotenv TUNNEL_KNOWN_HOSTS "")"
 TUNNEL_BIND_VAL="$(env_or_dotenv TUNNEL_BIND_ADDRESS "127.0.0.1")"
@@ -381,6 +387,44 @@ os.chmod(path, 0o600)
 PY
 }
 
+# Returns 0 if a runner registration token is present, not `__generate__`, and valid for >=5 min.
+runner_token_is_fresh() {
+  local tok="$1" exp="$2"
+  [[ -n "$tok" && "$tok" != "__generate__" ]] || return 1
+  # Explicit CLI `--token` without an expiry timestamp is trusted as-is.
+  if [[ -n "$CLI_RUNNER_TOKEN" || -n "$CALLER_RUNNER_TOKEN" ]]; then
+    return 0
+  fi
+  [[ -n "$exp" ]] || return 1
+  python3 - "$exp" <<'PY' >/dev/null 2>&1
+import datetime as dt, sys
+raw = sys.argv[1].strip()
+exp = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+now = dt.datetime.now(dt.timezone.utc)
+sys.exit(0 if (exp - now).total_seconds() > 300 else 1)
+PY
+}
+
+# Mints a fresh registration token via `gh api` and persists RUNNER_TOKEN + RUNNER_TOKEN_EXPIRES_AT in .env.
+ensure_fresh_runner_registration_token() {
+  [[ -z "$RUNNER_PAT_VAL" && -n "$REPO_PATH" ]] || return 0
+  if runner_token_is_fresh "$RUNNER_TOKEN_VAL" "$RUNNER_TOKEN_EXPIRES_VAL"; then
+    return 0
+  fi
+  command -v gh >/dev/null 2>&1 || return 0
+  ensure_gh_auth
+  echo "[gh] Minting fresh runner registration token for ${REPO_PATH}..."
+  local resp
+  resp="$(gh api -X POST "repos/${REPO_PATH}/actions/runners/registration-token")"
+  RUNNER_TOKEN_VAL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["token"])' "$resp")"
+  RUNNER_TOKEN_EXPIRES_VAL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("expires_at",""))' "$resp")"
+  if [[ -f "$ENV_FILE" && -n "$RUNNER_TOKEN_VAL" ]]; then
+    persist_key_in_dotenv "$ENV_FILE" "RUNNER_TOKEN" "$RUNNER_TOKEN_VAL"
+    [[ -n "$RUNNER_TOKEN_EXPIRES_VAL" ]] && persist_key_in_dotenv "$ENV_FILE" "RUNNER_TOKEN_EXPIRES_AT" "$RUNNER_TOKEN_EXPIRES_VAL"
+    echo "[gh] Saved RUNNER_TOKEN (expires ${RUNNER_TOKEN_EXPIRES_VAL}) to $ENV_FILE (mode 0600)."
+  fi
+}
+
 sync_github_settings() {
   if [[ -z "$REPO_PATH" ]]; then
     echo "[error] Cannot sync GitHub variables/secrets without owner/repo path (got '$REPO_SPEC')." >&2
@@ -388,6 +432,19 @@ sync_github_settings() {
   fi
 
   ensure_gh_auth
+
+  # Auto-generate local reverse-tunnel SSH keypair once when TUNNEL_SSH_KEY_FILE=__generate__ (or default path missing).
+  if [[ "$TUNNEL_KEY_RAW" == "__generate__" || ( "$TUNNEL_KEY_FILE_VAL" == "$HOME/.ssh/gpu_tunnel_ed25519" && ! -f "$TUNNEL_KEY_FILE_VAL" ) ]]; then
+    install -d -m 0700 "$HOME/.ssh"
+    if [[ ! -f "$TUNNEL_KEY_FILE_VAL" ]]; then
+      ssh-keygen -q -t ed25519 -N "" -C "gpu-dev-machine-reverse-tunnel" -f "$TUNNEL_KEY_FILE_VAL"
+      chmod 600 "$TUNNEL_KEY_FILE_VAL"
+      echo "[gh-sync] Generated reverse-tunnel SSH keypair at $TUNNEL_KEY_FILE_VAL (+ .pub)."
+    fi
+    if [[ -f "$ENV_FILE" ]]; then
+      persist_key_in_dotenv "$ENV_FILE" "TUNNEL_SSH_KEY_FILE" "~/.ssh/gpu_tunnel_ed25519"
+    fi
+  fi
 
   if [[ "${ENABLE_TUNNELS_VAL,,}" == "true" ]]; then
     if [[ -z "$TUNNEL_HOST_VAL" || -z "$TUNNEL_USER_VAL" ]]; then
@@ -418,6 +475,17 @@ sync_github_settings() {
       echo "[gh-sync] Generated LITELLM_MASTER_KEY for GitHub Environment '$GITHUB_ENV_NAME'."
     fi
   fi
+
+  # Persist default runner identity & mint/refresh RUNNER_TOKEN in `development/.env`.
+  if [[ -f "$ENV_FILE" ]]; then
+    [[ -z "${DOTENV[RUNNER_NAME]:-}" ]] && persist_key_in_dotenv "$ENV_FILE" "RUNNER_NAME" "$RUNNER_NAME"
+    [[ -z "${DOTENV[RUNNER_LABELS]:-}" ]] && persist_key_in_dotenv "$ENV_FILE" "RUNNER_LABELS" "$RUNNER_LABELS"
+    if [[ -z "$GPU_RUNNER_LABELS_VAL" ]]; then
+      GPU_RUNNER_LABELS_VAL="[\"self-hosted\",\"linux\",\"x64\",\"${GPU_RUNNER_VAL}\"]"
+      persist_key_in_dotenv "$ENV_FILE" "GPU_RUNNER_LABELS" "$GPU_RUNNER_LABELS_VAL"
+    fi
+  fi
+  ensure_fresh_runner_registration_token
 
   # Ensure the target GitHub Environment exists without clobbering existing protection rules.
   if ! gh api "repos/${REPO_PATH}/environments/${GITHUB_ENV_NAME}" >/dev/null 2>&1; then
@@ -513,72 +581,77 @@ GCP_PROJECT=""
 GCP_CTRL_NAME=""
 GCP_CTRL_ZONE=""
 
-if ! $SYNC_GITHUB_ONLY; then
-  if [[ "$PROVIDER" == "gcp" && -z "$HOST_TARGET" ]]; then
-    TRANSPORT="gcloud"
-    INFRA_DIR="$DEV_ROOT/infra/gcp"
-    GCP_PROJECT="${PROJECT_ID:-$(gcloud_config_value project)}"
-    GCP_CTRL_NAME="$INSTANCE_NAME"
-    GCP_CTRL_ZONE="$ZONE"
+if [[ "$PROVIDER" == "gcp" && -z "$HOST_TARGET" ]]; then
+  TRANSPORT="gcloud"
+  INFRA_DIR="$DEV_ROOT/infra/gcp"
+  GCP_PROJECT="${PROJECT_ID:-$(gcloud_config_value project)}"
+  GCP_CTRL_NAME="$INSTANCE_NAME"
+  GCP_CTRL_ZONE="$ZONE"
 
-    tf_bin=()
-    if command -v terraform >/dev/null 2>&1; then
-      tf_bin=(terraform -chdir="$INFRA_DIR")
-    elif command -v mise >/dev/null 2>&1; then
-      tf_bin=(mise exec --cd "$REPO_ROOT" -- terraform -chdir="$INFRA_DIR")
+  tf_bin=()
+  if command -v terraform >/dev/null 2>&1; then
+    tf_bin=(terraform -chdir="$INFRA_DIR")
+  elif command -v mise >/dev/null 2>&1; then
+    tf_bin=(mise exec --cd "$REPO_ROOT" -- terraform -chdir="$INFRA_DIR")
+  fi
+
+  if [[ ${#tf_bin[@]} -gt 0 && -d "$INFRA_DIR/.terraform" ]]; then
+    if [[ -n "$GCP_PROJECT" ]]; then
+      "${tf_bin[@]}" workspace select "$GCP_PROJECT" >/dev/null 2>&1 || true
     fi
-
-    if [[ ${#tf_bin[@]} -gt 0 && -d "$INFRA_DIR/.terraform" ]]; then
-      if [[ -n "$GCP_PROJECT" ]]; then
-        "${tf_bin[@]}" workspace select "$GCP_PROJECT" >/dev/null 2>&1 || true
-      fi
-      [[ -z "$GCP_PROJECT" ]] && GCP_PROJECT="$("${tf_bin[@]}" output -raw project_id 2>/dev/null || true)"
-      [[ -z "$GCP_CTRL_NAME" ]] && GCP_CTRL_NAME="$("${tf_bin[@]}" output -raw controller_name 2>/dev/null || true)"
-      [[ -z "$GCP_CTRL_ZONE" ]] && GCP_CTRL_ZONE="$("${tf_bin[@]}" output -raw controller_zone 2>/dev/null || true)"
-      if [[ -z "$RUNNER_USER" ]]; then
-        RUNNER_USER="$("${tf_bin[@]}" output -raw runner_username 2>/dev/null || true)"
-      fi
+    [[ -z "$GCP_PROJECT" ]] && GCP_PROJECT="$("${tf_bin[@]}" output -raw project_id 2>/dev/null || true)"
+    [[ -z "$GCP_CTRL_NAME" ]] && GCP_CTRL_NAME="$("${tf_bin[@]}" output -raw controller_name 2>/dev/null || true)"
+    [[ -z "$GCP_CTRL_ZONE" ]] && GCP_CTRL_ZONE="$("${tf_bin[@]}" output -raw controller_zone 2>/dev/null || true)"
+    if [[ -z "$RUNNER_USER" ]]; then
+      RUNNER_USER="$("${tf_bin[@]}" output -raw runner_username 2>/dev/null || true)"
     fi
+  fi
 
-    GCP_CTRL_NAME="${GCP_CTRL_NAME:-dev-gpu-controller}"
+  GCP_CTRL_NAME="${GCP_CTRL_NAME:-dev-gpu-controller}"
 
-    if [[ -z "$GCP_CTRL_ZONE" && -n "$GCP_PROJECT" ]] && ! $DRY_RUN && command -v gcloud >/dev/null 2>&1; then
-      GCP_CTRL_ZONE="$(gcloud compute instances list \
-        --project="$GCP_PROJECT" \
-        --filter="name=${GCP_CTRL_NAME}" \
-        --format="value(zone.basename())" 2>/dev/null | head -n 1 || true)"
+  if [[ -z "$GCP_CTRL_ZONE" && -n "$GCP_PROJECT" ]] && ! $DRY_RUN && command -v gcloud >/dev/null 2>&1; then
+    GCP_CTRL_ZONE="$(gcloud compute instances list \
+      --project="$GCP_PROJECT" \
+      --filter="name=${GCP_CTRL_NAME}" \
+      --format="value(zone.basename())" 2>/dev/null | head -n 1 || true)"
+  fi
+
+  # Persist resolved GCP target metadata into `development/.env` when empty.
+  if ! $DRY_RUN && [[ -f "$ENV_FILE" && "$MODE" == "configure" ]]; then
+    [[ -z "${DOTENV[PROJECT_ID]:-}" && -n "$GCP_PROJECT" ]] && persist_key_in_dotenv "$ENV_FILE" "PROJECT_ID" "$GCP_PROJECT"
+    [[ -z "${DOTENV[ZONE]:-}" && -n "$GCP_CTRL_ZONE" ]] && persist_key_in_dotenv "$ENV_FILE" "ZONE" "$GCP_CTRL_ZONE"
+    [[ -z "${DOTENV[INSTANCE_NAME]:-}" && -n "$GCP_CTRL_NAME" ]] && persist_key_in_dotenv "$ENV_FILE" "INSTANCE_NAME" "$GCP_CTRL_NAME"
+  fi
+
+  if ! $SYNC_GITHUB_ONLY && [[ -z "$GCP_PROJECT" || -z "$GCP_CTRL_ZONE" ]]; then
+    if $DRY_RUN; then
+      GCP_PROJECT="${GCP_PROJECT:-<gcloud-active-project>}"
+      GCP_CTRL_ZONE="${GCP_CTRL_ZONE:-europe-west4-a}"
+    else
+      echo "[error] Could not resolve GCP project or controller VM zone (project='${GCP_PROJECT:-<unset>}', instance='${GCP_CTRL_NAME}')." >&2
+      echo "[error] Deploy first with './development/scripts/deploy.sh --provider=gcp' or pass --project / --zone." >&2
+      exit 1
     fi
+  fi
+elif ! $SYNC_GITHUB_ONLY; then
+  if [[ -n "$PROVIDER" ]]; then
+    INFRA_DIR="$DEV_ROOT/infra/$PROVIDER"
+    [[ -z "$SSH_KEY_FILE" && -f "$INFRA_DIR/ssh-key" ]] && SSH_KEY_FILE="$INFRA_DIR/ssh-key"
+    [[ -z "$KNOWN_HOSTS_FILE" && -f "$INFRA_DIR/known_hosts" ]] && KNOWN_HOSTS_FILE="$INFRA_DIR/known_hosts"
 
-    if [[ -z "$GCP_PROJECT" || -z "$GCP_CTRL_ZONE" ]]; then
-      if $DRY_RUN; then
-        GCP_PROJECT="${GCP_PROJECT:-<gcloud-active-project>}"
-        GCP_CTRL_ZONE="${GCP_CTRL_ZONE:-europe-west4-a}"
-      else
-        echo "[error] Could not resolve GCP project or controller VM zone (project='${GCP_PROJECT:-<unset>}', instance='${GCP_CTRL_NAME}')." >&2
-        echo "[error] Deploy first with './development/scripts/deploy.sh --provider=gcp' or pass --project / --zone." >&2
-        exit 1
-      fi
+    if [[ -z "$HOST_TARGET" && -d "$INFRA_DIR/.terraform" ]] && command -v terraform >/dev/null 2>&1; then
+      host_ip="$(terraform -chdir="$INFRA_DIR" output -raw controller_external_ip 2>/dev/null || terraform -chdir="$INFRA_DIR" output -raw external_ip 2>/dev/null || true)"
+      ssh_user="$(terraform -chdir="$INFRA_DIR" output -raw ssh_username 2>/dev/null || true)"
+      [[ -n "$host_ip" && -n "$ssh_user" ]] && HOST_TARGET="${ssh_user}@${host_ip}"
     fi
-  else
-    if [[ -n "$PROVIDER" ]]; then
-      INFRA_DIR="$DEV_ROOT/infra/$PROVIDER"
-      [[ -z "$SSH_KEY_FILE" && -f "$INFRA_DIR/ssh-key" ]] && SSH_KEY_FILE="$INFRA_DIR/ssh-key"
-      [[ -z "$KNOWN_HOSTS_FILE" && -f "$INFRA_DIR/known_hosts" ]] && KNOWN_HOSTS_FILE="$INFRA_DIR/known_hosts"
+  fi
 
-      if [[ -z "$HOST_TARGET" && -d "$INFRA_DIR/.terraform" ]] && command -v terraform >/dev/null 2>&1; then
-        host_ip="$(terraform -chdir="$INFRA_DIR" output -raw controller_external_ip 2>/dev/null || terraform -chdir="$INFRA_DIR" output -raw external_ip 2>/dev/null || true)"
-        ssh_user="$(terraform -chdir="$INFRA_DIR" output -raw ssh_username 2>/dev/null || true)"
-        [[ -n "$host_ip" && -n "$ssh_user" ]] && HOST_TARGET="${ssh_user}@${host_ip}"
-      fi
-    fi
-
-    if [[ -z "$HOST_TARGET" ]]; then
-      if $DRY_RUN; then
-        HOST_TARGET="<deployed-${EFFECTIVE_TAG}-controller-user@ip>"
-      else
-        echo "[error] Could not resolve target SSH host for provider '${PROVIDER:-custom}'. Pass --host=USER@IP." >&2
-        exit 1
-      fi
+  if [[ -z "$HOST_TARGET" ]]; then
+    if $DRY_RUN; then
+      HOST_TARGET="<deployed-${EFFECTIVE_TAG}-controller-user@ip>"
+    else
+      echo "[error] Could not resolve target SSH host for provider '${PROVIDER:-custom}'. Pass --host=USER@IP." >&2
+      exit 1
     fi
   fi
 fi
@@ -693,18 +766,17 @@ if [[ "$MODE" == "status" ]]; then
 fi
 
 # Auto-mint registration / removal token via `gh api` when neither --token nor --pat was supplied.
-if [[ -z "$RUNNER_TOKEN_VAL" && -z "$RUNNER_PAT_VAL" && -n "$REPO_PATH" ]] && command -v gh >/dev/null 2>&1; then
-  ensure_gh_auth
-  if [[ "$MODE" == "remove" ]]; then
+if [[ "$MODE" == "remove" ]]; then
+  if [[ -z "$CLI_RUNNER_TOKEN" && -z "$CALLER_RUNNER_TOKEN" && -z "$RUNNER_PAT_VAL" && -n "$REPO_PATH" ]] && command -v gh >/dev/null 2>&1; then
+    ensure_gh_auth
     echo "[gh] Minting runner removal token for ${REPO_PATH}..."
     RUNNER_TOKEN_VAL="$(gh api -X POST "repos/${REPO_PATH}/actions/runners/remove-token" -q .token)"
-  else
-    echo "[gh] Minting runner registration token for ${REPO_PATH}..."
-    RUNNER_TOKEN_VAL="$(gh api -X POST "repos/${REPO_PATH}/actions/runners/registration-token" -q .token)"
   fi
+else
+  ensure_fresh_runner_registration_token
 fi
 
-if [[ -z "$RUNNER_TOKEN_VAL" && -z "$RUNNER_PAT_VAL" ]]; then
+if [[ ( -z "$RUNNER_TOKEN_VAL" || "$RUNNER_TOKEN_VAL" == "__generate__" ) && -z "$RUNNER_PAT_VAL" ]]; then
   if [[ -t 0 ]]; then
     read -rsp "Enter GitHub runner token: " RUNNER_TOKEN_VAL
     echo ""

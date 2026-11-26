@@ -2,7 +2,7 @@
 #
 # One Caddy owns ports 80/443 and routes each hostname to its app container over the
 # `edge` docker network (app stacks join it as an external network with a fixed alias).
-# Deployed by cloud/scripts/deploy_stack.py --stack edge; `.env` holds the per-site TLS mode.
+# Deployed by cloud/scripts/deploy_stack.py --stack edge; `.env` holds hostnames, upstream, and TLS modes.
 name: edge
 
 services:
@@ -13,12 +13,14 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
+      TAIGA_DOMAIN: ${TAIGA_DOMAIN:?set TAIGA_DOMAIN in .env}
+      BLOG_DOMAIN: ${BLOG_DOMAIN:?set BLOG_DOMAIN in .env}
       # Per site: the ACME email => Let's Encrypt; "internal" => local CA while DNS points elsewhere.
-      TAIGA_TLS: ${TAIGA_TLS:-admin@example.com}
-      BLOG_TLS: ${BLOG_TLS:-admin@example.com}
+      TAIGA_TLS: ${TAIGA_TLS:-${ACME_EMAIL}}
+      BLOG_TLS: ${BLOG_TLS:-${ACME_EMAIL}}
       # Taiga's Cloud Run URL (terraform -chdir=cloud/infra/envs/gcp-taiga output taiga_run_url).
-      TAIGA_UPSTREAM: ${TAIGA_UPSTREAM:-https://taiga-000000000000.us-central1.run.app}
+      TAIGA_UPSTREAM: ${TAIGA_UPSTREAM:?set TAIGA_UPSTREAM in .env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

@@ -126,7 +126,16 @@ refresh_token() {
 
 log "[start] retrying apply for $ENV_NAME every ${INTERVAL}s (Ctrl-C to stop)"
 refresh_token
-"${TF[@]}" init -input=false >/dev/null
+INIT_ARGS=(-input=false)
+if [[ -f "$ENV_DIR/backend.hcl" ]]; then
+  INIT_ARGS+=("-backend-config=$ENV_DIR/backend.hcl")
+else
+  if [[ -z "${TF_STATE_BUCKET:-}" && -f "$REPO_ROOT/.env" ]]; then
+    TF_STATE_BUCKET="$(sed -n 's/^TF_STATE_BUCKET=//p' "$REPO_ROOT/.env" | tail -n 1 | tr -d "'\"")"
+  fi
+  [[ -n "${TF_STATE_BUCKET:-}" ]] && INIT_ARGS+=("-backend-config=bucket=$TF_STATE_BUCKET")
+fi
+"${TF[@]}" init "${INIT_ARGS[@]}" >/dev/null
 
 attempt=0
 plan_failures=0

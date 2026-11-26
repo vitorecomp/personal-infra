@@ -74,6 +74,7 @@ FORBIDDEN_EXACT_FILENAMES = {
     "kubeconfig",
     "terraform.tfstate",
     "tfplan",
+    "backend.hcl",
 }
 
 FORBIDDEN_FILE_GLOBS = (
@@ -104,6 +105,7 @@ FORBIDDEN_FILE_GLOBS = (
     "*_ed25519",
     "*.tfvars",
     "*.tfvars.json",
+    "*.tfbackend",
     "*.tfstate",
     "*.tfstate.*",
     "*.tfplan",
@@ -343,12 +345,63 @@ def _is_placeholder_secret_value(var_name: str, value: str) -> bool:
     return False
 
 
+PERSONAL_ENV_KEYS = (
+    "ROOT_DOMAIN",
+    "TAIGA_DOMAIN",
+    "BLOG_DOMAIN",
+    "ACME_EMAIL",
+    "TAIGA_ADMIN_EMAIL",
+    "BLOG_ADMIN_EMAIL",
+    "GCP_PROJECT_ID",
+    "TF_STATE_BUCKET",
+    "BACKUP_BUCKET",
+    "TAIGA_MEDIA_BUCKET",
+    "TAIGA_UPSTREAM",
+    "BLOG_THEME_NAME",
+)
+
+
+def _load_local_personal_blocklist() -> re.Pattern[str] | None:
+    """Builds a regex of personal domains/emails/project IDs from gitignored root .env (when present)."""
+    env_path = PROJECT_ROOT / ".env"
+    if not env_path.is_file():
+        return None
+    terms: set[str] = set()
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            s = raw.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            if s.startswith("export "):
+                s = s[len("export ") :].strip()
+            k, v = s.split("=", 1)
+            k, v = k.strip(), v.strip().strip("'").strip('"')
+            if k not in PERSONAL_ENV_KEYS or len(v) < 6:
+                continue
+            low = v.lower()
+            if any(tok in low for tok in ("example", "localhost", "000000", "my-", "__")):
+                continue
+            if v.startswith(("https://", "http://")):
+                v = v.split("://", 1)[1].rstrip("/")
+            terms.add(v)
+    except OSError:
+        return None
+    if not terms:
+        return None
+    ordered = sorted(terms, key=len, reverse=True)
+    return re.compile("|".join(re.escape(t) for t in ordered), re.IGNORECASE)
+
+
+LOCAL_PERSONAL_RE: re.Pattern[str] | None = _load_local_personal_blocklist()
+
+
 def scan_blob_bytes(
     raw: bytes,
     location: str,
     source: str,
 ) -> list[SecretFinding]:
     findings: list[SecretFinding] = []
+    skip_personal_check = location.endswith(("LICENSE", "repo_stats.json")) or location.startswith("self-test:")
 
     # Check binary files only for embedded PEM/service-account markers.
     if b"\x00" in raw[:8192]:
@@ -430,6 +483,17 @@ def scan_blob_bytes(
                     detail=f"{var_name}={redact_secret(val)}",
                 )
             )
+
+        if LOCAL_PERSONAL_RE is not None and not skip_personal_check:
+            for p_match in LOCAL_PERSONAL_RE.finditer(line):
+                findings.append(
+                    SecretFinding(
+                        source=source,
+                        location=line_loc,
+                        rule="personal-identifier",
+                        detail=f"matched local .env personal value {redact_secret(p_match.group(0))}",
+                    )
+                )
 
     return findings
 

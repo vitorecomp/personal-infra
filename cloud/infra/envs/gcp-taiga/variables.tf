@@ -1,7 +1,6 @@
 variable "project_id" {
-  description = "GCP project for the Taiga VM"
+  description = "GCP project for the VM, Cloud Run service, and buckets"
   type        = string
-  default     = "my-gcp-project"
 }
 
 variable "region" {
@@ -41,17 +40,14 @@ variable "enable_snapshots" {
 variable "backup_bucket_name" {
   description = "Globally unique GCS bucket that receives the restic backups of every compose stack"
   type        = string
-  default     = "my-infra-backups"
 }
 
 variable "taiga_media_bucket_name" {
   description = "Globally unique GCS bucket mounted into the Taiga Cloud Run service for uploads"
   type        = string
-  default     = "my-taiga-media"
 }
 
 variable "github_repository_id" {
   description = "Numeric ID of github.com/vitorecomp/personal-infra (gh api repos/vitorecomp/personal-infra -q .id); the only repo allowed to deploy"
   type        = string
-  default     = "000000000"
 }

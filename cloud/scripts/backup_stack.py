@@ -27,6 +27,7 @@ import datetime as dt
 import gzip
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -203,7 +204,24 @@ class Backup:
 
     def sync_gcs(self) -> bool:
         """Mirrors buckets listed in backup.gcs into <dump_dir>/gcs/<bucket> (VM service account auth)."""
-        for uri in (self.meta.get("backup") or {}).get("gcs", []):
+        var_re = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+        for raw_uri in (self.meta.get("backup") or {}).get("gcs", []):
+            missing_vars: list[str] = []
+
+            def _sub(match: re.Match[str]) -> str:
+                key = match.group(1)
+                val = self.env.get(key) or os.environ.get(key, "")
+                if val in PLACEHOLDERS:
+                    if self.dry_run:
+                        return f"<unset:{key}>"
+                    missing_vars.append(key)
+                    return ""
+                return val
+
+            uri = var_re.sub(_sub, raw_uri)
+            if missing_vars:
+                print(f"[error] {self.env_file} lacks GCS bucket settings: {', '.join(missing_vars)}", file=sys.stderr)
+                return False
             bucket = uri.removeprefix("gs://").split("/", 1)[0]
             target = self.dump_dir / "gcs" / bucket
             gcloud = shutil.which("gcloud") or "/snap/bin/gcloud"

@@ -7,31 +7,73 @@
 #   3. sync the DB / admin passwords into Secret Manager (only on change; old versions destroyed)
 #   4. roll out a new Cloud Run revision (free-tier sizing from cloudrun.env)
 #
-# Inputs (environment): TAIGA_DB_HOST, TAIGA_DB_USER, TAIGA_DB_PASSWORD, [TAIGA_DB_NAME=taiga,
-# TAIGA_DB_PORT=5432, TAIGA_DB_SSLMODE=require], TAIGA_ADMIN_PASSWORD, [TAIGA_ADMIN_USER=admin,
-# TAIGA_ADMIN_EMAIL]. TAIGA_SECRET_KEY defaults to the latest taiga-secret-key in Secret Manager.
+# Inputs (environment or gitignored root `.env`):
+#   GCP_PROJECT_ID, TAIGA_MEDIA_BUCKET, STACK_DOMAIN (or TAIGA_DOMAIN),
+#   [GCP_REGION=us-central1, TAIGA_RUN_SA=taiga-run@$GCP_PROJECT_ID.iam.gserviceaccount.com],
+#   TAIGA_DB_HOST, TAIGA_DB_USER, TAIGA_DB_PASSWORD, [TAIGA_DB_NAME=taiga, TAIGA_DB_PORT=5432,
+#   TAIGA_DB_SSLMODE=require], TAIGA_ADMIN_PASSWORD, [TAIGA_ADMIN_USER=admin, TAIGA_ADMIN_EMAIL,
+#   TAIGA_ADMIN_NAME]. TAIGA_SECRET_KEY defaults to the latest taiga-secret-key in Secret Manager.
 #
 # Usage: cloud/taiga/deploy-cloudrun.sh [--dry-run]
 set -euo pipefail
 cd "$(dirname "$0")"
+REPO_ROOT="$(cd ../.. && pwd)"
 DRY_RUN=false
 case "${1:-}" in
   --dry-run) DRY_RUN=true ;;
   "") ;;
   *) echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
 esac
+
+# Load gitignored root `.env` defaults when running locally (real env vars win).
+if [[ -f "$REPO_ROOT/.env" ]]; then
+  while IFS= read -r -d '' k && IFS= read -r -d '' v; do
+    if [[ -z "${!k:-}" && -n "$v" ]]; then
+      export "$k=$v"
+    fi
+  done < <(
+    python3 - "$REPO_ROOT/.env" <<'PY'
+import re, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    for raw in fh:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip().strip("'").strip('"')
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+            sys.stdout.write(f"{k}\0{v}\0")
+PY
+  )
+fi
+
 # shellcheck source=/dev/null
 . ./cloudrun.env
+
+PROJECT="${PROJECT:-${GCP_PROJECT_ID:-}}"
+MEDIA_BUCKET="${MEDIA_BUCKET:-${TAIGA_MEDIA_BUCKET:-}}"
+DOMAIN="${STACK_DOMAIN:-${TAIGA_DOMAIN:-}}"
+if [[ -z "$PROJECT" && "$DRY_RUN" == "true" ]]; then
+  PROJECT="<gcp-project>"
+fi
+if [[ -z "$MEDIA_BUCKET" && "$DRY_RUN" == "true" ]]; then
+  MEDIA_BUCKET="<taiga-media-bucket>"
+fi
+if [[ -z "$DOMAIN" && "$DRY_RUN" == "true" ]]; then
+  DOMAIN="taiga.example.com"
+fi
+RUN_SA="${RUN_SA:-${TAIGA_RUN_SA:-taiga-run@${PROJECT}.iam.gserviceaccount.com}}"
 
 GCLOUD="$(command -v gcloud || echo /snap/bin/gcloud)"
 REGISTRY="${REGION}-docker.pkg.dev"
 IMAGE="${REGISTRY}/${PROJECT}/${REPO}/taiga"
 TAG="ctx-$(cat Dockerfile nginx.conf docker-entrypoint.sh | sha256sum | cut -c1-12)"
-DOMAIN="${STACK_DOMAIN:-taiga.example.com}"
 log() { echo "[cloudrun] $*"; }
 
 missing=()
-for var in TAIGA_DB_HOST TAIGA_DB_USER TAIGA_DB_PASSWORD TAIGA_ADMIN_PASSWORD; do
+for var in PROJECT MEDIA_BUCKET DOMAIN TAIGA_DB_HOST TAIGA_DB_USER TAIGA_DB_PASSWORD TAIGA_ADMIN_PASSWORD; do
   [[ -n "${!var:-}" ]] || missing+=("$var")
 done
 if (( ${#missing[@]} )); then
@@ -77,6 +119,7 @@ TAIGA_SITES_SCHEME=https
 TAIGA_SITES_DOMAIN=${DOMAIN}
 TAIGA_URL=https://${DOMAIN}
 TAIGA_ADMIN_USER=${TAIGA_ADMIN_USER:-admin}
+TAIGA_ADMIN_NAME=${TAIGA_ADMIN_NAME:-${ADMIN_NAME:-Admin}}
 TAIGA_ADMIN_EMAIL=${TAIGA_ADMIN_EMAIL:-}
 TAIGA_ADMIN_PASSWORD=${TAIGA_ADMIN_PASSWORD:-}
 TAIGA_ENTRYPOINT_MODE=migrate

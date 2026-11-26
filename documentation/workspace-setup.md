@@ -92,7 +92,7 @@ python3 workspace/scripts/scan_repo_secrets.py personal
 
 ### 3.5 Enrolling GitHub Repositories on Taiga (`enroll_taiga_projects.py`)
 
-Reads `repo_stats.json`, optionally fetches live GitHub descriptions/topics, and idempotently creates corresponding projects on the Taiga server (`https://taiga.example.com`) via the Taiga REST API (`/api/v1/projects`).
+Reads `repo_stats.json`, optionally fetches live GitHub descriptions/topics, and idempotently creates corresponding projects on the Taiga server (`$TAIGA_URL` from gitignored root `.env`) via the Taiga REST API (`/api/v1/projects`).
 
 ```bash
 # Preview repositories that would be enrolled on Taiga (safe, read-only)
@@ -111,7 +111,7 @@ TAIGA_ADMIN_PASSWORD=<your_taiga_password> python3 workspace/scripts/enroll_taig
 
 ### 3.6 Managing Taiga via CLI & Agent Skill (`taiga_cli.py`)
 
-[`workspace/scripts/taiga_cli.py`](../workspace/scripts/taiga_cli.py) (along with the agent skill in [`.agents/skills/taiga/SKILL.md`](../.agents/skills/taiga/SKILL.md) and [`.agents/skills/taiga/scripts/taiga_cli.py`](../.agents/skills/taiga/scripts/taiga_cli.py)) provides CLI subcommands for managing projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages on `https://taiga.example.com`:
+[`workspace/scripts/taiga_cli.py`](../workspace/scripts/taiga_cli.py) (along with the agent skill in [`.agents/skills/taiga/SKILL.md`](../.agents/skills/taiga/SKILL.md) and [`.agents/skills/taiga/scripts/taiga_cli.py`](../.agents/skills/taiga/scripts/taiga_cli.py)) provides CLI subcommands for managing projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages on `$TAIGA_URL`:
 
 ```bash
 # List projects in display order or inspect a single project

@@ -42,19 +42,20 @@ personal-infra/
 
 | Site | Runs on | Defined in |
 | :--- | :--- | :--- |
-| `example.com`, `www` | Vercel (Git integration on `vitorecomp/nobuffer-site`) | app repo (`vercel.json`) |
+| `$ROOT_DOMAIN`, `www` | Vercel (Git integration on `vitorecomp/nobuffer-site`) | app repo (`vercel.json`) |
 | `me.`, `cases.` | Vercel (Git integration on `vitorecomp/personal-portifolio`) | app repo (`vercel.json`) |
-| `blog.` | GCE e2-micro VM `personal-host` (free tier): edge Caddy → Ghost 5.130 → local MySQL 8.0 | [`cloud/edge`](./cloud/edge), [`cloud/personal-blog`](./cloud/personal-blog) |
-| `taiga.` | Cloud Run `taiga` (free tier) via the edge Caddy; database on Neon (Postgres 15); uploads in GCS | [`cloud/taiga`](./cloud/taiga) |
+| `blog.` (`$BLOG_DOMAIN`) | GCE e2-micro VM `personal-host` (free tier): edge Caddy → Ghost 5.130 → local MySQL 8.0 | [`cloud/edge`](./cloud/edge), [`cloud/personal-blog`](./cloud/personal-blog) |
+| `taiga.` (`$TAIGA_DOMAIN`) | Cloud Run `taiga` (free tier) via the edge Caddy; database on Neon (Postgres 15); uploads in GCS | [`cloud/taiga`](./cloud/taiga) |
 
-DNS is on Cloudflare (DNS-only records, managed by hand). Details: [cloud-architecture.md](./documentation/cloud-architecture.md).
+DNS is on Cloudflare (DNS-only records, managed by hand). All personal domains, emails, Cloud Run URLs, and GCP project/bucket names live in the gitignored root [`.env`](./.env.example) and are synced to GitHub Secrets via [`sync_github_secrets.py`](./cloud/scripts/sync_github_secrets.py). Details: [cloud-architecture.md](./documentation/cloud-architecture.md).
 
 - **Terraform (applied by hand, never in CI)**: [`cloud/infra/envs/gcp-taiga`](./cloud/infra/envs/gcp-taiga) (VM, Taiga Cloud Run + Artifact Registry + Secret Manager + media bucket, backup bucket) and [`cloud/infra/envs/oci-blog`](./cloud/infra/envs/oci-blog) (spare OCI A1 VM, still being acquired by a retry loop). Runbook: [vm-provisioning.md](./documentation/vm-provisioning.md).
-- **Stacks**: `cloud/<stack>/` with `stack.json` + `.env.example` (+ `compose.yml` when it runs on the VM). Nothing is built on the VM: the blog image is built in CI and pulled from GHCR, Taiga is built and deployed to Cloud Run from CI. Secrets live only in `/opt/stacks/<stack>/.env` on the VM, Secret Manager (Taiga runtime) and the GitHub environments.
+- **Stacks**: `cloud/<stack>/` with `stack.json` + `.env.example` (+ `compose.yml` when it runs on the VM). Nothing is built on the VM: the blog image is built in CI and pulled from GHCR, Taiga is built and deployed to Cloud Run from CI. Secrets live only in `/opt/stacks/<stack>/.env` on the VM, Secret Manager (Taiga runtime) and GitHub Secrets.
 - **Scripts** (stdlib Python / bash, all with `--dry-run`):
+  [`sync_github_secrets.py`](./cloud/scripts/sync_github_secrets.py) (syncs root `.env` to GitHub Secrets),
   [`bootstrap_vm.py`](./cloud/scripts/bootstrap_vm.py) (host setup, `--check` for drift),
   [`deploy_stack.py`](./cloud/scripts/deploy_stack.py) (rsync + `.env` preflight + `compose pull`/`up --wait` + HTTPS check; used by CI and locally),
-  [`backup_stack.py`](./cloud/scripts/backup_stack.py) (DB dumps incl. remote Neon, volumes, GCS buckets → restic in `gs://my-infra-backups`),
+  [`backup_stack.py`](./cloud/scripts/backup_stack.py) (DB dumps incl. remote Neon, volumes, GCS buckets → restic in `gs://$BACKUP_BUCKET`),
   [`tf_apply_retry.sh`](./cloud/scripts/tf_apply_retry.sh) (OCI capacity retry loop),
   [`configure_ai_spend_cap.py`](./cloud/scripts/configure_ai_spend_cap.py).
 
@@ -74,12 +75,13 @@ Provisions and configures GPU development workstations across cloud and on-prem 
   - [`azure/`](./development/infra/azure) & [`on-prem/`](./development/infra/on-prem): Reserved target folders (`.gitkeep`) for Azure and on-premises GPU hosts.
 - **GPU Machine Container Stack ([`development/gpu-dev-machine/`](./development/gpu-dev-machine))**: Podman + `podman-compose` stack running `ray-server` (full unquantized `deepseek-ai/DeepSeek-V4.1-Flash` with CPU offload), `litellm`, and `deepseek-harness` pointed at LiteLLM.
 - **Scripts ([`development/scripts/`](./development/scripts))**:
-  - [`deploy.sh`](./development/scripts/deploy.sh): Unified Terraform provisioning entrypoint (`--provider=<gcp|azure|on-prem>`) using logged-in CLI credentials and active project.
-  - [`setup.sh`](./development/scripts/setup.sh): Configures and manages the persistent GitHub Actions self-hosted runner on the deployed machine.
+  - [`deploy.sh`](./development/scripts/deploy.sh): Unified Terraform provisioning entrypoint (`--provider=<gcp|azure|on-prem>`, `--cycle-regions`, `--loop=<minutes>`) using logged-in `gcloud` / ADC credentials and active project.
+  - [`setup.sh`](./development/scripts/setup.sh): Reads gitignored `development/.env` ([`.env.example`](./development/.env.example)), syncs Repository & `gpu` Environment variables/secrets via `gh`, auto-mints runner tokens via `gh api`, and configures the persistent GitHub Actions runner on the deployed machine.
+  - [`deploy_gpu_stack.sh`](./development/scripts/deploy_gpu_stack.sh): Syncs and deploys `development/gpu-dev-machine` via `podman-compose` (invoked by CI or locally).
 
 ```bash
 ./development/scripts/deploy.sh --provider=gcp --dry-run
-./development/scripts/setup.sh --provider=gcp --repo=vitorecomp/<repo> --dry-run
+./development/scripts/setup.sh --provider=gcp --dry-run
 ```
 
 ### 3. `home-server/`
@@ -122,14 +124,14 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
   python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
   python3 workspace/scripts/scan_repo_secrets.py --install-hook
   ```
-- **Enroll GitHub Repositories on Taiga ([`enroll_taiga_projects.py`](./workspace/scripts/enroll_taiga_projects.py))**: Idempotently enrolls GitHub repositories from `repo_stats.json` as Scrum projects on `https://taiga.example.com` and orders them with the most recently committed repository first.
+- **Enroll GitHub Repositories on Taiga ([`enroll_taiga_projects.py`](./workspace/scripts/enroll_taiga_projects.py))**: Idempotently enrolls GitHub repositories from `repo_stats.json` as Scrum projects on `$TAIGA_URL` and orders them with the most recently committed repository first.
   ```bash
   python3 workspace/scripts/enroll_taiga_projects.py --dry-run
   python3 workspace/scripts/enroll_taiga_projects.py
   ```
-- **Taiga REST API CLI & Agent Skill ([`taiga_cli.py`](./.agents/skills/taiga/scripts/taiga_cli.py) / [`SKILL.md`](./.agents/skills/taiga/SKILL.md))**: Manages projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages via the Taiga REST API (`/api/v1`). Both Taiga scripts read their settings from the gitignored [`.agents/skills/taiga/.env`](./.agents/skills/taiga/.env.example) (mode 0600; falls back to the `taiga-admin-password` secret via `gcloud`).
+- **Taiga REST API CLI & Agent Skill ([`taiga_cli.py`](./.agents/skills/taiga/scripts/taiga_cli.py) / [`SKILL.md`](./.agents/skills/taiga/SKILL.md))**: Manages projects, Scrum sprints, user stories, tasks, issues, epics, and wiki pages via the Taiga REST API (`/api/v1`). Both Taiga scripts read their settings from the gitignored root [`.env`](./.env.example) (or [`.agents/skills/taiga/.env`](./.agents/skills/taiga/.env.example), mode 0600; falls back to the `taiga-admin-password` secret via `gcloud`).
   ```bash
-  cp .agents/skills/taiga/.env.example .agents/skills/taiga/.env && chmod 600 .agents/skills/taiga/.env   # once, then fill it in
+  cp -n .env.example .env && chmod 600 .env   # once, then fill in TAIGA_URL / GCP_PROJECT_ID
   python3 workspace/scripts/taiga_cli.py projects list
   python3 workspace/scripts/taiga_cli.py stories list personal-infra
   python3 workspace/scripts/taiga_cli.py stories create personal-infra --subject "Add feature" --points 3 --dry-run
@@ -149,8 +151,8 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
 
 ### GitHub Secrets & Variables
 
-- **Environments `blog-prod` / `taiga-prod` / `gpu`** (deployments from `main` only): `blog-prod` and `taiga-prod` hold secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY` and variables `DEPLOY_KNOWN_HOSTS`, `DEPLOY_USER`. `taiga-prod` also holds `TAIGA_DB_HOST` / `TAIGA_DB_USER` / `TAIGA_DB_PASSWORD` (Neon), `TAIGA_ADMIN_PASSWORD`, and variables `TAIGA_DB_NAME`, `TAIGA_ADMIN_EMAIL` (optional `TAIGA_ADMIN_USER`, default `admin`); `blog-prod` holds `BLOG_ADMIN_EMAIL`. `gpu` (also gated by required reviewer `vitorecomp`) holds secrets `LITELLM_MASTER_KEY`, optional `HF_TOKEN`, `TUNNEL_SSH_PRIVATE_KEY` and variables `ENABLE_REVERSE_TUNNELS`, `TUNNEL_SSH_HOST`, `TUNNEL_SSH_USER`, `TUNNEL_SSH_PORT`, `TUNNEL_KNOWN_HOSTS`, `TUNNEL_BIND_ADDRESS`, `REMOTE_LITELLM_PORT`, `REMOTE_HARNESS_PORT` (model & offload parameters are configured directly in [`development/gpu-dev-machine/compose.yml`](./development/gpu-dev-machine/compose.yml)).
-- **Repository**: secrets `BLOG_ADMIN_PASSWORD` (Ghost owner check after deploys), `METRICS_TOKEN` (repo stats); variables `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`, and `GPU_RUNNER` (selects which self-hosted runner pool executes `deploy-gpu-machine.yml`, e.g. `gcp-gpu`, `azure-gpu`, `on-prem-gpu`; optional `GPU_RUNNER_LABELS`).
+- **Environments `blog-prod` / `taiga-prod` / `gpu`** (deployments from `main` only): `blog-prod` and `taiga-prod` hold secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`, `BLOG_ADMIN_EMAIL` / `TAIGA_ADMIN_EMAIL`, and variable `DEPLOY_USER`. `taiga-prod` also holds secrets `TAIGA_DB_HOST` / `TAIGA_DB_USER` / `TAIGA_DB_PASSWORD` (Neon), `TAIGA_ADMIN_PASSWORD`, and variables `TAIGA_DB_NAME`, optional `TAIGA_ADMIN_USER` (default `admin`). `gpu` (gated by required reviewer `vitorecomp`) holds secrets `LITELLM_MASTER_KEY`, optional `HF_TOKEN`, `TUNNEL_SSH_PRIVATE_KEY` and variables `ENABLE_REVERSE_TUNNELS`, `TUNNEL_SSH_HOST`, `TUNNEL_SSH_USER`, `TUNNEL_SSH_PORT`, `TUNNEL_KNOWN_HOSTS`, `TUNNEL_BIND_ADDRESS`, `REMOTE_LITELLM_PORT`, `REMOTE_HARNESS_PORT` (model & offload parameters live directly in [`development/gpu-dev-machine/compose.yml`](./development/gpu-dev-machine/compose.yml)).
+- **Repository**: secrets `TAIGA_DOMAIN`, `BLOG_DOMAIN`, `ACME_EMAIL`, `TAIGA_UPSTREAM`, `GCP_PROJECT_ID`, `TAIGA_RUN_SA`, `TAIGA_MEDIA_BUCKET`, `BACKUP_BUCKET`, `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`, `BLOG_TITLE`, `BLOG_THEME_NAME`, `ADMIN_NAME` (all synced from gitignored root `.env` by [`sync_github_secrets.py`](./cloud/scripts/sync_github_secrets.py) so GitHub Actions masks them in public logs), plus `BLOG_ADMIN_PASSWORD` and `METRICS_TOKEN`; variable `GPU_RUNNER` (`gcp-gpu`, `azure-gpu`, `on-prem-gpu`; optional `GPU_RUNNER_LABELS`).
 - No cloud keys live in GitHub: Terraform runs from a workstation; the Taiga deploy impersonates `github-deployer` through Workload Identity Federation (this repo, `main`, `taiga-prod` only); the blog image goes to GHCR with the job's `GITHUB_TOKEN`.
 
 ---
