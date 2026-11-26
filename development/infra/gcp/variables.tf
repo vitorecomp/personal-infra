@@ -181,6 +181,12 @@ variable "enable_os_login" {
   default     = true
 }
 
+variable "register_oslogin_ssh_key" {
+  description = "Import Terraform's generated SSH public key into Cloud OS Login. Disabled by default so `gcloud compute ssh` manages OS Login keys natively."
+  type        = bool
+  default     = false
+}
+
 variable "oslogin_user" {
   description = "Google account email for Cloud OS Login SSH key registration (optional; auto-detected from ADC when empty)."
   type        = string

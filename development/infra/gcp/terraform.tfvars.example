@@ -16,6 +16,7 @@ provisioning_model      = "SPOT"
 # Disable if external policy controllers manage VPC ingress rules:
 # enable_ingress_firewalls = false
 
-# Cloud OS Login defaults to true so projects enforcing constraints/compute.requireOsLogin work cleanly.
-# Set to false on non-restricted projects to always use `dev` (var.ssh_username) as the SSH user:
+# Cloud OS Login defaults to true, and OS Login SSH key import in Terraform is disabled by default
+# (`register_oslogin_ssh_key = false`) because `gcloud compute ssh` manages its own OS Login key natively.
+# register_oslogin_ssh_key = false
 # enable_os_login = false

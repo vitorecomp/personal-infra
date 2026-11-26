@@ -106,7 +106,7 @@ All ports bind strictly to `127.0.0.1` on `dev-gpu-vm`. Forward them securely to
 ```bash
 gcloud compute ssh dev-gpu-vm \
   --zone=europe-west4-b \
-  --project=legacy-gcp-project \
+  --project=<gcp-project-id> \
   --tunnel-through-iap \
   -- -L 3080:127.0.0.1:3080 -L 4000:127.0.0.1:4000 -L 8265:127.0.0.1:8265
 ```

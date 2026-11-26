@@ -1,5 +1,5 @@
 data "google_client_openid_userinfo" "me" {
-  count = trimspace(var.oslogin_user) == "" ? 1 : 0
+  count = var.enable_os_login && var.register_oslogin_ssh_key && trimspace(var.oslogin_user) == "" ? 1 : 0
 }
 
 # Fixed SSH client keypair (kept in Terraform state, exported locally to ./ssh-key).
@@ -34,7 +34,7 @@ resource "tls_private_key" "controller_to_gpu" {
 }
 
 resource "google_os_login_ssh_public_key" "ssh" {
-  count = var.enable_os_login && local.effective_oslogin_email != "" ? 1 : 0
+  count = var.enable_os_login && var.register_oslogin_ssh_key && local.effective_oslogin_email != "" ? 1 : 0
 
   user = local.effective_oslogin_email
   key  = "${trimspace(tls_private_key.ssh.public_key_openssh)} ${var.ssh_username}"

@@ -23,7 +23,8 @@ REPO_ROOT="$(cd "$DEV_ROOT/.." && pwd)"
 PROVIDER="${PROVIDER:-}"
 ACTION="apply"
 DRY_RUN=false
-USE_ADC=false
+AUTH_MODE="${AUTH_MODE:-auto}" # auto | gcloud | adc
+REGISTER_OSLOGIN_KEY="${REGISTER_OSLOGIN_KEY:-false}"
 AUTO_APPROVE="${AUTO_APPROVE:-true}"
 
 # Optional overrides (defaults come from logged-in CLI config / terraform.tfvars)
@@ -34,8 +35,11 @@ REGIONS_LIST="${REGIONS:-}"
 CYCLE_REGIONS="${CYCLE_REGIONS:-false}"
 FORCE_MOVE="${FORCE_MOVE:-false}"
 STAGE_ON_EXHAUSTION="${STAGE_ON_EXHAUSTION:-true}"
+EXPLICIT_STAGE_FLAG=false
+LOOP_MINUTES="${LOOP_MINUTES:-0}"
 MACHINE_TYPE="${MACHINE_TYPE:-}"
 NAME_PREFIX="${NAME_PREFIX:-}"
+ORIG_ARGS=("$@")
 
 usage() {
   cat <<'EOF'
@@ -49,11 +53,15 @@ Actions:
   --plan                        Initialize and run terraform plan only
   --validate                    Initialize (-backend=false) and validate Terraform
   --destroy                     Destroy Terraform-managed infrastructure
+  --loop=MINUTES                Retry apply every MINUTES minutes until deployment succeeds (e.g. --loop=5)
   --dry-run                     Print resolved credentials/project and commands without executing
 
 GCP / Terraform Options:
   --project=PROJECT_ID          Override active gcloud project (defaults to `gcloud config get-value project`)
-  --adc                         Use Application Default Credentials instead of logged-in `gcloud` token
+  --no-register-oslogin-key     Do not import a Terraform SSH key into OS Login; rely on `gcloud compute ssh` (default)
+  --register-oslogin-key        Import Terraform's generated SSH public key into Cloud OS Login
+  --adc                         Force Application Default Credentials (automatic for @google.com CBA accounts)
+  --gcloud-token                Force GOOGLE_OAUTH_ACCESS_TOKEN from `gcloud auth print-access-token`
   --region=REGION               Target region (default: europe-west4, or terraform.tfvars)
   --zone=ZONE                   Target zone (default: europe-west4-a, or all GPU zones in region on apply)
   --regions=R1,R2,...           Comma-separated regions to cycle through for Spot capacity
@@ -61,7 +69,8 @@ GCP / Terraform Options:
   --machine-type=TYPE           GPU VM machine type override (default: g4-standard-192)
   --name-prefix=PREFIX          Resource name prefix override (default: dev-gpu)
   --force-move                  Allow moving to another region/zone even if an instance exists in state
-  --no-stage-terminated         Exit 1 instead of staging a TERMINATED Spot VM when out of stock
+  --no-stage-terminated         Exit 1 instead of staging a TERMINATED Spot VM when out of stock (default when --loop is set)
+  --stage-terminated            Allow staging a TERMINATED Spot VM even when --loop is set
   --auto-approve                Pass -auto-approve to terraform apply/destroy (default)
   --no-auto-approve             Require interactive approval on terraform apply/destroy
   -h, --help                    Show this help message
@@ -84,8 +93,19 @@ while [[ $# -gt 0 ]]; do
     --plan) ACTION="plan"; shift ;;
     --validate) ACTION="validate"; shift ;;
     --destroy) ACTION="destroy"; shift ;;
+    --loop=*|loop=*) LOOP_MINUTES="${1#*=}"; shift ;;
+    --loop)
+      if [[ $# -ge 2 && "${2:-}" =~ ^[0-9]+$ ]]; then
+        LOOP_MINUTES="$2"; shift 2
+      else
+        LOOP_MINUTES="5"; shift
+      fi
+      ;;
     --dry-run) DRY_RUN=true; shift ;;
-    --adc) USE_ADC=true; shift ;;
+    --adc) AUTH_MODE="adc"; shift ;;
+    --gcloud-token) AUTH_MODE="gcloud"; shift ;;
+    --register-oslogin-key) REGISTER_OSLOGIN_KEY="true"; shift ;;
+    --no-register-oslogin-key) REGISTER_OSLOGIN_KEY="false"; shift ;;
     --project=*) PROJECT_ID="${1#*=}"; shift ;;
     --project) require_arg "$1" "${2:-}"; PROJECT_ID="$2"; shift 2 ;;
     --region=*) REGION="${1#*=}"; shift ;;
@@ -100,7 +120,8 @@ while [[ $# -gt 0 ]]; do
     --name-prefix=*) NAME_PREFIX="${1#*=}"; shift ;;
     --name-prefix) require_arg "$1" "${2:-}"; NAME_PREFIX="$2"; shift 2 ;;
     --force-move) FORCE_MOVE="true"; shift ;;
-    --no-stage-terminated) STAGE_ON_EXHAUSTION="false"; shift ;;
+    --no-stage-terminated) STAGE_ON_EXHAUSTION="false"; EXPLICIT_STAGE_FLAG=true; shift ;;
+    --stage-terminated) STAGE_ON_EXHAUSTION="true"; EXPLICIT_STAGE_FLAG=true; shift ;;
     --auto-approve) AUTO_APPROVE="true"; shift ;;
     --no-auto-approve) AUTO_APPROVE="false"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -112,6 +133,64 @@ if [[ -z "$PROVIDER" ]]; then
   echo "[error] --provider is required (expected: gcp, azure, or on-prem)" >&2
   usage >&2
   exit 1
+fi
+
+if ! [[ "$LOOP_MINUTES" =~ ^[0-9]+$ ]]; then
+  echo "[error] --loop expects a non-negative integer number of minutes (got: '$LOOP_MINUTES')" >&2
+  exit 1
+fi
+
+# When looping until live capacity is obtained, default to not stopping early on a
+# TERMINATED VM unless --stage-terminated was explicitly requested.
+if (( LOOP_MINUTES > 0 )) && ! $EXPLICIT_STAGE_FLAG; then
+  STAGE_ON_EXHAUSTION="false"
+fi
+
+# Outer retry loop: re-invokes this script with LOOP_MINUTES=0 so `set -e`, temp-file
+# traps, credential refresh, and state inspection run cleanly on every attempt.
+if (( LOOP_MINUTES > 0 )) && [[ "$ACTION" == "apply" ]] && ! $DRY_RUN; then
+  CHILD_ARGS=()
+  skip_next=false
+  for ((i = 0; i < ${#ORIG_ARGS[@]}; i++)); do
+    if $skip_next; then
+      skip_next=false
+      continue
+    fi
+    arg="${ORIG_ARGS[$i]}"
+    case "$arg" in
+      --loop=*|loop=*) continue ;;
+      --loop)
+        next_arg="${ORIG_ARGS[$((i + 1))]:-}"
+        [[ "$next_arg" =~ ^[0-9]+$ ]] && skip_next=true
+        continue
+        ;;
+      *) CHILD_ARGS+=("$arg") ;;
+    esac
+  done
+  if ! $EXPLICIT_STAGE_FLAG; then
+    CHILD_ARGS+=(--no-stage-terminated)
+  fi
+
+  trap 'echo ""; echo "[$(date "+%F %T")] [loop] Interrupted; stopping retry loop."; exit 130' INT TERM
+  attempt=0
+  sleep_sec=$(( LOOP_MINUTES * 60 ))
+  while true; do
+    attempt=$(( attempt + 1 ))
+    echo "[$(date '+%F %T')] [loop] Attempt #${attempt} (retrying every ${LOOP_MINUTES}m until success; Ctrl-C to stop)..."
+    set +e
+    LOOP_MINUTES=0 "${BASH_SOURCE[0]}" "${CHILD_ARGS[@]}"
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+      echo "[$(date '+%F %T')] [loop] Deployment succeeded on attempt #${attempt}!"
+      exit 0
+    fi
+    if [[ $rc -eq 130 || $rc -eq 143 ]]; then
+      exit "$rc"
+    fi
+    echo "[$(date '+%F %T')] [loop] Attempt #${attempt} exited with code ${rc}; sleeping ${LOOP_MINUTES} minute(s) (${sleep_sec}s) before retry..."
+    sleep "$sleep_sec"
+  done
 fi
 
 case "$PROVIDER" in
@@ -262,13 +341,36 @@ run_gcp_terraform() {
   fi
 
   local oslogin_user="${OSLOGIN_USER:-$logged_account}"
-  if [[ -z "$oslogin_user" && "$USE_ADC" == "false" ]] && ! $DRY_RUN; then
+
+  # @google.com accounts enforce Certificate-Based Access (CBA/mTLS) on `gcloud auth print-access-token`,
+  # which causes non-mTLS clients like Terraform to fail with `401 ACCESS_TOKEN_TYPE_UNSUPPORTED`.
+  # Application Default Credentials (`gcloud auth application-default login`) are exempt from CBA,
+  # so automatically use ADC when authenticated as *@google.com.
+  local use_adc=false
+  case "$AUTH_MODE" in
+    adc) use_adc=true ;;
+    gcloud) use_adc=false ;;
+    auto)
+      if [[ "${logged_account,,}" == *@google.com ]]; then
+        use_adc=true
+      fi
+      ;;
+  esac
+
+  if [[ -z "$oslogin_user" && "$use_adc" == "false" ]] && ! $DRY_RUN; then
     echo "[error] No logged-in gcloud account found. Run 'gcloud auth login' first (or pass --adc)." >&2
     exit 1
   fi
 
   refresh_gcp_credentials() {
-    if $USE_ADC; then
+    if $use_adc; then
+      unset GOOGLE_OAUTH_ACCESS_TOKEN
+      local adc_file="${GOOGLE_APPLICATION_CREDENTIALS:-${CLOUDSDK_CONFIG:-$HOME/.config/gcloud}/application_default_credentials.json}"
+      if [[ ! -f "$adc_file" ]]; then
+        echo "[error] Application Default Credentials not found at $adc_file." >&2
+        echo "[error] Run 'gcloud auth application-default login' first." >&2
+        exit 1
+      fi
       return 0
     fi
     if ! GOOGLE_OAUTH_ACCESS_TOKEN="$(gcloud auth print-access-token 2>/dev/null)" || [[ -z "$GOOGLE_OAUTH_ACCESS_TOKEN" ]]; then
@@ -301,6 +403,7 @@ run_gcp_terraform() {
       -var="region=${target_region}"
       -var="zone=${target_zone}"
       -var="enable_public_ingress=false"
+      -var="register_oslogin_ssh_key=${REGISTER_OSLOGIN_KEY}"
     )
     if [[ -n "$MACHINE_TYPE" ]]; then
       var_args+=(-var="machine_type=${MACHINE_TYPE}")
@@ -322,17 +425,20 @@ run_gcp_terraform() {
     build_tf_args "$default_region" "$default_zone"
     echo "[dry-run] Provider:             gcp ($INFRA_DIR)"
     echo "[dry-run] Action:               $ACTION"
-    if $USE_ADC; then
-      echo "[dry-run] Credentials:          Application Default Credentials (--adc)"
+    if (( LOOP_MINUTES > 0 )); then
+      echo "[dry-run] Retry Loop:           every ${LOOP_MINUTES} minute(s) until success (stage_on_exhaustion=$STAGE_ON_EXHAUSTION)"
+    fi
+    if $use_adc; then
+      echo "[dry-run] Credentials:          Application Default Credentials (${oslogin_user:-ADC})"
     else
       echo "[dry-run] Credentials:          logged-in gcloud account (${oslogin_user:-<gcloud-active-account>})"
     fi
     echo "[dry-run] Project / Workspace:  $effective_project / $tf_workspace"
     echo "[dry-run] Region / Zone:        $default_region / $default_zone (cycle_regions=$CYCLE_REGIONS${REGIONS_LIST:+, regions=$REGIONS_LIST})"
     echo "[dry-run] Machine / Prefix:     $effective_machine / $effective_prefix"
-    echo "[dry-run] Ingress / SSH:        public ingress disabled; SSH via 'gcloud compute ssh --tunnel-through-iap'"
+    echo "[dry-run] Ingress / SSH:        public ingress disabled; SSH via 'gcloud compute ssh --tunnel-through-iap' (register_oslogin_ssh_key=$REGISTER_OSLOGIN_KEY)"
     echo "[dry-run] Commands:"
-    $USE_ADC || echo "[dry-run]   export GOOGLE_OAUTH_ACCESS_TOKEN=\"\$(gcloud auth print-access-token)\""
+    $use_adc || echo "[dry-run]   export GOOGLE_OAUTH_ACCESS_TOKEN=\"\$(gcloud auth print-access-token)\""
     echo "[dry-run]   gcloud services enable compute.googleapis.com iap.googleapis.com oslogin.googleapis.com iam.googleapis.com --project=$effective_project --quiet"
     echo "[dry-run]   ${TF[*]} init -input=false"
     echo "[dry-run]   ${TF[*]} workspace select -or-create $tf_workspace"
@@ -341,7 +447,7 @@ run_gcp_terraform() {
       destroy) echo "[dry-run]   ${TF[*]} destroy ${apply_args[*]}" ;;
       apply)
         echo "[dry-run]   ${TF[*]} apply ${apply_args[*]}"
-        echo "[dry-run]   export ssh_private_key -> $INFRA_DIR/ssh-key (0600) and ssh_public_key -> $INFRA_DIR/ssh-key.pub"
+        [[ "$REGISTER_OSLOGIN_KEY" == "true" ]] && echo "[dry-run]   export ssh_private_key -> $INFRA_DIR/ssh-key (0600)"
         ;;
     esac
     return 0
@@ -353,8 +459,12 @@ run_gcp_terraform() {
   fi
 
   refresh_gcp_credentials
-  echo "Using logged-in GCP credentials (${oslogin_user:-ADC}) and project: ${effective_project}"
-  echo "Public ingress disabled; SSH access configured via gcloud IAP tunnel."
+  if $use_adc; then
+    echo "Using Application Default Credentials (active gcloud account: ${oslogin_user:-ADC}) and project: ${effective_project}"
+  else
+    echo "Using logged-in GCP credentials (${oslogin_user:-gcloud}) and project: ${effective_project}"
+  fi
+  echo "Public ingress disabled; SSH via gcloud IAP (register_oslogin_ssh_key=${REGISTER_OSLOGIN_KEY})."
 
   echo "Enabling required GCP APIs (compute, iap, oslogin, iam) in project: ${effective_project}..."
   gcloud services enable compute.googleapis.com iap.googleapis.com oslogin.googleapis.com iam.googleapis.com \
@@ -444,7 +554,7 @@ print(f"{gpu_zone} {gpu_status} {ctrl_zone} {data_zone} {prefix}-vm")
     fi
 
     echo "Discovering zones offering ${effective_machine} in project ${effective_project}..."
-    if [[ -z "$explicit_region" && -z "$ZONE" && "$state_data_zone" != "-" ]]; then
+    if [[ -z "$explicit_region" && -z "$ZONE" && "$state_gpu_zone" != "-" && "$state_data_zone" != "-" ]]; then
       default_region="${state_data_zone%-*}"
     fi
     local all_machine_zones
@@ -518,29 +628,96 @@ PY
 
   echo "Candidate region/zone order (${#candidate_targets[@]}): ${candidate_targets[*]}"
 
-  if [[ "$state_gpu_zone" == "-" ]]; then
-    local orphans
-    orphans="$(gcloud compute instances list \
-      --project="${effective_project}" \
-      --filter="name=${expected_gpu_name}" \
-      --format="value(name,zone.basename())" 2>/dev/null || true)"
-    if [[ -n "$orphans" ]]; then
-      while read -r oname ozone; do
-        [[ -z "$oname" || -z "$ozone" ]] && continue
-        echo "Removing untracked orphan ${oname} in ${ozone} (keeping persistent data disk)..."
-        gcloud compute instances delete "$oname" \
-          --zone="$ozone" \
-          --project="$effective_project" \
-          --keep-disks=data \
-          --quiet || true
-      done <<< "$orphans"
+  local expected_ctrl_name="${expected_gpu_name%-vm}-controller"
+  local expected_ctrl_int_ip="${expected_gpu_name%-vm}-controller-internal-ip"
+  local expected_gpu_int_ip="${expected_gpu_name%-vm}-vm-internal-ip"
+
+  cleanup_untracked_gcp_orphans() {
+    local cur_gpu_zone cur_ctrl_zone cur_ctrl_ip_reg cur_gpu_ip_reg
+    read -r cur_gpu_zone cur_ctrl_zone cur_ctrl_ip_reg cur_gpu_ip_reg < <(
+      "${TF[@]}" state pull 2>/dev/null | python3 -c '
+import json, sys
+try:
+    s = json.load(sys.stdin)
+except Exception:
+    print("- - - -")
+    sys.exit(0)
+gz = cz = cir = gir = "-"
+for r in s.get("resources", []):
+    insts = r.get("instances", [])
+    if not insts:
+        continue
+    attrs = insts[0].get("attributes", {})
+    rt, rn = r.get("type"), r.get("name")
+    if rt == "google_compute_instance" and rn == "gpu_vm":
+        gz = attrs.get("zone") or "-"
+    elif rt == "google_compute_instance" and rn == "controller":
+        cz = attrs.get("zone") or "-"
+    elif rt == "google_compute_address" and rn == "controller_internal_ip":
+        cir = (attrs.get("region") or "-").rsplit("/", 1)[-1]
+    elif rt == "google_compute_address" and rn == "gpu_internal_ip":
+        gir = (attrs.get("region") or "-").rsplit("/", 1)[-1]
+print(f"{gz} {cz} {cir} {gir}")
+'
+    )
+
+    if [[ "$cur_gpu_zone" == "-" ]]; then
+      local gpu_orphans
+      gpu_orphans="$(gcloud compute instances list \
+        --project="${effective_project}" \
+        --filter="name=${expected_gpu_name}" \
+        --format="value(name,zone.basename())" 2>/dev/null || true)"
+      if [[ -n "$gpu_orphans" ]]; then
+        while read -r oname ozone; do
+          [[ -z "$oname" || -z "$ozone" ]] && continue
+          echo "Removing untracked orphan ${oname} in ${ozone} (keeping persistent data disk)..."
+          gcloud compute instances delete "$oname" \
+            --zone="$ozone" --project="$effective_project" --keep-disks=data --quiet || true
+        done <<< "$gpu_orphans"
+      fi
     fi
-  fi
+
+    if [[ "$cur_ctrl_zone" == "-" ]]; then
+      local ctrl_orphans
+      ctrl_orphans="$(gcloud compute instances list \
+        --project="${effective_project}" \
+        --filter="name=${expected_ctrl_name}" \
+        --format="value(name,zone.basename())" 2>/dev/null || true)"
+      if [[ -n "$ctrl_orphans" ]]; then
+        while read -r cname czone; do
+          [[ -z "$cname" || -z "$czone" ]] && continue
+          echo "Removing untracked orphan controller ${cname} in ${czone} (releasing subnetwork)..."
+          gcloud compute instances delete "$cname" \
+            --zone="$czone" --project="$effective_project" --quiet || true
+        done <<< "$ctrl_orphans"
+      fi
+    fi
+
+    local addr_orphans
+    addr_orphans="$(gcloud compute addresses list \
+      --project="${effective_project}" \
+      --filter="name=(${expected_ctrl_int_ip} ${expected_gpu_int_ip})" \
+      --format="value(name,region.basename())" 2>/dev/null || true)"
+    if [[ -n "$addr_orphans" ]]; then
+      while read -r aname aregion; do
+        [[ -z "$aname" || -z "$aregion" ]] && continue
+        if [[ "$aname" == "$expected_ctrl_int_ip" && "$aregion" != "$cur_ctrl_ip_reg" ]] || \
+           [[ "$aname" == "$expected_gpu_int_ip" && "$aregion" != "$cur_gpu_ip_reg" ]]; then
+          echo "Removing untracked internal IP ${aname} in ${aregion}..."
+          gcloud compute addresses delete "$aname" \
+            --region="$aregion" --project="$effective_project" --quiet || true
+        fi
+      done <<< "$addr_orphans"
+    fi
+  }
+
+  cleanup_untracked_gcp_orphans
 
   local deployed_region=""
   local deployed_zone=""
   local preempted_target=""
   local skip_region=""
+  local prev_region=""
   local last_idx=$(( ${#candidate_targets[@]} - 1 ))
   local log_file
   log_file="$(mktemp)"
@@ -568,17 +745,28 @@ PY
       continue
     fi
 
+    if [[ -n "$prev_region" && "$cand_region" != "$prev_region" ]]; then
+      cleanup_untracked_gcp_orphans
+    fi
+    prev_region="$cand_region"
+
     echo "Trying region ${cand_region} / zone ${cand_zone} ($((idx + 1))/${#candidate_targets[@]})..."
     refresh_gcp_credentials
     build_tf_args "$cand_region" "$cand_zone"
 
+    # Allocate the Spot GPU VM first (`-target=google_compute_instance.gpu_vm`) so switching
+    # regions on stockout never creates or orphans `dev-gpu-controller` in an unused subnetwork;
+    # once `gpu_vm` succeeds, converge the remaining stack (`controller` + IAM) in full.
     : > "$log_file"
     set +e
-    "${TF[@]}" apply "${apply_args[@]}" 2>&1 | tee "$log_file"
+    "${TF[@]}" apply "${apply_args[@]}" -target=google_compute_instance.gpu_vm 2>&1 | tee "$log_file"
     local status=${PIPESTATUS[0]}
     set -e
 
     if [[ $status -eq 0 ]]; then
+      echo "GPU VM ready in ${cand_zone}; converging controller VM and watchdog IAM..."
+      refresh_gcp_credentials
+      "${TF[@]}" apply "${apply_args[@]}"
       deployed_region="$cand_region"
       deployed_zone="$cand_zone"
       break
@@ -635,10 +823,12 @@ PY
     exit 1
   fi
 
-  "${TF[@]}" output -raw ssh_private_key > "$INFRA_DIR/ssh-key"
-  chmod 600 "$INFRA_DIR/ssh-key"
-  "${TF[@]}" output -raw ssh_public_key > "$INFRA_DIR/ssh-key.pub"
-  chmod 644 "$INFRA_DIR/ssh-key.pub"
+  if [[ "$REGISTER_OSLOGIN_KEY" == "true" ]]; then
+    "${TF[@]}" output -raw ssh_private_key > "$INFRA_DIR/ssh-key"
+    chmod 600 "$INFRA_DIR/ssh-key"
+    "${TF[@]}" output -raw ssh_public_key > "$INFRA_DIR/ssh-key.pub"
+    chmod 644 "$INFRA_DIR/ssh-key.pub"
+  fi
 
   local known_hosts
   known_hosts="$("${TF[@]}" output -raw known_hosts_entries || true)"
@@ -670,8 +860,8 @@ PY
   echo "Connect directly to GPU VM (via gcloud IAP):"
   echo "  ${gpu_ssh_cmd}"
   echo ""
-  echo "Configure GitHub Actions Runner on Controller:"
-  echo "  ./development/scripts/setup.sh --provider=gcp --repo=vitorecomp/<repo> --token=<RUNNER_TOKEN>"
+  echo "Sync development/.env to GitHub & Configure Runner on Controller:"
+  echo "  ./development/scripts/setup.sh --provider=gcp"
   echo ""
   gcloud compute instances list \
     --filter="name=(${ctrl_name} ${gpu_name})" \
