@@ -567,10 +567,20 @@ if [[ "${WAIT_FOR_MODEL,,}" =~ ^(1|true|yes|on)$ ]]; then
     sleep 20
   done
   echo "[ok] vllm-server is healthy after $(( (SECONDS - started) / 60 )) min."
+  # /health answering on the host while podman's in-container healthcheck keeps failing points at the container
+  # itself (e.g. its pids limit exhausted, so `podman exec` cannot fork): show podman's last check result and PIDs.
+  hc_status="$(sudo podman inspect -f '{{.State.Health.Status}}' vllm-server 2>/dev/null || true)"
+  if [[ -n "$hc_status" && "$hc_status" != "healthy" && "$hc_status" != "starting" ]]; then
+    echo "[warn] /health answers 200 but podman marks vllm-server '${hc_status}' (PIDs: $(sudo podman stats --no-stream --format '{{.PIDs}}' vllm-server 2>/dev/null || echo ?)); last healthcheck results:"
+    sudo podman inspect -f '{{range .State.Health.Log}}exit={{.ExitCode}} {{.Output}}{{"\n"}}{{end}}' vllm-server 2>/dev/null \
+      | tr '\r' ' ' | grep -v '^\s*$' | tail -n 2 | cut -c1-300 | sed 's/^/    /' || true
+  fi
+  # DeepSeek V4.1 reasons before answering; a budget too small for the reasoning leaves message.content null
+  # (finish_reason "length"). Any completion proves the model serves end to end through LiteLLM.
   master_key="$(sed -n 's/^LITELLM_MASTER_KEY=//p' .env | head -n1)"
   reply="$(printf 'Authorization: Bearer %s\n' "$master_key" | curl -s --max-time 900 -H @- -H 'Content-Type: application/json' \
     http://127.0.0.1:4000/v1/chat/completions \
-    -d '{"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "Reply with exactly: ok"}], "max_tokens": 32}' \
+    -d '{"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "Reply with exactly: ok"}], "max_tokens": 256}' \
     | python3 -c 'import json, sys
 try:
     r = json.load(sys.stdin)
@@ -579,7 +589,13 @@ except ValueError:
 choices = r.get("choices") or []
 if not choices:
     sys.exit("no completion: " + json.dumps(r)[:300])
-print((choices[0].get("message") or {}).get("content", "")[:120].replace("\n", " "))')" || {
+choice = choices[0]
+msg = choice.get("message") or {}
+text = (msg.get("content") or "").strip()
+if not text:
+    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+    text = "(no final text: finish_reason=%s, %d reasoning chars)" % (choice.get("finish_reason"), len(reasoning))
+print(text[:120].replace("\n", " "))')" || {
     echo "[error] LiteLLM -> vllm-server chat check failed: ${reply}" >&2
     exit 1
   }
