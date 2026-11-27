@@ -216,6 +216,16 @@ sudo mkdir -p \
 sudo chmod 0700 "${DATA_ROOT}/reverse-tunnel"
 sudo chmod -R 1777 "${DATA_ROOT}/deepseek-harness" "${DATA_ROOT}/reverse-tunnel/state"
 sudo touch "${DATA_ROOT}/reverse-tunnel/known_hosts"
+# Large readahead on the disk behind DATA_ROOT: vLLM loads the checkpoint through mmap page faults, which with the
+# default 128 KiB readahead become ~20 KiB reads and pin the disk at its IOPS cap (76 MB/s measured); 16 MiB gave
+# ~92 KiB reads and 4.7x faster model loading. Same setting as the startup-script in development/infra/gcp/main.tf.
+DATA_SRC="$(findmnt -no SOURCE --target "${DATA_ROOT}" 2>/dev/null || true)"
+if [[ -n "$DATA_SRC" && -b "$DATA_SRC" ]]; then
+  DATA_BLK="$(lsblk -ndo PKNAME "$DATA_SRC" 2>/dev/null || true)"
+  [[ -n "$DATA_BLK" ]] || DATA_BLK="$(basename "$(readlink -f "$DATA_SRC")")"
+  echo 16384 | sudo tee "/sys/block/${DATA_BLK}/queue/read_ahead_kb" >/dev/null 2>&1 || true
+  echo "[bootstrap] ${DATA_ROOT} on ${DATA_BLK}: read_ahead_kb=$(cat "/sys/block/${DATA_BLK}/queue/read_ahead_kb" 2>/dev/null || echo '?')"
+fi
 sudo chmod 0644 "${DATA_ROOT}/reverse-tunnel/known_hosts"
 sudo chown -R "$(id -u):$(id -g)" "${REMOTE_STACK_DIR}"
 

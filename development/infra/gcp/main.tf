@@ -52,6 +52,12 @@ if [ -n "$UUID" ] && ! grep -q "$UUID" /etc/fstab; then
   echo "UUID=$UUID $MOUNT_POINT ext4 discard,defaults,nofail 0 2" >> /etc/fstab
 fi
 chmod 1777 "$MOUNT_POINT"
+# Large readahead: vLLM loads the safetensors checkpoint through mmap page faults, which with the default 128 KiB
+# readahead become ~20 KiB reads and pin the disk at its IOPS cap (76 MB/s on a 4,000-IOPS replica). 16 MiB gave
+# ~92 KiB reads and 4.7x faster loading. Same setting as development/scripts/deploy_gpu_stack.sh.
+DATA_BLK="$(lsblk -ndo PKNAME "$DATA_DISK" 2>/dev/null)"
+[ -n "$DATA_BLK" ] || DATA_BLK="$(basename "$(readlink -f "$DATA_DISK")")"
+echo 16384 > "/sys/block/$DATA_BLK/queue/read_ahead_kb" 2>/dev/null || echo "[warn] Could not set readahead on $DATA_BLK."
 
 # 2. Create persistent directories on /mnt/data (preserved across Spot preemptions).
 mkdir -p \
