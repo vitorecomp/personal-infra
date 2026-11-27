@@ -42,6 +42,9 @@ flowchart LR
 - **Neon**: managed Postgres 15 (free plan; compute scales to zero, the container health check never touches it).
 - **Backups** ([backup-restore.md](./backup-restore.md)): daily restic snapshots to `gs://$BACKUP_BUCKET`
   (blog MySQL + content; Taiga Neon dump + media bucket mirror + edge certificates).
+- **GPU dev machine services** ([`development/`](../development/README.md)): LiteLLM and the DeepSeek Harness run on
+  the GPU VM and reach `personal-host` over reverse SSH tunnels (restricted `tunnel` user) bound to **127.0.0.1**
+  only: usable from inside the VM or via `ssh -L`, never exposed to the internet.
 - **Spare OCI VM** ([`cloud/infra/envs/oci-blog`](../cloud/infra/envs/oci-blog)): Always Free A1 in `sa-saopaulo-1`,
   compartment `vitorecomp`; no capacity yet, a retry loop keeps trying (`oci-blog-retry.service` on the VM, see [vm-provisioning.md](./vm-provisioning.md#oci-capacity-retry-loop-on-the-vm)).
   OCI has a budget alert on any spend.

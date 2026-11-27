@@ -53,7 +53,7 @@ DNS is on Cloudflare (DNS-only records, managed by hand). All personal domains, 
 - **Stacks**: `cloud/<stack>/` with `stack.json` + `.env.example` (+ `compose.yml` when it runs on the VM). Nothing is built on the VM: the blog image is built in CI and pulled from GHCR, Taiga is built and deployed to Cloud Run from CI. Secrets live only in `/opt/stacks/<stack>/.env` on the VM, Secret Manager (Taiga runtime) and GitHub Secrets.
 - **Scripts** (stdlib Python / bash, all with `--dry-run`):
   [`sync_github_secrets.py`](./cloud/scripts/sync_github_secrets.py) (syncs root `.env` to GitHub Secrets),
-  [`bootstrap_vm.py`](./cloud/scripts/bootstrap_vm.py) (host setup, `--check` for drift),
+  [`bootstrap_vm.py`](./cloud/scripts/bootstrap_vm.py) (host setup, `--check` for drift, `--tunnel-pubkey-file` for the GPU machine's reverse-tunnel user),
   [`deploy_stack.py`](./cloud/scripts/deploy_stack.py) (rsync + `.env` preflight + `compose pull`/`up --wait` + HTTPS check; used by CI and locally),
   [`backup_stack.py`](./cloud/scripts/backup_stack.py) (DB dumps incl. remote Neon, volumes, GCS buckets → restic in `gs://$BACKUP_BUCKET`),
   [`tf_apply_retry.sh`](./cloud/scripts/tf_apply_retry.sh) (OCI capacity retry loop),

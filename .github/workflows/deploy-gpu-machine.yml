@@ -5,7 +5,8 @@ name: Deploy GPU Dev Machine Stack
 #
 # Which self-hosted runner executes this job is controlled by the Repository Variable
 # `GPU_RUNNER` (e.g. `gcp-gpu`, `azure-gpu`, `on-prem-gpu`) or `GPU_RUNNER_LABELS`.
-# Runtime secrets and stack settings live in the protected `gpu` GitHub Environment.
+# Runtime secrets and stack settings live in the protected `gpu` GitHub Environment; host names/IPs and
+# known_hosts lines are environment secrets (masked in this public repo's logs), with variables as fallback.
 
 on:
   workflow_dispatch:
@@ -53,8 +54,8 @@ jobs:
         env:
           # Target routing (auto = `gpu-ssh` on GCP controller, `GPU_SSH_HOST` over SSH, or `local`)
           GPU_TARGET_MODE: ${{ vars.GPU_TARGET_MODE || 'auto' }}
-          GPU_SSH_HOST: ${{ vars.GPU_SSH_HOST }}
-          GPU_SSH_KNOWN_HOSTS: ${{ vars.GPU_SSH_KNOWN_HOSTS }}
+          GPU_SSH_HOST: ${{ secrets.GPU_SSH_HOST || vars.GPU_SSH_HOST }}
+          GPU_SSH_KNOWN_HOSTS: ${{ secrets.GPU_SSH_KNOWN_HOSTS || vars.GPU_SSH_KNOWN_HOSTS }}
           GPU_SSH_PRIVATE_KEY: ${{ secrets.GPU_SSH_PRIVATE_KEY }}
 
           # Core authentication & Hugging Face (model parameters live in development/gpu-dev-machine/compose.yml)
@@ -63,18 +64,18 @@ jobs:
 
           # Reverse SSH tunnels (litellm-tunnel & deepseek-harness-tunnel)
           ENABLE_REVERSE_TUNNELS: ${{ (inputs.enable_tunnels && inputs.enable_tunnels != 'auto' && inputs.enable_tunnels) || vars.ENABLE_REVERSE_TUNNELS || '' }}
-          TUNNEL_SSH_HOST: ${{ vars.TUNNEL_SSH_HOST }}
+          TUNNEL_SSH_HOST: ${{ secrets.TUNNEL_SSH_HOST || vars.TUNNEL_SSH_HOST }}
           TUNNEL_SSH_PORT: ${{ vars.TUNNEL_SSH_PORT || '22' }}
           TUNNEL_SSH_USER: ${{ vars.TUNNEL_SSH_USER }}
           TUNNEL_BIND_ADDRESS: ${{ vars.TUNNEL_BIND_ADDRESS || '127.0.0.1' }}
           REMOTE_LITELLM_PORT: ${{ vars.REMOTE_LITELLM_PORT || '4000' }}
           REMOTE_HARNESS_PORT: ${{ vars.REMOTE_HARNESS_PORT || '3080' }}
-          TUNNEL_KNOWN_HOSTS: ${{ vars.TUNNEL_KNOWN_HOSTS }}
+          TUNNEL_KNOWN_HOSTS: ${{ secrets.TUNNEL_KNOWN_HOSTS || vars.TUNNEL_KNOWN_HOSTS }}
           TUNNEL_SSH_PRIVATE_KEY: ${{ secrets.TUNNEL_SSH_PRIVATE_KEY }}
-          LITELLM_TUNNEL_SSH_HOST: ${{ vars.LITELLM_TUNNEL_SSH_HOST }}
+          LITELLM_TUNNEL_SSH_HOST: ${{ secrets.LITELLM_TUNNEL_SSH_HOST || vars.LITELLM_TUNNEL_SSH_HOST }}
           LITELLM_TUNNEL_SSH_PORT: ${{ vars.LITELLM_TUNNEL_SSH_PORT }}
           LITELLM_TUNNEL_SSH_USER: ${{ vars.LITELLM_TUNNEL_SSH_USER }}
-          HARNESS_TUNNEL_SSH_HOST: ${{ vars.HARNESS_TUNNEL_SSH_HOST }}
+          HARNESS_TUNNEL_SSH_HOST: ${{ secrets.HARNESS_TUNNEL_SSH_HOST || vars.HARNESS_TUNNEL_SSH_HOST }}
           HARNESS_TUNNEL_SSH_PORT: ${{ vars.HARNESS_TUNNEL_SSH_PORT }}
           HARNESS_TUNNEL_SSH_USER: ${{ vars.HARNESS_TUNNEL_SSH_USER }}
         run: |

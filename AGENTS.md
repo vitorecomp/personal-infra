@@ -68,7 +68,7 @@ personal-infra/
 │   │   └── compose.local.yml               # Local dev compose stack (127.0.0.1:8080)
 │   └── scripts/
 │       ├── sync_github_secrets.py          # Syncs private domains, emails & GCP IDs from root `.env` to GitHub Secrets via `gh`
-│       ├── bootstrap_vm.py                 # Idempotent host setup over SSH (Docker, deploy user, swap, sshd, firewall, backup timers)
+│       ├── bootstrap_vm.py                 # Idempotent host setup over SSH (Docker, deploy user, swap, sshd, firewall, backup timers, optional GPU reverse-tunnel user)
 │       ├── deploy_stack.py                 # rsync + remote .env preflight + compose pull/up --wait (never builds) + HTTPS check (CI & local)
 │       ├── backup_stack.py                 # Runs on the VM: DB dump + volumes -> restic in gs://$BACKUP_BUCKET
 │       ├── tf_apply_retry.sh               # Retries plan+apply on OCI 'Out of host capacity' (refuses destructive plans)

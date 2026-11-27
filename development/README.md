@@ -263,6 +263,7 @@ All items below are populated automatically from `development/.env` when you run
 | **`TUNNEL_SSH_PRIVATE_KEY`** | When tunnels enabled | OpenSSH private key uploaded from `TUNNEL_SSH_KEY_FILE` in `development/.env`, used by `litellm-tunnel` and `deepseek-harness-tunnel`. |
 | **`HF_TOKEN`** | Optional | Hugging Face read token to avoid rate limits when downloading `deepseek-ai/DeepSeek-V4.1-Flash`. |
 | **`GPU_SSH_PRIVATE_KEY`** | Optional (non-GCP) | SSH private key uploaded from `GPU_SSH_KEY_FILE` when `GPU_TARGET_MODE=ssh` targets an external `GPU_SSH_HOST`. |
+| **`TUNNEL_SSH_HOST`**, **`TUNNEL_KNOWN_HOSTS`** (+ `LITELLM_`/`HARNESS_TUNNEL_SSH_HOST`, `GPU_SSH_HOST`, `GPU_SSH_KNOWN_HOSTS`) | When set | Host names/IPs and host keys of personal machines. `setup.sh` stores them as secrets (masked in this public repo's logs) and deletes same-named variables; the workflow falls back to variables. |
 
 ### 3. `gpu` Environment Variables (`Settings → Environments → gpu → Environment variables`)
 
@@ -272,10 +273,10 @@ All items below are populated automatically from `development/.env` when you run
 | :--- | :--- | :--- | :--- |
 | **`GPU_TARGET_MODE`** | Optional | `local` *(in `.env.example`; `auto` workflow fallback)* | Execution mode for `deploy_gpu_stack.sh`: `local` (default for self-registering GCP MIG runner), `auto`, or `ssh`. |
 | **`ENABLE_REVERSE_TUNNELS`** | Optional | `false` *(or `true` if `TUNNEL_SSH_HOST` set)* | `true` starts `litellm-tunnel` + `deepseek-harness-tunnel`; `false` starts only `ray-server`, `litellm`, and `deepseek-harness`. |
-| **`TUNNEL_SSH_HOST`** | When tunnels enabled | — | Remote bastion/workstation hostname or IP receiving the reverse-forwarded ports. |
+| **`TUNNEL_SSH_HOST`** | When tunnels enabled | — | *(Now synced as a secret, see above.)* Remote host receiving the reverse-forwarded ports. |
 | **`TUNNEL_SSH_USER`** | When tunnels enabled | — | SSH username on `TUNNEL_SSH_HOST`. |
 | **`TUNNEL_SSH_PORT`** | Optional | `22` | SSH port on `TUNNEL_SSH_HOST`. |
-| **`TUNNEL_KNOWN_HOSTS`** | Optional | *(accept-new TOFU)* | Pinned `ssh-keyscan` line(s) for `TUNNEL_SSH_HOST` (enforces `StrictHostKeyChecking=yes`). |
+| **`TUNNEL_KNOWN_HOSTS`** | Optional | *(accept-new TOFU)* | *(Now synced as a secret.)* Pinned `ssh-keyscan` line(s) for `TUNNEL_SSH_HOST` (enforces `StrictHostKeyChecking=yes`). |
 | **`TUNNEL_BIND_ADDRESS`** | Optional | `127.0.0.1` | Interface bound on `TUNNEL_SSH_HOST` (`127.0.0.1` or `0.0.0.0`). |
 | **`REMOTE_LITELLM_PORT`** | Optional | `4000` | Port opened on `TUNNEL_SSH_HOST` forwarding to `litellm:4000`. |
 | **`REMOTE_HARNESS_PORT`** | Optional | `3080` | Port opened on `TUNNEL_SSH_HOST` forwarding to `deepseek-harness:3080`. |
@@ -311,6 +312,33 @@ The MIG `update_policy` uses `replacement_method = "RECREATE"`, replacing the VM
 # Switch back to Spot
 ./development/scripts/deploy.sh --provider=gcp --spot
 ```
+
+### Use LiteLLM & the DeepSeek Harness from `personal-host` (private)
+
+The reverse tunnels publish `litellm:4000` and `deepseek-harness:3080` on **loopback** of the always-on GCE VM
+`personal-host` (the blog/edge VM). Nothing is exposed to the internet: use them from a shell on that VM, or
+from your workstation through an SSH port-forward to it.
+
+```bash
+# On personal-host
+curl -s http://127.0.0.1:4000/v1/models -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+curl -s http://127.0.0.1:3080/ >/dev/null && echo "harness up"
+# From the workstation (harness UI at http://127.0.0.1:3080, LiteLLM at http://127.0.0.1:4000)
+ssh -N -L 3080:127.0.0.1:3080 -L 4000:127.0.0.1:4000 ubuntu@<vm-ip>
+```
+
+One-time setup:
+
+```bash
+# 1. personal-host: a no-shell `tunnel` user whose key may only open 127.0.0.1:4000 and 127.0.0.1:3080
+python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<vm-ip> --provider gce --deploy-pubkey-file ~/.ssh/taiga_deploy.pub \
+  --tunnel-pubkey-file ~/.ssh/gpu_tunnel_ed25519.pub --swap-gb 3 --backup-stack personal-blog --backup-stack taiga
+# 2. development/.env: ENABLE_REVERSE_TUNNELS=true, TUNNEL_SSH_HOST=<vm-ip>, TUNNEL_SSH_USER=tunnel,
+#    TUNNEL_BIND_ADDRESS=127.0.0.1, TUNNEL_KNOWN_HOSTS="<vm-ip> ssh-ed25519 ..." ; then sync and deploy:
+./development/scripts/setup.sh --provider=gcp
+```
+
+Both ports are closed while the GPU machine is stopped or preempted; autossh reconnects when it is back.
 
 ### Update Secrets / Tunnel Settings & Redeploy Stack
 ```bash

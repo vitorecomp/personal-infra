@@ -113,8 +113,9 @@ IP=$(terraform output -raw public_ip)
 cd ../../../..
 python3 cloud/scripts/bootstrap_vm.py --host ubuntu@$IP --identity-file ~/.ssh/infra_admin \
   --provider gce --deploy-pubkey-file ~/.ssh/taiga_deploy.pub --swap-gb 3 \
-  --backup-stack personal-blog --backup-stack taiga --dry-run
+  --backup-stack personal-blog --backup-stack taiga --tunnel-pubkey-file ~/.ssh/gpu_tunnel_ed25519.pub --dry-run
 # repeat without --dry-run, then once more with --check (expect "no drift")
+# --tunnel-pubkey-file adds the no-shell `tunnel` user for the GPU machine's reverse tunnels (development/README.md)
 # the spare OCI VM would use --provider oracle (no swap flag)
 ```
 

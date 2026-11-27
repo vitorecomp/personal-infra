@@ -53,6 +53,25 @@ SSHD_DROPIN = (
     "X11Forwarding no\n"
     "MaxAuthTries 4\n"
 )
+# Reverse SSH tunnels from the GPU dev machine (development/gpu-dev-machine): a key-only user that may only
+# open the listed remote listeners on loopback, so LiteLLM / the harness are usable from inside this VM (or via
+# `ssh -L` through it) and never exposed to the internet. The Match block ends with `Match all` because Ubuntu
+# includes sshd_config.d/*.conf at the top of sshd_config.
+DEFAULT_TUNNEL_USER = "tunnel"
+DEFAULT_TUNNEL_LISTENS = ("127.0.0.1:4000", "127.0.0.1:3080")
+TUNNEL_SSHD_DROPIN_PATH = "/etc/ssh/sshd_config.d/99-personal-infra-tunnel.conf"
+TUNNEL_SSHD_DROPIN = (
+    "# Managed by personal-infra cloud/scripts/bootstrap_vm.py: reverse tunnels from the GPU machine\n"
+    "Match User {user}\n"
+    "\tAllowTcpForwarding remote\n"
+    "\tGatewayPorts no\n"
+    "\tPermitTTY no\n"
+    "\tX11Forwarding no\n"
+    "\tAllowAgentForwarding no\n"
+    "\tPermitTunnel no\n"
+    "\tForceCommand /usr/sbin/nologin\n"
+    "Match all\n"
+)
 AUTO_UPGRADES = 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n'
 BACKUP_SERVICE = """# Managed by personal-infra cloud/scripts/bootstrap_vm.py
 [Unit]
@@ -294,6 +313,27 @@ class Converger:
             elif self.change(f"enable {unit}"):
                 self.sh(f"systemctl enable --now {unit}")
 
+    def tunnel_user(self, user: str, pubkey: str, listens: list[str]) -> None:
+        """Key-only user for `ssh -N -R <listen>:...` from the GPU machine; nothing else is allowed."""
+        if self.sh(f"id -u {user}", check=False).returncode == 0:
+            self.ok(f"user {user} exists")
+        elif self.change(f"create tunnel user {user} (no shell)"):
+            self.sh(f"useradd --system --create-home --home-dir /home/{user} --shell /usr/sbin/nologin {user}")
+            self.sh(f"usermod -p '*' {user}")  # no password, not locked: pubkey auth still works
+        permits = ",".join(f'permitlisten="{listen}"' for listen in listens)
+        auth_line = f"restrict,port-forwarding,{permits} {pubkey.strip()}\n"
+        if self.sh(f"id -u {user}", check=False).returncode == 0:
+            home = self.sh(f"getent passwd {user} | cut -d: -f6").stdout.strip()
+            ssh_dir = f"{home}/.ssh"
+            if self.ensure_file(f"{ssh_dir}/authorized_keys", auth_line, mode=0o600):
+                self.sh(f"chown -R {user}:{user} {shlex.quote(ssh_dir)} && chmod 700 {shlex.quote(ssh_dir)}")
+        if self.ensure_file(TUNNEL_SSHD_DROPIN_PATH, TUNNEL_SSHD_DROPIN.format(user=user)):
+            test = self.sh("sshd -t", check=False)
+            if test.returncode != 0:
+                os.remove(TUNNEL_SSHD_DROPIN_PATH)
+                raise RuntimeError(f"sshd -t rejected the tunnel drop-in (removed it): {test.stderr.strip()}")
+            self.sh("systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true")
+
     def host_key(self) -> None:
         r = self.sh("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub", check=False)
         if r.returncode == 0:
@@ -305,6 +345,8 @@ def remote_main(args: argparse.Namespace) -> int:
         print("[error] remote mode must run as root", file=sys.stderr)
         return 1
     pubkey = base64.b64decode(args.deploy_pubkey_b64).decode().strip() if args.deploy_pubkey_b64 else ""
+    tunnel_pubkey = base64.b64decode(args.tunnel_pubkey_b64).decode().strip() if args.tunnel_pubkey_b64 else ""
+    tunnel_listens = args.tunnel_listen or list(DEFAULT_TUNNEL_LISTENS)
     conv = Converger(check_only=args.mode == "check")
     steps = [
         ("os", conv.assert_ubuntu),
@@ -314,6 +356,8 @@ def remote_main(args: argparse.Namespace) -> int:
         ("swap", lambda: conv.swap(args.swap_gb)),
         ("user", lambda: conv.deploy_user(args.deploy_user, pubkey)),
         ("sshd", conv.sshd),
+        ("tunnel", (lambda: conv.tunnel_user(args.tunnel_user, tunnel_pubkey, tunnel_listens)) if tunnel_pubkey
+                   else (lambda: conv.ok("no tunnel user requested (--tunnel-pubkey-file)"))),
         ("firewall", conv.oracle_iptables if args.provider == "oracle" else lambda: conv.ok("GCE: VPC firewall is the perimeter (no host rules)")),
         ("upgrades", lambda: conv.unattended_upgrades(args.reboot_time)),
         ("backups", lambda: conv.backup_units(args.deploy_user, args.backup_stack)),
@@ -347,6 +391,18 @@ def local_main(args: argparse.Namespace) -> int:
         print("[error] --deploy-pubkey-file/--deploy-pubkey must be an OpenSSH PUBLIC key", file=sys.stderr)
         return 1
 
+    tunnel_pubkey = ""
+    if args.tunnel_pubkey_file:
+        tunnel_pubkey = Path(args.tunnel_pubkey_file).expanduser().read_text().strip()
+        if not tunnel_pubkey.startswith(("ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-", "sk-ssh-ed25519")):
+            print("[error] --tunnel-pubkey-file must be an OpenSSH PUBLIC key", file=sys.stderr)
+            return 1
+    tunnel_listens = args.tunnel_listen or list(DEFAULT_TUNNEL_LISTENS)
+    bad = [listen for listen in tunnel_listens if not re.fullmatch(r"[0-9a-zA-Z.\-]+:[0-9]{1,5}", listen)]
+    if bad:
+        print(f"[error] --tunnel-listen must be HOST:PORT (got {bad})", file=sys.stderr)
+        return 1
+
     mode = "check" if args.check else "apply"
     remote_args = [
         "--remote",
@@ -359,6 +415,11 @@ def local_main(args: argparse.Namespace) -> int:
     ]
     for stack in args.backup_stack:
         remote_args += ["--backup-stack", stack]
+    if tunnel_pubkey:
+        remote_args += ["--tunnel-user", args.tunnel_user,
+                        "--tunnel-pubkey-b64", base64.b64encode(tunnel_pubkey.encode()).decode()]
+        for listen in tunnel_listens:
+            remote_args += ["--tunnel-listen", listen]
 
     ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", f"StrictHostKeyChecking={args.host_key_checking}"]
     if args.identity_file:
@@ -370,7 +431,8 @@ def local_main(args: argparse.Namespace) -> int:
         print(f"[dry-run] Steps on {args.host} ({args.provider}): Ubuntu check, apt basics, Docker CE + compose plugin, "
               f"daemon.json + journald cap, {args.swap_gb}G swap, user '{args.deploy_user}' + deploy key, /opt/stacks, "
               f"sshd hardening, {'iptables 80/443 (live + rules.v4)' if args.provider == 'oracle' else 'no host firewall'}, "
-              f"unattended-upgrades (reboot {args.reboot_time}), backup timers: {', '.join(args.backup_stack) or 'none'}")
+              f"unattended-upgrades (reboot {args.reboot_time}), backup timers: {', '.join(args.backup_stack) or 'none'}, "
+              f"tunnel user: {f'{args.tunnel_user} (listen {chr(44).join(tunnel_listens)})' if tunnel_pubkey else 'none'}")
         return 0
 
     print(f"[bootstrap] {'Checking' if args.check else 'Converging'} {args.host} ({args.provider}) ...")
@@ -396,6 +458,9 @@ def main() -> None:
     parser.add_argument("--swap-gb", type=int, default=DEFAULT_SWAP_GB, help=f"Swapfile size in GB (default: {DEFAULT_SWAP_GB})")
     parser.add_argument("--reboot-time", default=DEFAULT_REBOOT_TIME, help=f"Unattended-upgrades reboot time, UTC (default: {DEFAULT_REBOOT_TIME})")
     parser.add_argument("--backup-stack", action="append", default=[], help="Enable stack-backup@<name>.timer (repeatable)")
+    parser.add_argument("--tunnel-pubkey-file", help="Public key for the restricted reverse-tunnel user (GPU machine -> this VM)")
+    parser.add_argument("--tunnel-user", default=DEFAULT_TUNNEL_USER, help=f"Reverse-tunnel user (default: {DEFAULT_TUNNEL_USER})")
+    parser.add_argument("--tunnel-listen", action="append", default=[], help=f"Remote listener the tunnel key may open, HOST:PORT (repeatable; default: {' '.join(DEFAULT_TUNNEL_LISTENS)})")
     parser.add_argument("--identity-file", help="Admin SSH private key")
     parser.add_argument("--host-key-checking", choices=("yes", "accept-new"), default="accept-new", help="StrictHostKeyChecking for the admin connection (default: accept-new)")
     parser.add_argument("--check", action="store_true", help="Report drift without changing anything (exit 2 on drift)")
@@ -404,6 +469,7 @@ def main() -> None:
     parser.add_argument("--remote", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--mode", choices=("check", "apply"), default="apply", help=argparse.SUPPRESS)
     parser.add_argument("--deploy-pubkey-b64", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--tunnel-pubkey-b64", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if args.remote:

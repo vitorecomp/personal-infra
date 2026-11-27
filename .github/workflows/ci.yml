@@ -62,6 +62,7 @@ jobs:
       run: |
         python3 cloud/scripts/bootstrap_vm.py --host ci@example.invalid --provider oracle --deploy-pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly ci" --backup-stack personal-blog --dry-run
         python3 cloud/scripts/bootstrap_vm.py --host ci@example.invalid --provider gce --deploy-pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly ci" --swap-gb 3 --backup-stack taiga --dry-run
+        printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly tunnel\n' > "$RUNNER_TEMP/tunnel.pub" && python3 cloud/scripts/bootstrap_vm.py --host ci@example.invalid --provider gce --deploy-pubkey "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnly ci" --tunnel-pubkey-file "$RUNNER_TEMP/tunnel.pub" --dry-run
         BLOG_DOMAIN=blog.example.com python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@example.invalid --dry-run
         BLOG_DOMAIN=blog.example.com STACK_DOMAIN=blog.example.com GHOST_IMAGE=ghcr.io/example/personal-blog@sha256:0000 REGISTRY_USER=ci REGISTRY_TOKEN=ci python3 cloud/scripts/deploy_stack.py --stack personal-blog --host deploy@example.invalid --sync-env GHOST_IMAGE,STACK_DOMAIN --dry-run
         TAIGA_DOMAIN=taiga.example.com python3 cloud/scripts/deploy_stack.py --stack taiga --host deploy@example.invalid --dry-run
@@ -126,7 +127,7 @@ jobs:
         missing = [f for f in meta["required_files"] if not (stack / f).exists()]
         if missing:
             sys.exit(f"missing required files: {missing}")
-        domain_label = meta.get("domain") or (f"${{{meta['domain_env']}}}" if meta.get("domain_env") else None)
+        domain_label = meta.get("domain") or ("$" + "{" + meta["domain_env"] + "}" if meta.get("domain_env") else None)
         print(f"stack.json ok: {meta['name']} -> {domain_label}")
         PY
 

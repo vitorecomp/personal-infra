@@ -570,17 +570,20 @@ sync_github_settings() {
     "REMOTE_HARNESS_PORT=${REMOTE_HARNESS_PORT_VAL}"
     "GPU_TARGET_MODE=${GPU_TARGET_MODE_VAL}"
   )
-  [[ -n "$TUNNEL_HOST_VAL" ]] && env_vars_to_set+=("TUNNEL_SSH_HOST=${TUNNEL_HOST_VAL}")
+  # Host names/IPs and host keys identify personal machines: store them as environment SECRETS so the
+  # public repository's Actions logs mask them (plain variables are printed in each step's env block).
+  local -a env_secrets_to_set=()
+  [[ -n "$TUNNEL_HOST_VAL" ]] && env_secrets_to_set+=("TUNNEL_SSH_HOST=${TUNNEL_HOST_VAL}")
   [[ -n "$TUNNEL_USER_VAL" ]] && env_vars_to_set+=("TUNNEL_SSH_USER=${TUNNEL_USER_VAL}")
-  [[ -n "$effective_tunnel_kh" ]] && env_vars_to_set+=("TUNNEL_KNOWN_HOSTS=${effective_tunnel_kh}")
-  [[ -n "$LITELLM_TUNNEL_HOST_VAL" ]] && env_vars_to_set+=("LITELLM_TUNNEL_SSH_HOST=${LITELLM_TUNNEL_HOST_VAL}")
+  [[ -n "$effective_tunnel_kh" ]] && env_secrets_to_set+=("TUNNEL_KNOWN_HOSTS=${effective_tunnel_kh}")
+  [[ -n "$LITELLM_TUNNEL_HOST_VAL" ]] && env_secrets_to_set+=("LITELLM_TUNNEL_SSH_HOST=${LITELLM_TUNNEL_HOST_VAL}")
   [[ -n "$LITELLM_TUNNEL_PORT_VAL" ]] && env_vars_to_set+=("LITELLM_TUNNEL_SSH_PORT=${LITELLM_TUNNEL_PORT_VAL}")
   [[ -n "$LITELLM_TUNNEL_USER_VAL" ]] && env_vars_to_set+=("LITELLM_TUNNEL_SSH_USER=${LITELLM_TUNNEL_USER_VAL}")
-  [[ -n "$HARNESS_TUNNEL_HOST_VAL" ]] && env_vars_to_set+=("HARNESS_TUNNEL_SSH_HOST=${HARNESS_TUNNEL_HOST_VAL}")
+  [[ -n "$HARNESS_TUNNEL_HOST_VAL" ]] && env_secrets_to_set+=("HARNESS_TUNNEL_SSH_HOST=${HARNESS_TUNNEL_HOST_VAL}")
   [[ -n "$HARNESS_TUNNEL_PORT_VAL" ]] && env_vars_to_set+=("HARNESS_TUNNEL_SSH_PORT=${HARNESS_TUNNEL_PORT_VAL}")
   [[ -n "$HARNESS_TUNNEL_USER_VAL" ]] && env_vars_to_set+=("HARNESS_TUNNEL_SSH_USER=${HARNESS_TUNNEL_USER_VAL}")
-  [[ -n "$GPU_SSH_HOST_VAL" ]] && env_vars_to_set+=("GPU_SSH_HOST=${GPU_SSH_HOST_VAL}")
-  [[ -n "$GPU_SSH_KH_VAL" ]] && env_vars_to_set+=("GPU_SSH_KNOWN_HOSTS=${GPU_SSH_KH_VAL}")
+  [[ -n "$GPU_SSH_HOST_VAL" ]] && env_secrets_to_set+=("GPU_SSH_HOST=${GPU_SSH_HOST_VAL}")
+  [[ -n "$GPU_SSH_KH_VAL" ]] && env_secrets_to_set+=("GPU_SSH_KNOWN_HOSTS=${GPU_SSH_KH_VAL}")
 
   local kv vname vbody
   local synced_var_names=()
@@ -591,6 +594,19 @@ sync_github_settings() {
     synced_var_names+=("$vname")
   done
   echo "[gh-sync] Synced '${GITHUB_ENV_NAME}' environment variables: ${synced_var_names[*]}"
+
+  local synced_secret_names=()
+  for kv in "${env_secrets_to_set[@]}"; do
+    vname="${kv%%=*}"
+    vbody="${kv#*=}"
+    printf '%s\n' "$vbody" | gh secret set "$vname" --repo "$REPO_PATH" --env "$GITHUB_ENV_NAME"
+    # Drop an older plain variable of the same name (it would show up unmasked in logs).
+    gh variable delete "$vname" --repo "$REPO_PATH" --env "$GITHUB_ENV_NAME" >/dev/null 2>&1 || true
+    synced_secret_names+=("$vname")
+  done
+  if (( ${#synced_secret_names[@]} )); then
+    echo "[gh-sync] Synced '${GITHUB_ENV_NAME}' environment secrets (host identities): ${synced_secret_names[*]}"
+  fi
 }
 
 gcloud_config_value() {
@@ -846,7 +862,8 @@ if $DRY_RUN; then
     [[ -n "$HF_TOKEN_VAL" ]] && echo "[dry-run]   gh secret set HF_TOKEN --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"
     [[ -n "$TUNNEL_KEY_FILE_VAL" || -n "$TUNNEL_PRIV_KEY_INLINE" ]] && echo "[dry-run]   gh secret set TUNNEL_SSH_PRIVATE_KEY --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"
     [[ -n "$GPU_SSH_KEY_FILE_VAL" || -n "$GPU_SSH_PRIV_KEY_INLINE" ]] && echo "[dry-run]   gh secret set GPU_SSH_PRIVATE_KEY --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"
-    echo "[dry-run]   gh variable set ENABLE_REVERSE_TUNNELS, TUNNEL_*, REMOTE_*, GPU_TARGET_MODE=${GPU_TARGET_MODE_VAL} --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME"
+    echo "[dry-run]   gh variable set ENABLE_REVERSE_TUNNELS, TUNNEL_SSH_PORT/USER, TUNNEL_BIND_ADDRESS, REMOTE_*, GPU_TARGET_MODE=${GPU_TARGET_MODE_VAL} --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME"
+    echo "[dry-run]   gh secret set TUNNEL_SSH_HOST, TUNNEL_KNOWN_HOSTS (and per-tunnel/GPU_SSH hosts when set) --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"
   fi
   if $GCP_ZERO_SSH; then
     echo "[dry-run] Transport:            none (GCP zero-SSH mode; Stateful MIG self-registers via Secret Manager)"
