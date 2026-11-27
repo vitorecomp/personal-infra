@@ -217,8 +217,9 @@ set -euo pipefail
 
 # On a freshly (re)created GCE VM the startup-script registers this runner first and only then installs the CDI /
 # netavark settings and auto-resumes the stack with podman-compose, so a queued deploy started in the middle of it
-# (seen after a Spot preemption: vllm-server vanished mid-load). Wait for the startup-script to finish.
-for _ in $(seq 1 180); do
+# (seen after a Spot preemption: vllm-server vanished mid-load). Wait for the startup-script to finish; on the regional
+# MIG it also restores the ~475 GiB Hugging Face cache from GCS onto the fresh ephemeral disk, hence up to 90 min.
+for _ in $(seq 1 540); do
   pgrep -f google_metadata_script_runner >/dev/null 2>&1 || break
   echo "[bootstrap] Waiting for the VM startup-script to finish before touching Podman..."
   sleep 10

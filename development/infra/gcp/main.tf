@@ -332,9 +332,18 @@ if entries:
             fh.write(f"{rel}\t{target}\n")
     os.replace(tmp, dst)
 PY
-    gcloud storage rsync -r -c \
+    # No -c here: checksum mode hashes every local file on every run, i.e. re-reads the ~475 GiB checkpoint (~11 min
+    # of saturated disk every 15 min). HF blobs are content-addressed and immutable, so size + mtime (stored by
+    # gcloud in object metadata) is enough and later runs are just listings.
+    gcloud storage rsync -r \
       --exclude='(^|.*/)\.locks/.*|.*\.incomplete$|.*\.gcs-symlinks\.tsv\.tmp$' \
       /mnt/data/huggingface "gs://$${CACHE_BUCKET}/huggingface" || true
+  fi
+
+  # Compile/JIT caches (vLLM torch.compile, FlashInfer, TileLang, Triton, CuTe-DSL): restoring them saves ~10 min of
+  # kernel compilation/autotuning on every Spot recreation.
+  if [ -d /mnt/data/vllm-cache ] && [ -n "$(ls -A /mnt/data/vllm-cache 2>/dev/null)" ]; then
+    gcloud storage rsync -r /mnt/data/vllm-cache "gs://$${CACHE_BUCKET}/vllm-cache" || true
   fi
 ) 8>/run/gpu-gcs-sync-hf.lock
 SYNCEOF
@@ -664,7 +673,7 @@ if command -v gcloud >/dev/null 2>&1 && [ -n "$CACHE_BUCKET" ]; then
   echo "[bootstrap] Restoring Hugging Face model cache from gs://$CACHE_BUCKET/huggingface/..."
   (
     flock -n 8 || true
-    gcloud storage rsync -r -c "gs://$CACHE_BUCKET/huggingface" /mnt/data/huggingface || true
+    gcloud storage rsync -r "gs://$CACHE_BUCKET/huggingface" /mnt/data/huggingface || true
     python3 - /mnt/data/huggingface <<'PY' || true
 import os, sys
 root = sys.argv[1]
@@ -696,6 +705,10 @@ if os.path.isfile(manifest):
     print(f"[bootstrap] Restored {restored} Hugging Face cache symlinks from manifest.")
 PY
   ) 8>/run/gpu-gcs-sync-hf.lock
+
+  echo "[bootstrap] Restoring compile/JIT caches from gs://$CACHE_BUCKET/vllm-cache/ (absent on first boot)..."
+  mkdir -p /mnt/data/vllm-cache
+  gcloud storage rsync -r "gs://$CACHE_BUCKET/vllm-cache" /mnt/data/vllm-cache >/dev/null 2>&1 || true
 fi
 
 # Enable and start the periodic 15-minute GCS sync timer after initial restore completes.
