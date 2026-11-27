@@ -493,7 +493,15 @@ fi
 
 if [[ -x /usr/local/bin/gpu-gcs-sync ]]; then
   echo "[deploy] Persisting freshly deployed stack config to regional GCS cache bucket (gpu-gcs-sync --fast)..."
-  sudo /usr/local/bin/gpu-gcs-sync --fast || true
+  # gcloud prints every gs://<bucket> path and the bucket name embeds the GCP project ID, which must not reach the
+  # (public) Actions log: keep the output, print a count, and redact bucket names if something has to be shown.
+  if sync_out="$(sudo /usr/local/bin/gpu-gcs-sync --fast 2>&1)"; then
+    echo "[ok] Stack config persisted to the GCS cache bucket ($(grep -c '^Copying ' <<<"${sync_out}" || true) file(s) uploaded)."
+  else
+    sync_rc=$?
+    echo "[warn] gpu-gcs-sync --fast exited ${sync_rc}; the gpu-gcs-sync timer retries. Last lines (bucket redacted):"
+    sed -E 's#gs://[^/[:space:]]+#gs://<cache-bucket>#g' <<<"${sync_out}" | tail -n 5 | sed 's/^/    /'
+  fi
 fi
 
 echo "[deploy] Active Podman containers:"
