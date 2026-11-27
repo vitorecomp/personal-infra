@@ -340,6 +340,18 @@ python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<vm-ip> --provider gce --dep
 
 Both ports are closed while the GPU machine is stopped or preempted; autossh reconnects when it is back.
 
+**Harness login.** `dsh web` authenticates with a fresh per-process token printed once in its container log
+(a `dsh web:` URL); without it the UI answers 401. The deploy never copies it into the (public) Actions log. Read it
+over IAP SSH and open it through the tunnel; it prints the internal port 3081 (behind socat), so use 3080:
+
+```bash
+gcloud compute ssh <dev-gpu-vm-name> --zone <zone> --project <project> --tunnel-through-iap \
+  -- sudo podman logs deepseek-harness 2>&1 | grep 'dsh web:' | tail -1     # http://127.0.0.1:3081/?token=...
+# then, on personal-host or through `ssh -L 3080:127.0.0.1:3080 ubuntu@<vm-ip>`: http://127.0.0.1:3080/?token=...
+```
+
+A new token is issued whenever the harness container restarts (redeploys, Spot preemptions).
+
 ### Update Secrets / Tunnel Settings & Redeploy Stack
 ```bash
 # Edit development/.env, sync to GitHub via `gh`, and trigger deploy-gpu-machine.yml:

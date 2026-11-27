@@ -550,5 +550,22 @@ print((choices[0].get("message") or {}).get("content", "")[:120].replace("\n", "
   }
   echo "[ok] Chat completion through LiteLLM (deepseek-v4.1-flash): ${reply}"
 fi
+
+# The harness tunnel can be up while `dsh web` is not: socat on :3080 then has nothing behind it. Any HTTP answer
+# (401 without the per-process login token is expected) means it serves. Its log carries that login token in the
+# startup URL, so only redacted lines may reach this (public) log.
+harness_code="000"
+for _ in $(seq 1 18); do
+  harness_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:3080/ 2>/dev/null || true)"
+  [[ "$harness_code" != "000" ]] && break
+  sleep 10
+done
+if [[ "$harness_code" == "000" ]]; then
+  echo "[error] deepseek-harness is not answering on :3080 (state/restarts: $(sudo podman inspect -f '{{.State.Status}} {{.RestartCount}}' deepseek-harness 2>/dev/null || echo missing)). Last log lines (URLs/tokens redacted):" >&2
+  sudo podman logs --tail 30 deepseek-harness 2>&1 | tr '\r' '\n' \
+    | sed -E 's#[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]]+#<url redacted>#g; s#[A-Za-z0-9_+/=-]{24,}#<redacted>#g' | cut -c1-240 >&2
+  exit 1
+fi
+echo "[ok] deepseek-harness answers on :3080 (HTTP ${harness_code}; log in with the 'dsh web:' URL from its container log)."
 DEPLOY_EOF
 } | run_target_bash
