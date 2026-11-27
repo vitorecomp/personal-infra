@@ -265,7 +265,27 @@ if ! command -v nvidia-ctk >/dev/null 2>&1; then
 fi
 
 sudo mkdir -p /etc/cdi
-sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml >/dev/null
+# Podman < 5 (Ubuntu 24.04 ships 4.9.3) bundles CDI library v0.6.x, which only accepts specs up to
+# cdiVersion 0.6.0 and silently skips newer ones ("unresolvable CDI devices nvidia.com/gpu=all"). nvidia-ctk
+# emits 0.7.0 only for the v0.7.0 fields additionalGids/intelRdt (render-node groups, not needed by CUDA), so
+# drop those and declare 0.6.0. JSON is valid YAML, so the path stays /etc/cdi/nvidia.yaml.
+# Same conversion as the GPU VM startup-script in development/infra/gcp/main.tf.
+PODMAN_MAJOR="$(podman --version | grep -oE '[0-9]+' | head -n1)"
+sudo python3 - /etc/cdi/nvidia.yaml "${PODMAN_MAJOR:-4}" <<'PY'
+import json, os, subprocess, sys
+dst, podman_major = sys.argv[1], int(sys.argv[2] or 4)
+out = subprocess.run(["nvidia-ctk", "cdi", "generate", "--format=json"], check=True, capture_output=True, text=True).stdout
+spec = json.loads(out)
+if podman_major < 5:
+    for edits in [spec.get("containerEdits") or {}] + [d.get("containerEdits") or {} for d in spec.get("devices", [])]:
+        edits.pop("additionalGids", None)
+        edits.pop("intelRdt", None)
+    spec["cdiVersion"] = "0.6.0"
+with open(dst + ".tmp", "w") as fh:
+    json.dump(spec, fh, indent=2)
+os.replace(dst + ".tmp", dst)
+print("[bootstrap] CDI spec " + dst + ": cdiVersion " + spec["cdiVersion"] + ", devices: " + ",".join(d.get("name", "?") for d in spec.get("devices", [])))
+PY
 BOOTSTRAP_EOF
 } | run_target_bash
 
