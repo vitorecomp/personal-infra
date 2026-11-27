@@ -401,26 +401,45 @@ cd "${REMOTE_STACK_DIR}"
 # The model server used to be the Ray Serve `ray-server` container; make sure a leftover one cannot hold
 # the GPUs or port 8000.
 sudo podman rm -f ray-server >/dev/null 2>&1 || true
+expected=(vllm-server litellm deepseek-harness)
+compose_services=()   # empty = every service in compose.yml
 if [[ "$ENABLE_TUNNELS" == "true" ]]; then
+  expected+=(litellm-tunnel deepseek-harness-tunnel)
   echo "[deploy] Building and starting all 5 services (including reverse SSH tunnels) with podman-compose..."
-  sudo env TMPDIR="${DATA_ROOT}/containers/tmp" podman-compose -f compose.yml up -d --build
 else
   echo "[deploy] Reverse tunnels disabled; starting vllm-server, litellm, and deepseek-harness..."
   sudo podman rm -f litellm-tunnel deepseek-harness-tunnel >/dev/null 2>&1 || true
-  sudo env TMPDIR="${DATA_ROOT}/containers/tmp" podman-compose -f compose.yml up -d --build vllm-server litellm deepseek-harness
+  compose_services=(vllm-server litellm deepseek-harness)
+fi
+compose_up() { sudo env TMPDIR="${DATA_ROOT}/containers/tmp" podman-compose -f compose.yml up -d --build "${compose_services[@]}"; }
+not_running_list() {
+  local name state
+  for name in "${expected[@]}"; do
+    state="$(sudo podman inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
+    [[ "$state" == "running" ]] || printf '%s=%s ' "$name" "$state"
+  done
+}
+
+compose_up
+# When compose.yml changed, podman-compose recreates the stack. A killed vLLM takes a while to exit (it releases
+# ~200 GiB of pinned host memory, and with a saturated data disk it waited 28 min); podman gives up after a few
+# seconds, leaves it "stopping" and the new containers fail with "name already in use". Wait for that, converge again.
+if [[ -n "$(not_running_list)" ]]; then
+  for _ in $(seq 1 120); do
+    stopping="$(sudo podman ps -a --format '{{.Names}} {{.State}}' | awk '$2=="stopping"{printf "%s ", $1}')"
+    [[ -z "$stopping" ]] && break
+    echo "[deploy] Waiting for containers to finish stopping: ${stopping}"
+    sleep 15
+  done
+  echo "[deploy] Re-running podman-compose up after the slow stop..."
+  compose_up
 fi
 
 echo "[deploy] Active Podman containers:"
 sudo podman ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
 
 # podman-compose 1.0.x exits 0 even when a build or `podman run` fails, so verify the result explicitly.
-expected=(vllm-server litellm deepseek-harness)
-[[ "$ENABLE_TUNNELS" == "true" ]] && expected+=(litellm-tunnel deepseek-harness-tunnel)
-not_running=()
-for name in "${expected[@]}"; do
-  state="$(sudo podman inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
-  [[ "$state" == "running" ]] || not_running+=("${name}=${state}")
-done
+read -r -a not_running <<<"$(not_running_list)"
 if (( ${#not_running[@]} )); then
   echo "[error] podman-compose finished, but these containers are not running: ${not_running[*]}" >&2
   echo "[error] See the build/start errors above." >&2
