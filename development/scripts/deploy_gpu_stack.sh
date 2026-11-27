@@ -560,10 +560,24 @@ for _ in $(seq 1 18); do
   [[ "$harness_code" != "000" ]] && break
   sleep 10
 done
-if [[ "$harness_code" == "000" ]]; then
-  echo "[error] deepseek-harness is not answering on :3080 (state/restarts: $(sudo podman inspect -f '{{.State.Status}} {{.RestartCount}}' deepseek-harness 2>/dev/null || echo missing)). Last log lines (URLs/tokens redacted):" >&2
-  sudo podman logs --tail 30 deepseek-harness 2>&1 | tr '\r' '\n' \
+harness_diag() {
+  echo "[error] deepseek-harness: $(sudo podman inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}} started={{.State.StartedAt}} error={{.State.Error}}' deepseek-harness 2>/dev/null || echo missing)" >&2
+  echo "[error] Last log lines (URLs/tokens redacted):" >&2
+  sudo podman logs --tail 40 deepseek-harness 2>&1 | tr '\r' '\n' \
     | sed -E 's#[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]]+#<url redacted>#g; s#[A-Za-z0-9_+/=-]{24,}#<redacted>#g' | cut -c1-240 >&2
+}
+if [[ "$harness_code" == "000" ]]; then
+  echo "[error] deepseek-harness is not answering on :3080." >&2
+  harness_diag
+  exit 1
+fi
+# It must stay up: live, it answered once and then exited without being restarted for minutes.
+harness_started="$(sudo podman inspect -f '{{.State.StartedAt}}' deepseek-harness 2>/dev/null || true)"
+sleep 90
+harness_code2="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:3080/ 2>/dev/null || true)"
+if [[ "$harness_code2" == "000" || "$(sudo podman inspect -f '{{.State.Status}} {{.State.StartedAt}}' deepseek-harness 2>/dev/null)" != "running ${harness_started}" ]]; then
+  echo "[error] deepseek-harness answered once (HTTP ${harness_code}) but did not stay up (now HTTP ${harness_code2})." >&2
+  harness_diag
   exit 1
 fi
 echo "[ok] deepseek-harness answers on :3080 (HTTP ${harness_code}; log in with the 'dsh web:' URL from its container log)."
