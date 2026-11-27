@@ -67,7 +67,9 @@ services:
       - gpu-dev-net
     healthcheck:
       # No curl in the vLLM image; /health answers once the engine is ready.
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      # CMD-SHELL, not exec form: podman-compose 1.0.6 joins an exec-form test into one `/bin/sh -c` string with
+      # broken quoting, so the parentheses became a shell syntax error and vllm-server stayed "unhealthy".
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
       interval: 30s
       timeout: 10s
       retries: 10
