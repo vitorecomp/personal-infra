@@ -2,11 +2,16 @@
 # Copy to terraform.tfvars only if you want persistent overrides.
 # project_id = "your-gcp-project-id"
 region      = "europe-west4"
-zone        = "europe-west4-a"
+zones       = ["europe-west4-a", "europe-west4-b", "europe-west4-c"]
 name_prefix = "dev-gpu"
 
+# Optional GCS cache bucket override (defaults to "<project_id>-<name_prefix>-cache-<region>").
+# Stores Hugging Face model weights, deployed Podman stack config, harness workspace, and runner state.
+# cache_bucket_name          = "your-custom-gpu-cache-bucket"
+# cache_bucket_force_destroy = false
+
 # Provisioning model:
-#   use_spot = true   -> Spot GPU VM auto-healed/recreated by the Stateful MIG
+#   use_spot = true   -> Spot GPU VM auto-healed across zones by the Stateless Regional MIG
 #   use_spot = false  -> Standard on-demand GPU VM
 machine_type = "g4-standard-192"
 use_spot     = true

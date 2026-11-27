@@ -6,6 +6,21 @@ resource "google_service_account" "gpu" {
 }
 
 locals {
+  effective_zones = length(var.zones) > 0 ? [
+    for z in var.zones : trimspace(z) if trimspace(z) != ""
+  ] : (trimspace(var.zone) != "" ? [trimspace(var.zone)] : [])
+
+  effective_cache_bucket_name = trim(
+    lower(
+      trimspace(var.cache_bucket_name) != "" ? trimspace(var.cache_bucket_name) : substr(
+        replace(lower("${var.project_id}-${var.name_prefix}-cache-${var.region}"), "/[^a-z0-9-]/", "-"),
+        0,
+        63
+      )
+    ),
+    "-"
+  )
+
   effective_runner_name = trimspace(var.runner_name) != "" ? trimspace(var.runner_name) : "${var.name_prefix}-runner"
   create_runner_secret_version = (
     trimspace(var.github_repo) != "" &&
@@ -24,7 +39,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo "=== [gpu-mig-bootstrap] Starting at $(date -Is) ==="
 
-# 1. Wait for, format once (if unformatted), and mount the stateful Hyperdisk data volume at /mnt/data.
+# 1. Wait for, format once (if unformatted), and mount the ephemeral Hyperdisk data volume at /mnt/data.
 DATA_DISK="/dev/disk/by-id/google-data"
 MOUNT_POINT="/mnt/data"
 for _ in $(seq 1 30); do
@@ -35,7 +50,7 @@ for _ in $(seq 1 30); do
 done
 
 if [ ! -b "$DATA_DISK" ]; then
-  echo "[error] Stateful data disk $DATA_DISK not found; aborting bootstrap to avoid filling boot disk." >&2
+  echo "[error] Ephemeral data disk $DATA_DISK not found; aborting bootstrap to avoid filling boot disk." >&2
   exit 1
 fi
 
@@ -59,11 +74,12 @@ DATA_BLK="$(lsblk -ndo PKNAME "$DATA_DISK" 2>/dev/null)"
 [ -n "$DATA_BLK" ] || DATA_BLK="$(basename "$(readlink -f "$DATA_DISK")")"
 echo 16384 > "/sys/block/$DATA_BLK/queue/read_ahead_kb" 2>/dev/null || echo "[warn] Could not set readahead on $DATA_BLK."
 
-# 2. Create persistent directories on /mnt/data (preserved across Spot preemptions).
+# 2. Create working directories on /mnt/data (persistent state is synced to the regional GCS cache bucket).
 mkdir -p \
   /mnt/data/containers/storage \
   /mnt/data/containers/tmp \
   /mnt/data/huggingface \
+  /mnt/data/vllm-cache \
   /mnt/data/deepseek-harness/dsh-home \
   /mnt/data/deepseek-harness/workspace \
   /mnt/data/reverse-tunnel/state/litellm \
@@ -217,7 +233,139 @@ print("[bootstrap] CDI spec " + dst + ": cdiVersion " + spec["cdiVersion"] + ", 
 PY
 fi
 
-# 7. Unpack latest GitHub Actions runner binary into /mnt/data/actions-runner if not already present.
+# 7. Configure regional GCS cache bucket metadata, sync helper (/usr/local/bin/gpu-gcs-sync), and systemd timer.
+CACHE_BUCKET="${google_storage_bucket.gpu_cache.name}"
+cat <<'CACHEEOF' > /etc/gpu-cache-bucket
+CACHE_BUCKET="${google_storage_bucket.gpu_cache.name}"
+CACHEEOF
+chmod 0644 /etc/gpu-cache-bucket
+
+cat <<'SYNCEOF' > /usr/local/bin/gpu-gcs-sync
+#!/usr/bin/env bash
+set -uo pipefail
+
+export HOME="/root"
+export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+FAST_MODE=false
+for arg in "$@"; do
+  case "$arg" in
+    --fast) FAST_MODE=true ;;
+  esac
+done
+
+if [ -f /etc/gpu-cache-bucket ]; then
+  # shellcheck disable=SC1091
+  . /etc/gpu-cache-bucket
+fi
+
+if [ -z "$${CACHE_BUCKET:-}" ]; then
+  echo "[gpu-gcs-sync] CACHE_BUCKET is not configured; skipping."
+  exit 0
+fi
+
+if ! command -v gcloud >/dev/null 2>&1; then
+  echo "[gpu-gcs-sync] gcloud not found; skipping."
+  exit 0
+fi
+
+if ! mountpoint -q /mnt/data; then
+  echo "[gpu-gcs-sync] /mnt/data is not mounted; skipping."
+  exit 0
+fi
+
+# Phase 1 (--fast and full): sync small stack configs, reverse-tunnel keys, harness state, and runner credentials.
+(
+  flock -n 9 || {
+    echo "[gpu-gcs-sync] Small-state sync already running; skipping."
+    exit 0
+  }
+
+  if [ -d /mnt/data/stacks/gpu-dev-machine ] && [ -n "$(ls -A /mnt/data/stacks/gpu-dev-machine 2>/dev/null)" ]; then
+    gcloud storage rsync -r -c /mnt/data/stacks/gpu-dev-machine "gs://$${CACHE_BUCKET}/stacks/gpu-dev-machine" || true
+  fi
+
+  if [ -d /mnt/data/reverse-tunnel ] && [ -n "$(ls -A /mnt/data/reverse-tunnel 2>/dev/null)" ]; then
+    gcloud storage rsync -r -c /mnt/data/reverse-tunnel "gs://$${CACHE_BUCKET}/reverse-tunnel" || true
+  fi
+
+  if [ -d /mnt/data/deepseek-harness ] && [ -n "$(ls -A /mnt/data/deepseek-harness 2>/dev/null)" ]; then
+    gcloud storage rsync -r -c /mnt/data/deepseek-harness "gs://$${CACHE_BUCKET}/deepseek-harness" || true
+  fi
+
+  for rf in .runner .credentials .credentials_rsaparams .env .path svc.sh runsvc.sh; do
+    if [ -f "/mnt/data/actions-runner/$rf" ]; then
+      gcloud storage cp "/mnt/data/actions-runner/$rf" "gs://$${CACHE_BUCKET}/actions-runner-state/$rf" || true
+    fi
+  done
+) 9>/run/gpu-gcs-sync.lock
+
+if [ "$FAST_MODE" = "true" ]; then
+  exit 0
+fi
+
+# Phase 2 (full sync): sync Hugging Face model cache (blobs + symlink manifest, skipping .locks and .incomplete files).
+(
+  flock -n 8 || {
+    echo "[gpu-gcs-sync] Hugging Face sync already running; skipping."
+    exit 0
+  }
+
+  if [ -d /mnt/data/huggingface ] && [ -n "$(ls -A /mnt/data/huggingface 2>/dev/null)" ]; then
+    python3 - /mnt/data/huggingface <<'PY' || true
+import os, sys
+root = sys.argv[1]
+entries = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d != ".locks"]
+    for name in filenames + dirnames:
+        full = os.path.join(dirpath, name)
+        if os.path.islink(full):
+            rel = os.path.relpath(full, root)
+            entries.append((rel, os.readlink(full)))
+if entries:
+    entries.sort()
+    tmp = os.path.join(root, ".gcs-symlinks.tsv.tmp")
+    dst = os.path.join(root, ".gcs-symlinks.tsv")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for rel, target in entries:
+            fh.write(f"{rel}\t{target}\n")
+    os.replace(tmp, dst)
+PY
+    gcloud storage rsync -r -c \
+      --exclude='(^|.*/)\.locks/.*|.*\.incomplete$|.*\.gcs-symlinks\.tsv\.tmp$' \
+      /mnt/data/huggingface "gs://$${CACHE_BUCKET}/huggingface" || true
+  fi
+) 8>/run/gpu-gcs-sync-hf.lock
+SYNCEOF
+chmod 0755 /usr/local/bin/gpu-gcs-sync
+
+cat <<'SVCEOF' > /etc/systemd/system/gpu-gcs-sync.service
+[Unit]
+Description=Sync GPU VM state and Hugging Face cache to regional GCS cache bucket
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gpu-gcs-sync
+SVCEOF
+
+cat <<'TMREOF' > /etc/systemd/system/gpu-gcs-sync.timer
+[Unit]
+Description=Periodically sync GPU VM state and Hugging Face cache to GCS (every 15 minutes)
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=15min
+RandomizedDelaySec=60
+Persistent=false
+
+[Install]
+WantedBy=timers.target
+TMREOF
+
+# 8. Unpack latest GitHub Actions runner binary into /mnt/data/actions-runner if not already present.
 RUNNER_DIR="/mnt/data/actions-runner"
 if [ ! -x "$RUNNER_DIR/config.sh" ]; then
   echo "[bootstrap] Downloading latest actions-runner-linux-x64 into $RUNNER_DIR..."
@@ -240,7 +388,22 @@ if [ -x "$RUNNER_DIR/bin/installdependencies.sh" ]; then
   "$RUNNER_DIR/bin/installdependencies.sh" >/dev/null 2>&1 || true
 fi
 
-# 8. Self-register & start the GitHub Actions runner using GCP Secret Manager bootstrap payload.
+# 9. Restore persisted runner state from GCS (if present), then start or self-register the GitHub Actions runner.
+if command -v gcloud >/dev/null 2>&1 && [ -n "$CACHE_BUCKET" ]; then
+  echo "[bootstrap] Checking gs://$CACHE_BUCKET/actions-runner-state/ for preserved runner credentials..."
+  for rf in .runner .credentials .credentials_rsaparams .env .path svc.sh runsvc.sh; do
+    if [ ! -f "$RUNNER_DIR/$rf" ]; then
+      if gcloud storage cp "gs://$CACHE_BUCKET/actions-runner-state/$rf" "$RUNNER_DIR/$rf" >/dev/null 2>&1; then
+        chown "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR/$rf"
+        case "$rf" in
+          *.sh) chmod 0755 "$RUNNER_DIR/$rf" || true ;;
+          *) chmod 0600 "$RUNNER_DIR/$rf" || true ;;
+        esac
+      fi
+    fi
+  done
+fi
+
 SECRET_ID="${google_secret_manager_secret.runner_bootstrap.secret_id}"
 PROJECT_ID="${var.project_id}"
 BOOTSTRAP_JSON=""
@@ -347,25 +510,66 @@ fi
 
 RUNNER_STARTED=false
 if [ -x "$RUNNER_DIR/config.sh" ]; then
-  if [ "$REUSE_EXISTING" = "true" ] && [ -x "$RUNNER_DIR/svc.sh" ]; then
-    echo "[bootstrap] Preserved runner credentials found on /mnt/data ($EXISTING_AGENT_NAME); starting systemd service..."
-    if (
-      cd "$RUNNER_DIR" || exit 1
-      ./svc.sh stop >/dev/null 2>&1 || true
-      ./svc.sh uninstall >/dev/null 2>&1 || true
-      rm -f "$RUNNER_DIR/.service"
-      chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
-      ./svc.sh install "$RUNNER_USER" && ./svc.sh start
-    ); then
-      SVC_NAME="$(tr -d '\r\n' < "$RUNNER_DIR/.service" 2>/dev/null || true)"
-      sleep 3
-      if [ -n "$SVC_NAME" ] && systemctl is-active --quiet "$SVC_NAME"; then
-        RUNNER_STARTED=true
+  if [ "$REUSE_EXISTING" = "true" ]; then
+    echo "[bootstrap] Preserved runner credentials found ($EXISTING_AGENT_NAME); starting systemd service..."
+    if [ -x "$RUNNER_DIR/svc.sh" ]; then
+      if (
+        cd "$RUNNER_DIR" || exit 1
+        ./svc.sh stop >/dev/null 2>&1 || true
+        ./svc.sh uninstall >/dev/null 2>&1 || true
+        rm -f "$RUNNER_DIR/.service"
+        chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
+        ./svc.sh install "$RUNNER_USER" && ./svc.sh start
+      ); then
+        SVC_NAME="$(tr -d '\r\n' < "$RUNNER_DIR/.service" 2>/dev/null || true)"
+        sleep 3
+        if [ -n "$SVC_NAME" ] && systemctl is-active --quiet "$SVC_NAME"; then
+          RUNNER_STARTED=true
+        else
+          echo "[warn] Preserved runner service did not stay active; will attempt fresh registration."
+        fi
       else
-        echo "[warn] Preserved runner service did not stay active; will attempt fresh registration."
+        echo "[warn] Failed to start runner using preserved credentials; will attempt fresh registration."
       fi
     else
-      echo "[warn] Failed to start runner using preserved credentials; will attempt fresh registration."
+      echo "[bootstrap] svc.sh not present alongside restored credentials; generating fallback systemd unit..."
+      RUN_CMD="$RUNNER_DIR/run.sh"
+      if [ -f "$RUNNER_DIR/bin/runsvc.sh" ]; then
+        cp "$RUNNER_DIR/bin/runsvc.sh" "$RUNNER_DIR/runsvc.sh"
+        chmod 0755 "$RUNNER_DIR/runsvc.sh"
+        RUN_CMD="$RUNNER_DIR/runsvc.sh"
+      elif [ -x "$RUNNER_DIR/runsvc.sh" ]; then
+        RUN_CMD="$RUNNER_DIR/runsvc.sh"
+      fi
+      chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
+      FALLBACK_SVC="actions.runner.gpu.service"
+      cat <<RUNSVCEOF > "/etc/systemd/system/$FALLBACK_SVC"
+[Unit]
+Description=GitHub Actions Runner ($EXISTING_AGENT_NAME)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=$RUN_CMD
+User=$RUNNER_USER
+WorkingDirectory=$RUNNER_DIR
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+RUNSVCEOF
+      systemctl daemon-reload
+      systemctl enable --now "$FALLBACK_SVC" || true
+      sleep 3
+      if systemctl is-active --quiet "$FALLBACK_SVC"; then
+        RUNNER_STARTED=true
+      else
+        echo "[warn] Fallback runner systemd service did not stay active; will attempt fresh registration."
+      fi
     fi
   fi
 
@@ -389,6 +593,7 @@ if [ -x "$RUNNER_DIR/config.sh" ]; then
       echo "[bootstrap] Registering GitHub Actions runner '$EFFECTIVE_RUNNER_NAME' against $GITHUB_REPO..."
       if (
         cd "$RUNNER_DIR" || exit 1
+        systemctl disable --now actions.runner.gpu.service >/dev/null 2>&1 || true
         if [ -x ./svc.sh ]; then
           ./svc.sh stop >/dev/null 2>&1 || true
           ./svc.sh uninstall >/dev/null 2>&1 || true
@@ -407,6 +612,14 @@ if [ -x "$RUNNER_DIR/config.sh" ]; then
         ./svc.sh start
       ); then
         RUNNER_STARTED=true
+        if command -v gcloud >/dev/null 2>&1 && [ -n "$CACHE_BUCKET" ]; then
+          echo "[bootstrap] Persisting fresh runner credentials to gs://$CACHE_BUCKET/actions-runner-state/..."
+          for rf in .runner .credentials .credentials_rsaparams .env .path svc.sh runsvc.sh; do
+            if [ -f "$RUNNER_DIR/$rf" ]; then
+              gcloud storage cp "$RUNNER_DIR/$rf" "gs://$CACHE_BUCKET/actions-runner-state/$rf" >/dev/null 2>&1 || true
+            fi
+          done
+        fi
       else
         echo "[warn] GitHub Actions runner registration failed."
       fi
@@ -419,8 +632,77 @@ else
 fi
 unset BOOTSTRAP_JSON RUNNER_TOKEN RUNNER_PAT REG_TOK
 
-# 9. Auto-resume previously deployed Podman stack after Spot recreation.
+# 10. Restore persisted stack configs, tunnel keys, harness workspace, and Hugging Face weights from regional GCS cache.
 STACK_DIR="/mnt/data/stacks/gpu-dev-machine"
+if command -v gcloud >/dev/null 2>&1 && [ -n "$CACHE_BUCKET" ]; then
+  echo "[bootstrap] Restoring stack config and runtime state from gs://$CACHE_BUCKET/..."
+  gcloud storage rsync -r -c "gs://$CACHE_BUCKET/stacks/gpu-dev-machine" "$STACK_DIR" || true
+  if [ -f "$STACK_DIR/.env" ]; then
+    chmod 0600 "$STACK_DIR/.env"
+  fi
+  chown -R "$RUNNER_USER:$RUNNER_USER" /mnt/data/stacks
+
+  gcloud storage rsync -r -c "gs://$CACHE_BUCKET/reverse-tunnel" /mnt/data/reverse-tunnel || true
+  chmod 0700 /mnt/data/reverse-tunnel
+  chmod 1777 \
+    /mnt/data/reverse-tunnel/state \
+    /mnt/data/reverse-tunnel/state/litellm \
+    /mnt/data/reverse-tunnel/state/harness
+  [ -f /mnt/data/reverse-tunnel/id_ed25519 ] && chmod 0644 /mnt/data/reverse-tunnel/id_ed25519
+  [ -f /mnt/data/reverse-tunnel/known_hosts ] && chmod 0644 /mnt/data/reverse-tunnel/known_hosts
+
+  gcloud storage rsync -r -c "gs://$CACHE_BUCKET/deepseek-harness" /mnt/data/deepseek-harness || true
+  mkdir -p /mnt/data/deepseek-harness/dsh-home /mnt/data/deepseek-harness/workspace
+  chown -R 1000:1000 /mnt/data/deepseek-harness/dsh-home /mnt/data/deepseek-harness/workspace || true
+  chmod 1777 \
+    /mnt/data/deepseek-harness \
+    /mnt/data/deepseek-harness/dsh-home \
+    /mnt/data/deepseek-harness/workspace
+  find /mnt/data/deepseek-harness/dsh-home -type f -perm /1077 -exec chmod go-rwx,-t {} + 2>/dev/null || true
+  [ -f /mnt/data/deepseek-harness/dsh-home/.credentials.yaml ] && chmod 0600 /mnt/data/deepseek-harness/dsh-home/.credentials.yaml
+
+  echo "[bootstrap] Restoring Hugging Face model cache from gs://$CACHE_BUCKET/huggingface/..."
+  (
+    flock -n 8 || true
+    gcloud storage rsync -r -c "gs://$CACHE_BUCKET/huggingface" /mnt/data/huggingface || true
+    python3 - /mnt/data/huggingface <<'PY' || true
+import os, sys
+root = sys.argv[1]
+manifest = os.path.join(root, ".gcs-symlinks.tsv")
+if os.path.isfile(manifest):
+    restored = 0
+    norm_root = os.path.normpath(root)
+    with open(manifest, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if "\t" not in line:
+                continue
+            rel, target = line.split("\t", 1)
+            link_path = os.path.normpath(os.path.join(norm_root, rel))
+            if not link_path.startswith(norm_root + os.sep):
+                continue
+            resolved = os.path.normpath(os.path.join(os.path.dirname(link_path), target))
+            if not os.path.exists(resolved):
+                continue
+            os.makedirs(os.path.dirname(link_path), exist_ok=True)
+            if os.path.islink(link_path) or os.path.exists(link_path):
+                if os.path.islink(link_path) and os.readlink(link_path) == target:
+                    continue
+                if os.path.isdir(link_path) and not os.path.islink(link_path):
+                    continue
+                os.unlink(link_path)
+            os.symlink(target, link_path)
+            restored += 1
+    print(f"[bootstrap] Restored {restored} Hugging Face cache symlinks from manifest.")
+PY
+  ) 8>/run/gpu-gcs-sync-hf.lock
+fi
+
+# Enable and start the periodic 15-minute GCS sync timer after initial restore completes.
+systemctl daemon-reload || true
+systemctl enable --now gpu-gcs-sync.timer || echo "[warn] Failed to enable/start gpu-gcs-sync.timer."
+
+# 11. Auto-resume previously deployed Podman stack after Spot recreation or cross-zone failover.
 if [ -f "$STACK_DIR/compose.yml" ] && [ -f "$STACK_DIR/.env" ]; then
   echo "[bootstrap] Detected previously deployed Podman stack in $STACK_DIR; resuming..."
   # Container DNS needs netavark + aardvark-dns (Podman 4.9's CNI fallback has no DNS plugin); same setting as
@@ -434,10 +716,10 @@ if [ -f "$STACK_DIR/compose.yml" ] && [ -f "$STACK_DIR/.env" ]; then
   podman system migrate >/dev/null 2>&1 || true
   TUNNEL_HOST_SET="$(grep -E '^(TUNNEL_SSH_HOST|LITELLM_TUNNEL_SSH_HOST|HARNESS_TUNNEL_SSH_HOST)=' "$STACK_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]"'\''' || true)"
   if [ -n "$TUNNEL_HOST_SET" ] && [ -s /mnt/data/reverse-tunnel/id_ed25519 ]; then
-    (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d) || \
+    (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d --build) || \
       echo "[warn] Failed to auto-resume full podman-compose stack."
   else
-    (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d vllm-server litellm deepseek-harness) || \
+    (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d --build vllm-server litellm deepseek-harness) || \
       echo "[warn] Failed to auto-resume core podman-compose stack."
   fi
 fi
@@ -448,15 +730,38 @@ EOF
   gpu_shutdown_script = <<EOF
 #!/usr/bin/env bash
 set -u
+export HOME="/root"
 export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 if command -v podman >/dev/null 2>&1; then
-  podman stop -t 15 --all >/dev/null 2>&1 || true
+  podman stop -t 10 --all >/dev/null 2>&1 || true
+fi
+if [ -x /usr/local/bin/gpu-gcs-sync ]; then
+  timeout 15 /usr/local/bin/gpu-gcs-sync --fast || true
 fi
 sync
 if mountpoint -q /mnt/data; then
   umount -f /mnt/data || true
 fi
 EOF
+}
+
+# Same-region GCS cache bucket persisting Hugging Face weights, stack config, harness workspace, and runner state
+# across Spot preemptions and cross-zone failovers ($0 same-region GCE <-> GCS transfer).
+resource "google_storage_bucket" "gpu_cache" {
+  project                     = var.project_id
+  name                        = local.effective_cache_bucket_name
+  location                    = upper(var.region)
+  storage_class               = "STANDARD"
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = var.cache_bucket_force_destroy
+  labels                      = var.labels
+}
+
+resource "google_storage_bucket_iam_member" "gpu_cache_admin" {
+  bucket = google_storage_bucket.gpu_cache.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.gpu.email}"
 }
 
 # Secret Manager secret holding the GitHub Actions runner bootstrap JSON payload.
@@ -494,7 +799,7 @@ resource "google_secret_manager_secret_version" "runner_bootstrap" {
   }
 }
 
-# Instance template for the stateful GPU Managed Instance Group.
+# Instance template for the stateless multi-zone GPU Regional Managed Instance Group.
 resource "google_compute_instance_template" "gpu" {
   project      = var.project_id
   name_prefix  = "${var.name_prefix}-tpl-"
@@ -517,7 +822,7 @@ resource "google_compute_instance_template" "gpu" {
 
   disk {
     boot                   = false
-    auto_delete            = false
+    auto_delete            = true
     type                   = "PERSISTENT"
     mode                   = "READ_WRITE"
     device_name            = "data"
@@ -571,42 +876,45 @@ resource "google_compute_instance_template" "gpu" {
   }
 }
 
-# Single-VM Stateful Zonal Managed Instance Group preserving the 3000 GB Hyperdisk data volume across Spot preemptions.
-resource "google_compute_instance_group_manager" "gpu" {
-  project            = var.project_id
-  name               = "${var.name_prefix}-mig"
-  base_instance_name = "${var.name_prefix}-vm"
-  zone               = var.zone
-  target_size        = 1
-  wait_for_instances = false
+# Single-VM Stateless Multi-Zone Regional Managed Instance Group allowing automatic cross-zone Spot failover;
+# persistent model weights, stack config, harness workspace, and runner credentials live in google_storage_bucket.gpu_cache.
+resource "google_compute_region_instance_group_manager" "gpu" {
+  project                          = var.project_id
+  name                             = "${var.name_prefix}-mig"
+  base_instance_name               = "${var.name_prefix}-vm"
+  region                           = var.region
+  target_size                      = 1
+  wait_for_instances               = false
+  distribution_policy_zones        = length(local.effective_zones) > 0 ? local.effective_zones : null
+  distribution_policy_target_shape = "ANY"
 
   version {
     name              = "primary"
     instance_template = google_compute_instance_template.gpu.self_link_unique
   }
 
-  stateful_disk {
-    device_name = "data"
-    delete_rule = "NEVER"
-  }
-
   instance_lifecycle_policy {
     default_action_on_failure = "REPAIR"
     force_update_on_repair    = "YES"
+    on_repair {
+      allow_changing_zone = "YES"
+    }
   }
 
   update_policy {
     type                           = "PROACTIVE"
+    instance_redistribution_type   = "NONE"
     minimal_action                 = "REPLACE"
     most_disruptive_allowed_action = "REPLACE"
-    replacement_method             = "RECREATE"
+    replacement_method             = "SUBSTITUTE"
     max_surge_fixed                = 0
-    max_unavailable_fixed          = 1
+    max_unavailable_fixed          = max(length(local.effective_zones), 3)
   }
 
   depends_on = [
     google_compute_router_nat.nat,
     google_secret_manager_secret_iam_member.gpu_runner_bootstrap,
     google_secret_manager_secret_version.runner_bootstrap,
+    google_storage_bucket_iam_member.gpu_cache_admin,
   ]
 }

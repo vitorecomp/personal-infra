@@ -3,7 +3,7 @@
 # the target GPU machine from a self-hosted GitHub Actions runner (or locally).
 #
 # Supports three target modes (`--target-mode` / `GPU_TARGET_MODE`):
-#   * `local`:          deploys directly on the current GPU host (default on GCP Stateful MIG runner).
+#   * `local`:          deploys directly on the current GPU host (default on GCP Regional MIG runner).
 #   * `ssh`:            syncs and deploys over standard SSH to `GPU_SSH_HOST`.
 #   * `controller-ssh`: syncs and deploys over `/usr/local/bin/gpu-ssh` (`gpu` host alias) if present.
 #   * `auto` (default): picks `controller-ssh` if `/usr/local/bin/gpu-ssh` exists,
@@ -164,7 +164,8 @@ if $DRY_RUN; then
   echo "[dry-run] Step 2: Ensure Podman, podman-compose, NVIDIA driver + CDI (/etc/cdi/nvidia.yaml), and /mnt/data storage exist"
   echo "[dry-run] Step 3: Sync stack files to $REMOTE_STACK_DIR and write mode-0600 .env + tunnel key"
   echo "[dry-run] Step 4: sudo TMPDIR=$DATA_ROOT/containers/tmp podman-compose -f compose.yml up -d --build ${SERVICES_TO_START[*]}"
-  echo "[dry-run] Step 5: wait for model: ${WAIT_FOR_MODEL} (vllm-server /health + one LiteLLM chat, timeout ${MODEL_READY_TIMEOUT_SEC}s)"
+  echo "[dry-run] Step 5: If /usr/local/bin/gpu-gcs-sync is executable, run 'sudo /usr/local/bin/gpu-gcs-sync --fast || true' to persist stack config to GCS"
+  echo "[dry-run] Step 6: wait for model: ${WAIT_FOR_MODEL} (vllm-server /health + one LiteLLM chat, timeout ${MODEL_READY_TIMEOUT_SEC}s)"
   exit 0
 fi
 
@@ -487,6 +488,11 @@ if [[ -n "$(not_running_list)" || "$(config_hashes | wc -l)" -ne 1 ]]; then
   echo "[deploy] Stack did not converge (stale or stopped containers); tearing down and starting again..."
   teardown_stack
   compose_up
+fi
+
+if [[ -x /usr/local/bin/gpu-gcs-sync ]]; then
+  echo "[deploy] Persisting freshly deployed stack config to regional GCS cache bucket (gpu-gcs-sync --fast)..."
+  sudo /usr/local/bin/gpu-gcs-sync --fast || true
 fi
 
 echo "[deploy] Active Podman containers:"

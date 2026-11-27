@@ -7,10 +7,11 @@
 #       - Default (`configure`): generates missing `__generate__` secrets locally,
 #         persists them to `development/.env` (mode 0600), and syncs GitHub Repo
 #         Variables + `gpu` Environment Secrets/Variables (`GPU_TARGET_MODE=local`).
-#         The GCP Stateful MIG self-registers its runner on boot via Secret Manager
-#         when provisioned with `./development/scripts/deploy.sh --provider=gcp`.
+#         The GCP Regional MIG self-registers its runner on boot via Secret Manager
+#         (and caches credentials in the regional GCS bucket) when provisioned
+#         with `./development/scripts/deploy.sh --provider=gcp`.
 #       - `--status`: inspects registered GitHub runners via `gh api` and, if
-#         `gcloud` is available, prints managed instances for the GCP Stateful MIG.
+#         `gcloud` is available, prints managed instances for the GCP Regional MIG.
 #       - `--remove`: unregisters matching runner(s) directly via `gh api -X DELETE`.
 #   * Azure / On-Prem / Explicit `--host=USER@IP` (SSH mode):
 #       - Syncs `development/.env` to GitHub and installs/checks/removes the
@@ -38,6 +39,7 @@ CALLER_HOST_TARGET="${DEPLOY_HOST:-}"
 CALLER_SSH_KEY_FILE="${SSH_KEY_FILE:-}"
 CALLER_KNOWN_HOSTS_FILE="${KNOWN_HOSTS_FILE:-}"
 CALLER_PROJECT_ID="${PROJECT_ID:-}"
+CALLER_REGION="${REGION:-}"
 CALLER_ZONE="${ZONE:-}"
 CALLER_MIG_NAME="${MIG_NAME:-}"
 CALLER_NAME_PREFIX="${NAME_PREFIX:-}"
@@ -55,6 +57,7 @@ CLI_HOST_TARGET=""
 CLI_SSH_KEY_FILE=""
 CLI_KNOWN_HOSTS_FILE=""
 CLI_PROJECT_ID=""
+CLI_REGION=""
 CLI_ZONE=""
 CLI_MIG_NAME=""
 CLI_NAME_PREFIX=""
@@ -83,16 +86,17 @@ Reads configuration from `development/.env` (or --env-file=PATH), generates any
 and secrets via `gh`, and manages self-hosted runner lifecycle.
 
 On GCP (`--provider=gcp` without `--host`), this script is 100% SSH-free:
-  - Default mode syncs GitHub variables/secrets; the Stateful MIG GPU VM
-    self-registers its runner automatically on boot via Secret Manager.
-  - `--status` queries GitHub Actions runners via `gh api` + GCP MIG instances.
+  - Default mode syncs GitHub variables/secrets; the Regional MIG GPU VM
+    self-registers its runner automatically on boot via Secret Manager / GCS cache.
+  - `--status` queries GitHub Actions runners via `gh api` + GCP Regional MIG instances.
   - `--remove` deletes matching runner registration(s) via `gh api`.
 
 Target Selection:
   --provider=PROVIDER           Target provider: gcp, azure, or on-prem
   --env-file=PATH               Path to .env file (default: development/.env)
   --project=PROJECT_ID          GCP project override for `--status` MIG inspection
-  --zone=ZONE                   GCP zone override for `--status` MIG inspection
+  --region=REGION               GCP region override for `--status` Regional MIG inspection
+  --zone=ZONE                   GCP zone override for `--status` legacy zonal MIG inspection
   --mig=NAME                    GCP MIG name override for `--status` (default: <prefix>-mig)
   --name-prefix=PREFIX          GCP resource prefix override (default: dev-gpu)
   --host=USER@HOST              Explicit SSH target (enables SSH runner setup for on-prem/azure)
@@ -126,7 +130,7 @@ Examples:
   # Generate secrets in development/.env and sync GitHub Repo & `gpu` Environment:
   ./development/scripts/setup.sh --provider=gcp
 
-  # Check self-hosted runner online/offline state & GCP Stateful MIG instances (zero SSH):
+  # Check self-hosted runner online/offline state & GCP Regional MIG instances (zero SSH):
   ./development/scripts/setup.sh --provider=gcp --status
 
   # Delete offline/stale GCP runner registration(s) via GitHub API (zero SSH):
@@ -153,6 +157,8 @@ while [[ $# -gt 0 ]]; do
     --env-file) require_arg "$1" "${2:-}"; ENV_FILE="$2"; EXPLICIT_ENV_FILE=true; shift 2 ;;
     --project=*) CLI_PROJECT_ID="${1#*=}"; shift ;;
     --project) require_arg "$1" "${2:-}"; CLI_PROJECT_ID="$2"; shift 2 ;;
+    --region=*) CLI_REGION="${1#*=}"; shift ;;
+    --region) require_arg "$1" "${2:-}"; CLI_REGION="$2"; shift 2 ;;
     --zone=*) CLI_ZONE="${1#*=}"; shift ;;
     --zone) require_arg "$1" "${2:-}"; CLI_ZONE="$2"; shift 2 ;;
     --mig=*) CLI_MIG_NAME="${1#*=}"; shift ;;
@@ -262,6 +268,7 @@ HOST_TARGET="${CLI_HOST_TARGET:-${CALLER_HOST_TARGET:-${DOTENV[DEPLOY_HOST]:-}}}
 SSH_KEY_FILE="$(expand_tilde "${CLI_SSH_KEY_FILE:-${CALLER_SSH_KEY_FILE:-${DOTENV[SSH_KEY_FILE]:-}}}")"
 KNOWN_HOSTS_FILE="$(expand_tilde "${CLI_KNOWN_HOSTS_FILE:-${CALLER_KNOWN_HOSTS_FILE:-${DOTENV[KNOWN_HOSTS_FILE]:-}}}")"
 PROJECT_ID="${CLI_PROJECT_ID:-${CALLER_PROJECT_ID:-${DOTENV[PROJECT_ID]:-}}}"
+REGION="${CLI_REGION:-${CALLER_REGION:-${DOTENV[REGION]:-}}}"
 ZONE="${CLI_ZONE:-${CALLER_ZONE:-${DOTENV[ZONE]:-}}}"
 MIG_NAME="${CLI_MIG_NAME:-${CALLER_MIG_NAME:-${DOTENV[MIG_NAME]:-}}}"
 NAME_PREFIX="${CLI_NAME_PREFIX:-${CALLER_NAME_PREFIX:-${DOTENV[NAME_PREFIX]:-dev-gpu}}}"
@@ -644,6 +651,7 @@ resolve_gcp_mig_metadata() {
   local infra_dir="$DEV_ROOT/infra/gcp"
   GCP_PROJECT="${PROJECT_ID:-$(gcloud_config_value project)}"
   GCP_MIG_NAME="$MIG_NAME"
+  GCP_MIG_REGION="$REGION"
   GCP_MIG_ZONE="$ZONE"
 
   local -a tf_bin=()
@@ -658,16 +666,29 @@ resolve_gcp_mig_metadata() {
     [[ -n "$GCP_PROJECT" ]] && tf_env=(env "TF_WORKSPACE=${GCP_PROJECT}")
     [[ -z "$GCP_PROJECT" ]] && GCP_PROJECT="$("${tf_env[@]}" "${tf_bin[@]}" output -raw project_id 2>/dev/null || true)"
     [[ -z "$GCP_MIG_NAME" ]] && GCP_MIG_NAME="$("${tf_env[@]}" "${tf_bin[@]}" output -raw mig_name 2>/dev/null || true)"
+    [[ -z "$GCP_MIG_REGION" ]] && GCP_MIG_REGION="$("${tf_env[@]}" "${tf_bin[@]}" output -raw region 2>/dev/null || true)"
     [[ -z "$GCP_MIG_ZONE" ]] && GCP_MIG_ZONE="$("${tf_env[@]}" "${tf_bin[@]}" output -raw zone 2>/dev/null || "${tf_env[@]}" "${tf_bin[@]}" output -raw gpu_zone 2>/dev/null || true)"
   fi
 
   GCP_MIG_NAME="${GCP_MIG_NAME:-${NAME_PREFIX}-mig}"
 
-  if [[ -z "$GCP_MIG_ZONE" && -n "$GCP_PROJECT" ]] && ! $DRY_RUN && command -v gcloud >/dev/null 2>&1; then
-    GCP_MIG_ZONE="$(gcloud compute instance-groups managed list \
-      --project="$GCP_PROJECT" \
-      --filter="name=${GCP_MIG_NAME}" \
-      --format="value(zone.basename())" 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$GCP_PROJECT" ]] && ! $DRY_RUN && command -v gcloud >/dev/null 2>&1; then
+    if [[ -z "$CLI_ZONE" && -z "$GCP_MIG_REGION" ]]; then
+      local raw_regions
+      raw_regions="$(gcloud compute instance-groups managed list \
+        --project="$GCP_PROJECT" \
+        --filter="name=${GCP_MIG_NAME}" \
+        --format="value(region.basename())" 2>/dev/null || true)"
+      GCP_MIG_REGION="$(printf '%s\n' "$raw_regions" | awk 'NF {print; exit}')"
+    fi
+    if [[ -z "$GCP_MIG_REGION" && -z "$GCP_MIG_ZONE" ]]; then
+      local raw_zones
+      raw_zones="$(gcloud compute instance-groups managed list \
+        --project="$GCP_PROJECT" \
+        --filter="name=${GCP_MIG_NAME}" \
+        --format="value(zone.basename())" 2>/dev/null || true)"
+      GCP_MIG_ZONE="$(printf '%s\n' "$raw_zones" | awk 'NF {print; exit}')"
+    fi
   fi
 }
 
@@ -744,15 +765,43 @@ PY
 
   if command -v gcloud >/dev/null 2>&1; then
     resolve_gcp_mig_metadata
-    if [[ -n "$GCP_PROJECT" && -n "$GCP_MIG_NAME" && -n "$GCP_MIG_ZONE" ]]; then
+    if [[ -n "$GCP_PROJECT" && -n "$GCP_MIG_NAME" && -n "$CLI_ZONE" && -z "$CLI_REGION" ]]; then
       echo ""
-      echo "[gcp] Managed instances for MIG '${GCP_MIG_NAME}' (project=${GCP_PROJECT}, zone=${GCP_MIG_ZONE}):"
+      echo "[gcp] Managed instances for zonal MIG '${GCP_MIG_NAME}' (project=${GCP_PROJECT}, zone=${GCP_MIG_ZONE}):"
+      gcloud compute instance-groups managed list-instances "$GCP_MIG_NAME" \
+        --zone="$GCP_MIG_ZONE" \
+        --project="$GCP_PROJECT" || true
+    elif [[ -n "$GCP_PROJECT" && -n "$GCP_MIG_NAME" && -n "$GCP_MIG_REGION" ]]; then
+      echo ""
+      echo "[gcp] Managed instances for Regional MIG '${GCP_MIG_NAME}' (project=${GCP_PROJECT}, region=${GCP_MIG_REGION}):"
+      if ! gcloud compute instance-groups managed list-instances "$GCP_MIG_NAME" \
+        --region="$GCP_MIG_REGION" \
+        --project="$GCP_PROJECT"; then
+        local fallback_zone="$GCP_MIG_ZONE"
+        if [[ -z "$fallback_zone" ]]; then
+          local raw_fallback_zones
+          raw_fallback_zones="$(gcloud compute instance-groups managed list \
+            --project="$GCP_PROJECT" \
+            --filter="name=${GCP_MIG_NAME}" \
+            --format="value(zone.basename())" 2>/dev/null || true)"
+          fallback_zone="$(printf '%s\n' "$raw_fallback_zones" | awk 'NF {print; exit}')"
+        fi
+        if [[ -n "$fallback_zone" ]]; then
+          echo "[gcp] Falling back to legacy zonal MIG '${GCP_MIG_NAME}' (project=${GCP_PROJECT}, zone=${fallback_zone}):"
+          gcloud compute instance-groups managed list-instances "$GCP_MIG_NAME" \
+            --zone="$fallback_zone" \
+            --project="$GCP_PROJECT" || true
+        fi
+      fi
+    elif [[ -n "$GCP_PROJECT" && -n "$GCP_MIG_NAME" && -n "$GCP_MIG_ZONE" ]]; then
+      echo ""
+      echo "[gcp] Managed instances for legacy zonal MIG '${GCP_MIG_NAME}' (project=${GCP_PROJECT}, zone=${GCP_MIG_ZONE}):"
       gcloud compute instance-groups managed list-instances "$GCP_MIG_NAME" \
         --zone="$GCP_MIG_ZONE" \
         --project="$GCP_PROJECT" || true
     elif [[ -n "$GCP_PROJECT" ]]; then
       echo ""
-      echo "[gcp] No Stateful MIG named '${GCP_MIG_NAME}' found in project '${GCP_PROJECT}' (pass --zone or deploy via ./development/scripts/deploy.sh --provider=gcp)."
+      echo "[gcp] No Regional MIG named '${GCP_MIG_NAME}' found in project '${GCP_PROJECT}' (pass --region or deploy via ./development/scripts/deploy.sh --provider=gcp)."
     fi
   fi
 }
@@ -820,15 +869,16 @@ PY
     fi
   done <<< "$matched_lines"
 
-  echo "[gcp] Note: To prevent the Stateful MIG VM from re-registering on reboot, destroy or scale down the MIG with './development/scripts/deploy.sh --provider=gcp --destroy'."
+  echo "[gcp] Note: To prevent the Regional MIG VM from re-registering on reboot, destroy or scale down the MIG with './development/scripts/deploy.sh --provider=gcp --destroy'."
   return "$failed"
 }
 
-# GCP without explicit --host is 100% SSH-free (MIG self-registers via Secret Manager).
+# GCP without explicit --host is 100% SSH-free (Regional MIG self-registers via Secret Manager / GCS cache).
 GCP_ZERO_SSH=false
 TRANSPORT="ssh"
 GCP_PROJECT=""
 GCP_MIG_NAME=""
+GCP_MIG_REGION=""
 GCP_MIG_ZONE=""
 
 if [[ "$PROVIDER" == "gcp" && -z "$HOST_TARGET" ]]; then
@@ -886,7 +936,7 @@ if $DRY_RUN; then
     echo "[dry-run]   gh secret set TUNNEL_SSH_HOST, TUNNEL_KNOWN_HOSTS (and per-tunnel/GPU_SSH hosts when set) --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"
   fi
   if $GCP_ZERO_SSH; then
-    echo "[dry-run] Transport:            none (GCP zero-SSH mode; Stateful MIG self-registers via Secret Manager)"
+    echo "[dry-run] Transport:            none (GCP zero-SSH mode; Regional MIG self-registers via Secret Manager / GCS cache)"
     case "$MODE" in
       configure)
         echo "[dry-run] GCP Runner Setup:     Self-registered automatically on boot by './development/scripts/deploy.sh --provider=gcp' (runner=${RUNNER_NAME}, labels=${RUNNER_LABELS})"
@@ -894,7 +944,11 @@ if $DRY_RUN; then
       status)
         echo "[dry-run] Status Commands (zero SSH):"
         echo "[dry-run]   gh api --paginate repos/${REPO_PATH:-<repo>}/actions/runners  # filter: name=${RUNNER_NAME} or label=${GPU_RUNNER_VAL}"
-        echo "[dry-run]   gcloud compute instance-groups managed list-instances ${GCP_MIG_NAME:-${NAME_PREFIX}-mig} --zone=${GCP_MIG_ZONE:-<mig-zone>} --project=${GCP_PROJECT:-<gcloud-active-project>}"
+        if [[ -n "$CLI_ZONE" && -z "$CLI_REGION" ]]; then
+          echo "[dry-run]   gcloud compute instance-groups managed list-instances ${GCP_MIG_NAME:-${NAME_PREFIX}-mig} --zone=${GCP_MIG_ZONE} --project=${GCP_PROJECT:-<gcloud-active-project>}"
+        else
+          echo "[dry-run]   gcloud compute instance-groups managed list-instances ${GCP_MIG_NAME:-${NAME_PREFIX}-mig} --region=${GCP_MIG_REGION:-<mig-region>} --project=${GCP_PROJECT:-<gcloud-active-project>}"
+        fi
         ;;
       remove)
         echo "[dry-run] Remove Commands (zero SSH):"
@@ -953,7 +1007,7 @@ if $GCP_ZERO_SSH; then
       fi
       echo ""
       echo "[gcp] GitHub variables & '${GITHUB_ENV_NAME}' environment secrets synced for ${REPO_PATH} (GPU_TARGET_MODE=${GPU_TARGET_MODE_VAL})."
-      echo "[gcp] Zero-SSH mode: the GCP Stateful MIG GPU VM self-registers runner '${RUNNER_NAME}' (${RUNNER_LABELS}) automatically on boot via Secret Manager."
+      echo "[gcp] Zero-SSH mode: the GCP Regional MIG GPU VM self-registers runner '${RUNNER_NAME}' (${RUNNER_LABELS}) automatically on boot via Secret Manager / GCS cache."
       echo "[gcp] Provision / update the MIG: ./development/scripts/deploy.sh --provider=gcp"
       echo "[gcp] Check runner & MIG status:  ./development/scripts/setup.sh --provider=gcp --status"
       if [[ "${TRIGGER_DEPLOY,,}" == "true" && -n "$REPO_PATH" ]]; then

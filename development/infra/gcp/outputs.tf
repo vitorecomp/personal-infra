@@ -1,21 +1,16 @@
 output "project_id" {
-  description = "GCP project ID hosting the GPU Managed Instance Group."
+  description = "GCP project ID hosting the GPU Regional Managed Instance Group."
   value       = var.project_id
 }
 
 output "region" {
-  description = "GCP region for VPC, Cloud NAT, and instance template."
+  description = "GCP region for VPC, Cloud NAT, GCS cache bucket, and Regional MIG."
   value       = var.region
 }
 
-output "zone" {
-  description = "GCP zone for the stateful GPU Managed Instance Group."
-  value       = var.zone
-}
-
-output "gpu_zone" {
-  description = "Alias for the GCP zone hosting the GPU Managed Instance Group."
-  value       = var.zone
+output "zones" {
+  description = "Effective target zones within the region for the multi-zone Regional MIG (empty means all zones in region)."
+  value       = local.effective_zones
 }
 
 output "vpc_network" {
@@ -24,23 +19,13 @@ output "vpc_network" {
 }
 
 output "use_spot" {
-  description = "Whether the GPU Managed Instance Group provisions Spot VMs (true) or Standard on-demand VMs (false)."
+  description = "Whether the GPU Regional Managed Instance Group provisions Spot VMs (true) or Standard on-demand VMs (false)."
   value       = var.use_spot
 }
 
 output "mig_name" {
-  description = "Name of the stateful zonal Managed Instance Group."
-  value       = google_compute_instance_group_manager.gpu.name
-}
-
-output "data_disk_iops" {
-  description = "Desired provisioned IOPS of the stateful data disk (deploy.sh applies it to the existing disk)."
-  value       = var.data_disk_iops
-}
-
-output "data_disk_throughput_mbps" {
-  description = "Desired provisioned throughput (MiB/s) of the stateful data disk (deploy.sh applies it in place)."
-  value       = var.data_disk_throughput_mbps
+  description = "Name of the stateless multi-zone Regional Managed Instance Group."
+  value       = google_compute_region_instance_group_manager.gpu.name
 }
 
 output "instance_template" {
@@ -68,7 +53,17 @@ output "runner_username" {
   value       = var.runner_username
 }
 
+output "cache_bucket_name" {
+  description = "Name of the same-region GCS cache bucket storing Hugging Face weights, stack config, and runner state."
+  value       = google_storage_bucket.gpu_cache.name
+}
+
+output "cache_bucket_url" {
+  description = "GCS URL (gs://...) of the same-region GPU cache bucket."
+  value       = "gs://${google_storage_bucket.gpu_cache.name}"
+}
+
 output "list_instances_command" {
-  description = "gcloud command to inspect the current managed GPU instance status."
-  value       = "gcloud compute instance-groups managed list-instances ${google_compute_instance_group_manager.gpu.name} --zone=${var.zone} --project=${var.project_id}"
+  description = "gcloud command to inspect the current managed GPU instance status across zones."
+  value       = "gcloud compute instance-groups managed list-instances ${google_compute_region_instance_group_manager.gpu.name} --region=${var.region} --project=${var.project_id}"
 }

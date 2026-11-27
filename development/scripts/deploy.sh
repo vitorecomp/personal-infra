@@ -5,16 +5,20 @@
 # runs Terraform using the currently logged-in CLI credentials (and active GCP
 # project from `gcloud config` when `--provider=gcp`).
 #
-# On GCP, provisioning is 100% SSH-free: Terraform creates a single-VM Stateful
-# Zonal Managed Instance Group (`<name_prefix>-mig`, `target_size = 1`) and a
-# Secret Manager bootstrap secret (`<name_prefix>-runner-bootstrap`). On boot,
-# the GPU VM mounts its persistent 3 TB Hyperdisk at `/mnt/data`, installs
-# NVIDIA drivers + Podman, self-registers as a GitHub Actions runner, and
-# auto-resumes any previously deployed Podman stack across Spot recreations.
+# On GCP, provisioning is 100% SSH-free: Terraform creates a Stateless Multi-Zone
+# Regional Managed Instance Group (`<name_prefix>-mig`, `target_size = 1`, `ANY`
+# target shape, cross-zone Spot failover), a same-region GCS cache bucket
+# (`<project>-<name_prefix>-cache-<region>`), and a Secret Manager bootstrap
+# secret (`<name_prefix>-runner-bootstrap`). On boot, the GPU VM mounts its
+# ephemeral 3 TB Hyperdisk at `/mnt/data`, installs NVIDIA drivers + Podman,
+# restores runner credentials, stack config, and Hugging Face weights from GCS,
+# self-registers/resumes as a GitHub Actions runner, and auto-resumes any
+# previously deployed Podman stack across cross-zone Spot recreations.
 #
 # Usage:
 #   ./development/scripts/deploy.sh --provider=gcp --dry-run
 #   ./development/scripts/deploy.sh --provider=gcp
+#   ./development/scripts/deploy.sh --provider=gcp --region=europe-west2 --zones=europe-west2-b,europe-west2-c
 #   ./development/scripts/deploy.sh --provider=gcp --no-spot --use-default-vpc
 #   ./development/scripts/deploy.sh --provider=gcp --cycle-regions --loop=5
 
@@ -36,9 +40,12 @@ AUTO_APPROVE="${AUTO_APPROVE:-true}"
 # Optional overrides (CLI > caller env > development/.env > terraform.tfvars > defaults)
 PROJECT_ID="${PROJECT_ID:-}"
 REGION="${REGION:-}"
+ZONES="${ZONES:-}"
 ZONE="${ZONE:-}"
 CLI_REGION=""
+CLI_ZONES=""
 CLI_ZONE=""
+CACHE_BUCKET_NAME="${CACHE_BUCKET_NAME:-}"
 REGIONS_LIST="${REGIONS:-}"
 CYCLE_REGIONS="${CYCLE_REGIONS:-false}"
 FORCE_MOVE="${FORCE_MOVE:-false}"
@@ -71,9 +78,11 @@ usage() {
 Usage: ./development/scripts/deploy.sh --provider=<gcp|azure|on-prem> [options]
 
 Provision or manage GPU development machine infrastructure via Terraform.
-On GCP, deploys a self-registering single-VM Stateful Zonal Managed Instance
-Group (<prefix>-mig) backed by a persistent 3 TB Hyperdisk and GCP Secret
-Manager (<prefix>-runner-bootstrap), with zero inbound SSH required.
+On GCP, deploys a self-registering Stateless Multi-Zone Regional Managed
+Instance Group (<prefix>-mig, ANY target shape, cross-zone Spot failover)
+backed by an ephemeral 3 TB Hyperdisk, a same-region GCS cache bucket
+(<project>-<prefix>-cache-<region>), and GCP Secret Manager
+(<prefix>-runner-bootstrap), with zero inbound SSH required.
 
 Required:
   --provider=PROVIDER           Target infrastructure provider: gcp, azure, or on-prem
@@ -92,19 +101,21 @@ GCP / Terraform Options:
   --adc                         Force Application Default Credentials (automatic for @google.com CBA accounts)
   --gcloud-token                Force GOOGLE_OAUTH_ACCESS_TOKEN from `gcloud auth print-access-token`
   --region=REGION               Target region (default: REGION in .env, terraform.tfvars, or europe-west4)
-  --zone=ZONE                   Target zone (default: ZONE in .env, terraform.tfvars, or candidate GPU zones)
-  --regions=R1,R2,...           Comma-separated regions to cycle through for GPU capacity
-  --cycle-regions               Cycle through all GPU-capable regions until capacity is found
+  --zones=Z1,Z2,...             Explicit comma-separated target zones within --region (default: all GPU zones in region)
+  --zone=ZONE                   Narrow target zones to a single zone (derives --region from ${ZONE%-*} if unset)
+  --cache-bucket=NAME           Optional GCS cache bucket name override (default: <project>-<prefix>-cache-<region>)
+  --regions=R1,R2,...           Comma-separated regions to cycle through (each spanning all its GPU-capable zones)
+  --cycle-regions               Cycle through all GPU-capable regions (spanning all GPU zones per region)
   --machine-type=TYPE           GPU VM machine type override (default: g4-standard-192)
   --name-prefix=PREFIX          Resource name prefix override (default: dev-gpu)
-  --spot                        Provision the GPU VM as a Spot VM auto-healed by the MIG (default)
+  --spot                        Provision the GPU VM as a Spot VM with cross-zone failover (default)
   --no-spot, --standard         Provision the GPU VM as a Standard on-demand VM (sets use_spot=false)
   --use-default-vpc             Attach the MIG to the existing 'default' VPC instead of creating a custom VPC
   --no-use-default-vpc          Create and use a dedicated custom VPC (default; alias: --custom-vpc)
   --default-vpc-name=NAME       Existing VPC name when --use-default-vpc is set (default: default)
   --ssh-proxy-cidrs=C1,C2,...   Proxy CIDRs allowed on TCP 22 for optional debugging (default: 35.235.240.0/20)
   --ssh-hostname-template=TPL   Optional SSH relay hostname template ({instance}, {zone}, {project})
-  --force-move                  Allow moving to another region/zone even if a MIG exists in state
+  --force-move                  Allow moving to another region even if an active Regional MIG exists in state
   --no-stage-terminated         Destroy pending MIG and exit 1 on stockout (default when --loop is set)
   --stage-terminated            Keep MIG active on final candidate on stockout (even when --loop is set)
   --auto-approve                Pass -auto-approve to terraform apply/destroy (default)
@@ -120,16 +131,19 @@ Other:
   -h, --help                    Show this help message and exit
 
 Examples:
-  # Preview a Spot GPU MIG deployment on GCP (safe, read-only):
+  # Preview a multi-zone Spot Regional MIG + GCS cache bucket deployment on GCP:
   ./development/scripts/deploy.sh --provider=gcp --dry-run
 
-  # Provision a Standard (on-demand) GPU MIG on the existing 'default' VPC:
+  # Target specific zones within a region (e.g., europe-west2-b and europe-west2-c):
+  ./development/scripts/deploy.sh --provider=gcp --region=europe-west2 --zones=europe-west2-b,europe-west2-c
+
+  # Provision a Standard (on-demand) Regional GPU MIG on the existing 'default' VPC:
   ./development/scripts/deploy.sh --provider=gcp --no-spot --use-default-vpc
 
-  # Cycle across all GPU-capable regions every 5 minutes until Spot capacity opens:
+  # Cycle across all GPU-capable regions (spanning all GPU zones per region) every 5 minutes:
   ./development/scripts/deploy.sh --provider=gcp --spot --cycle-regions --loop=5
 
-  # Inspect planned Terraform changes or tear down the MIG:
+  # Inspect planned Terraform changes or tear down the Regional MIG:
   ./development/scripts/deploy.sh --provider=gcp --plan
   ./development/scripts/deploy.sh --provider=gcp --destroy
 EOF
@@ -168,8 +182,12 @@ while [[ $# -gt 0 ]]; do
     --project) require_arg "$1" "${2:-}"; PROJECT_ID="$2"; shift 2 ;;
     --region=*) REGION="${1#*=}"; CLI_REGION="${1#*=}"; shift ;;
     --region) require_arg "$1" "${2:-}"; REGION="$2"; CLI_REGION="$2"; shift 2 ;;
+    --zones=*) ZONES="${1#*=}"; CLI_ZONES="${1#*=}"; shift ;;
+    --zones) require_arg "$1" "${2:-}"; ZONES="$2"; CLI_ZONES="$2"; shift 2 ;;
     --zone=*) ZONE="${1#*=}"; CLI_ZONE="${1#*=}"; shift ;;
     --zone) require_arg "$1" "${2:-}"; ZONE="$2"; CLI_ZONE="$2"; shift 2 ;;
+    --cache-bucket=*) CACHE_BUCKET_NAME="${1#*=}"; shift ;;
+    --cache-bucket) require_arg "$1" "${2:-}"; CACHE_BUCKET_NAME="$2"; shift 2 ;;
     --regions=*) REGIONS_LIST="${1#*=}"; shift ;;
     --regions) require_arg "$1" "${2:-}"; REGIONS_LIST="$2"; shift 2 ;;
     --cycle-regions) CYCLE_REGIONS="true"; shift ;;
@@ -401,6 +419,78 @@ with open(path, encoding="utf-8") as fh:
 PY
 }
 
+tfvars_get_list_csv() {
+  local key="$1"
+  local file="$INFRA_DIR/terraform.tfvars"
+  [[ -f "$file" ]] || return 0
+  python3 - "$file" "$key" <<'PY'
+import re, sys
+path, key = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as fh:
+    cleaned = "\n".join(line.split("#", 1)[0] for line in fh)
+m = re.search(rf'(?m)^\s*{re.escape(key)}\s*=\s*\[([^\]]*)\]', cleaned)
+if m:
+    items = [s.strip() for s in re.findall(r'"([^"]+)"', m.group(1)) if s.strip()]
+    if items:
+        print(",".join(items))
+PY
+}
+
+normalize_zones_csv() {
+  local raw="$1"
+  [[ -n "$raw" ]] || return 0
+  python3 - "$raw" <<'PY'
+import sys
+seen = []
+for part in sys.argv[1].split(","):
+    z = part.strip()
+    if z and z not in seen:
+        seen.append(z)
+print(",".join(seen))
+PY
+}
+
+zones_csv_to_json() {
+  local raw="$1"
+  [[ -n "$raw" ]] || return 0
+  python3 - "$raw" <<'PY'
+import json, sys
+items = [z.strip() for z in sys.argv[1].split(",") if z.strip()]
+if items:
+    print(json.dumps(items, separators=(",", ":")))
+PY
+}
+
+zones_match_region() {
+  local zones_csv="$1"
+  local region="$2"
+  [[ -n "$zones_csv" && -n "$region" ]] || return 1
+  python3 - "$zones_csv" "$region" <<'PY'
+import sys
+zones = [z.strip() for z in sys.argv[1].split(",") if z.strip()]
+region = sys.argv[2].strip()
+sys.exit(0 if zones and all(z.rsplit("-", 1)[0] == region for z in zones) else 1)
+PY
+}
+
+compute_cache_bucket_name() {
+  local project="$1"
+  local prefix="$2"
+  local region="$3"
+  local override="${4:-}"
+  python3 - "$project" "$prefix" "$region" "$override" <<'PY'
+import re, sys
+project, prefix, region, override = [a.strip() for a in sys.argv[1:5]]
+if override:
+    print(override.lower())
+elif project.startswith("<"):
+    print(f"{project}-{prefix}-cache-{region}".lower())
+else:
+    raw = f"{project}-{prefix}-cache-{region}".lower()
+    print(re.sub(r"[^a-z0-9-]", "-", raw)[:63].strip("-"))
+PY
+}
+
 dotenv_get_string() {
   local key="$1"
   local file="${2:-$ENV_FILE}"
@@ -495,11 +585,14 @@ run_azure_or_onprem_terraform() {
 }
 
 run_gcp_terraform() {
-  local tfvars_project tfvars_region tfvars_zone tfvars_machine tfvars_prefix tfvars_use_spot tfvars_use_default_vpc
+  local tfvars_project tfvars_region tfvars_zones tfvars_zone tfvars_cache_bucket
+  local tfvars_machine tfvars_prefix tfvars_use_spot tfvars_use_default_vpc
   local tfvars_repo tfvars_runner_name tfvars_runner_labels tfvars_runner_user
   tfvars_project="$(tfvars_get_string project_id)"
   tfvars_region="$(tfvars_get_string region)"
+  tfvars_zones="$(tfvars_get_list_csv zones)"
   tfvars_zone="$(tfvars_get_string zone)"
+  tfvars_cache_bucket="$(tfvars_get_string cache_bucket_name)"
   tfvars_machine="$(tfvars_get_string machine_type)"
   tfvars_prefix="$(tfvars_get_string name_prefix)"
   tfvars_use_spot="$(tfvars_get_bool use_spot)"
@@ -511,8 +604,10 @@ run_gcp_terraform() {
 
   [[ -z "$PROJECT_ID" ]] && PROJECT_ID="$(dotenv_get_string PROJECT_ID)"
   [[ -z "$REGION" ]] && REGION="$(dotenv_get_string REGION)"
-  local dotenv_zone
+  local dotenv_zones dotenv_zone
+  dotenv_zones="$(dotenv_get_string ZONES)"
   dotenv_zone="$(dotenv_get_string ZONE)"
+  [[ -z "$CACHE_BUCKET_NAME" ]] && CACHE_BUCKET_NAME="$(dotenv_get_string CACHE_BUCKET_NAME)"
   [[ -z "$USE_SPOT" ]] && USE_SPOT="$(dotenv_get_string USE_SPOT)"
   [[ -z "$USE_DEFAULT_VPC" ]] && USE_DEFAULT_VPC="$(dotenv_get_string USE_DEFAULT_VPC)"
   [[ -z "$DEFAULT_VPC_NAME" ]] && DEFAULT_VPC_NAME="$(dotenv_get_string DEFAULT_VPC_NAME)"
@@ -596,29 +691,61 @@ run_gcp_terraform() {
     effective_enable_ingress_firewalls="$(normalize_bool "$ENABLE_INGRESS_FIREWALLS" "ENABLE_INGRESS_FIREWALLS")"
   fi
 
-  # Region & Zone resolution: explicit CLI --zone overrides region; explicit CLI --region
-  # ignores a conflicting .env/tfvars zone from another region.
+  # Region & Zones resolution:
+  #   - CLI --zones / --zone is authoritative (derives region from first zone if --region is unset).
+  #   - Explicit CLI --region ignores conflicting .env/tfvars zones from another region.
+  local cli_zones_csv=""
+  if [[ -n "$CLI_ZONES" ]]; then
+    cli_zones_csv="$(normalize_zones_csv "$CLI_ZONES")"
+  elif [[ -n "$CLI_ZONE" ]]; then
+    cli_zones_csv="$(normalize_zones_csv "$CLI_ZONE")"
+  fi
+
   local explicit_region="$REGION"
   local default_region="${REGION:-${tfvars_region:-europe-west4}}"
-  local explicit_zone="${CLI_ZONE:-${ZONE:-}}"
-  if [[ -z "$explicit_zone" ]]; then
-    local fallback_zone="${dotenv_zone:-${tfvars_zone:-}}"
-    if [[ -n "$fallback_zone" ]]; then
-      if [[ -z "$CLI_REGION" || "${fallback_zone%-*}" == "$CLI_REGION" ]]; then
-        explicit_zone="$fallback_zone"
-      fi
+  if [[ -n "$cli_zones_csv" ]]; then
+    local first_cli_zone="${cli_zones_csv%%,*}"
+    if [[ -z "$CLI_REGION" ]]; then
+      default_region="${first_cli_zone%-*}"
+      explicit_region="$default_region"
+    fi
+    if ! zones_match_region "$cli_zones_csv" "$default_region"; then
+      echo "[error] Specified zone(s) '${cli_zones_csv}' do not all belong to region '${default_region}'." >&2
+      exit 1
     fi
   fi
-  if [[ -n "$CLI_ZONE" && -z "$CLI_REGION" ]]; then
-    default_region="${CLI_ZONE%-*}"
-    explicit_region="$default_region"
-  elif [[ -n "$explicit_zone" && -z "$explicit_region" && -z "$tfvars_region" ]]; then
-    default_region="${explicit_zone%-*}"
+
+  local explicit_zones_csv="$cli_zones_csv"
+  if [[ -z "$explicit_zones_csv" ]]; then
+    local env_zones_raw="${ZONES:-${ZONE:-}}"
+    if [[ -n "$env_zones_raw" ]]; then
+      local norm_env_zones
+      norm_env_zones="$(normalize_zones_csv "$env_zones_raw")"
+      if [[ -z "$CLI_REGION" ]] || zones_match_region "$norm_env_zones" "$CLI_REGION"; then
+        explicit_zones_csv="$norm_env_zones"
+      fi
+    else
+      local fallback_zones_raw="${dotenv_zones:-${dotenv_zone:-${tfvars_zones:-${tfvars_zone:-}}}}"
+      if [[ -n "$fallback_zones_raw" ]]; then
+        local norm_fb_zones
+        norm_fb_zones="$(normalize_zones_csv "$fallback_zones_raw")"
+        if [[ -z "$CLI_REGION" ]] || zones_match_region "$norm_fb_zones" "$CLI_REGION"; then
+          explicit_zones_csv="$norm_fb_zones"
+        fi
+      fi
+    fi
+    if [[ -n "$explicit_zones_csv" && -z "$explicit_region" && -z "$tfvars_region" ]]; then
+      local first_ez="${explicit_zones_csv%%,*}"
+      default_region="${first_ez%-*}"
+    fi
+    if [[ -n "$explicit_zones_csv" ]] && ! zones_match_region "$explicit_zones_csv" "$default_region"; then
+      explicit_zones_csv=""
+    fi
   fi
-  local default_zone="${explicit_zone:-${default_region}-a}"
 
   local effective_machine="${MACHINE_TYPE:-${tfvars_machine:-g4-standard-192}}"
   local effective_prefix="${NAME_PREFIX:-${tfvars_prefix:-dev-gpu}}"
+  local effective_cache_bucket_override="${CACHE_BUCKET_NAME:-${tfvars_cache_bucket:-}}"
   local tf_workspace="${TF_WORKSPACE:-$effective_project}"
 
   local effective_repo
@@ -633,7 +760,7 @@ run_gcp_terraform() {
     tf_ssh_proxy_cidrs_json="$(python3 - "$SSH_PROXY_CIDRS" <<'PY'
 import json, sys
 items = [c.strip() for c in sys.argv[1].split(",") if c.strip()]
-print(json.dumps(items) if items else "")
+print(json.dumps(items, separators=(",", ":")) if items else "")
 PY
 )"
   fi
@@ -649,12 +776,11 @@ PY
   local apply_args=()
   build_tf_args() {
     local target_region="$1"
-    local target_zone="$2"
+    local target_zones_csv="${2:-}"
     var_args=(
       -input=false
       -var="project_id=${effective_project}"
       -var="region=${target_region}"
-      -var="zone=${target_zone}"
       -var="use_spot=${effective_use_spot}"
       -var="enable_public_ingress=false"
       -var="github_repo=${effective_repo}"
@@ -662,6 +788,19 @@ PY
       -var="runner_labels=${effective_runner_labels}"
       -var="runner_username=${effective_runner_user}"
     )
+    if [[ -n "$target_zones_csv" ]]; then
+      local zones_json
+      zones_json="$(zones_csv_to_json "$target_zones_csv")"
+      if [[ -n "$zones_json" ]]; then
+        var_args+=(-var="zones=${zones_json}")
+      fi
+    elif [[ -n "$tfvars_zone" && "${tfvars_zone%-*}" != "$target_region" ]]; then
+      # Prevent a stale single-zone entry in terraform.tfvars from conflicting with another region.
+      var_args+=(-var="zone=")
+    fi
+    if [[ -n "$CACHE_BUCKET_NAME" ]]; then
+      var_args+=(-var="cache_bucket_name=${CACHE_BUCKET_NAME}")
+    fi
     if [[ -n "$effective_use_default_vpc" ]]; then
       var_args+=(-var="use_default_vpc=${effective_use_default_vpc}")
     fi
@@ -690,7 +829,7 @@ PY
     fi
   }
 
-  local provisioning_desc="SPOT (auto-healed by MIG; use_spot=true)"
+  local provisioning_desc="SPOT (cross-zone failover via Regional MIG; use_spot=true)"
   if [[ "$effective_use_spot" == "false" ]]; then
     provisioning_desc="STANDARD (on-demand; use_spot=false)"
   fi
@@ -708,7 +847,9 @@ PY
   fi
 
   if $DRY_RUN; then
-    build_tf_args "$default_region" "$default_zone"
+    local dry_run_bucket
+    dry_run_bucket="$(compute_cache_bucket_name "$effective_project" "$effective_prefix" "$default_region" "$effective_cache_bucket_override")"
+    build_tf_args "$default_region" "$explicit_zones_csv"
     echo "[dry-run] Provider:             gcp ($INFRA_DIR)"
     echo "[dry-run] Action:               $ACTION"
     if (( LOOP_MINUTES > 0 )); then
@@ -720,14 +861,15 @@ PY
       echo "[dry-run] Credentials:          logged-in gcloud account (${logged_account:-<gcloud-active-account>})"
     fi
     echo "[dry-run] Project / Workspace:  $effective_project / $tf_workspace"
-    echo "[dry-run] Region / Zone:        $default_region / $default_zone (cycle_regions=$CYCLE_REGIONS${REGIONS_LIST:+, regions=$REGIONS_LIST})"
+    echo "[dry-run] Region / Target Zones: $default_region / ${explicit_zones_csv:-all GPU-capable zones in region} (cycle_regions=$CYCLE_REGIONS${REGIONS_LIST:+, regions=$REGIONS_LIST})"
     echo "[dry-run] Provisioning Model:   $provisioning_desc"
     echo "[dry-run] VPC Network:          $vpc_mode_desc"
     echo "[dry-run] Machine / Prefix:     $effective_machine / $effective_prefix"
+    echo "[dry-run] Cache Bucket:         gs://${dry_run_bucket}"
     echo "[dry-run] Runner Bootstrap:     Secret Manager (${effective_prefix}-runner-bootstrap -> ${effective_repo}, auth=${runner_auth_desc})"
     echo "[dry-run] Commands:"
     $use_adc || echo "[dry-run]   export GOOGLE_OAUTH_ACCESS_TOKEN=\"\$(gcloud auth print-access-token)\""
-    echo "[dry-run]   gcloud services enable compute.googleapis.com secretmanager.googleapis.com iap.googleapis.com oslogin.googleapis.com iam.googleapis.com --project=$effective_project --quiet"
+    echo "[dry-run]   gcloud services enable compute.googleapis.com secretmanager.googleapis.com iap.googleapis.com oslogin.googleapis.com iam.googleapis.com storage.googleapis.com --project=$effective_project --quiet"
     if [[ "$ACTION" == "apply" ]]; then
       if [[ -n "$RUNNER_PAT" ]]; then
         echo "[dry-run]   export TF_VAR_runner_pat=\"<redacted>\""
@@ -742,8 +884,7 @@ PY
       destroy) echo "[dry-run]   ${TF[*]} destroy ${apply_args[*]}" ;;
       apply)
         echo "[dry-run]   ${TF[*]} apply ${apply_args[*]}"
-        echo "[dry-run]   gcloud compute instance-groups managed list-instances ${effective_prefix}-mig --zone=${default_zone} --project=${effective_project} --format=json  # poll until RUNNING"
-        echo "[dry-run]   gcloud compute disks update <MIG data disk> --provisioned-iops=<tf output data_disk_iops> --provisioned-throughput=<tf output data_disk_throughput_mbps>  # in place, only if different"
+        echo "[dry-run]   gcloud compute instance-groups managed list-instances ${effective_prefix}-mig --region=${default_region} --project=${effective_project} --format=json  # poll until RUNNING"
         ;;
     esac
     return 0
@@ -771,7 +912,7 @@ PY
           export TF_VAR_runner_token="$minted_token"
           echo "Minted GitHub Actions runner registration token for ${effective_repo} (injected into Secret Manager via TF_VAR_runner_token)."
         else
-          echo "[warn] Failed to mint GitHub runner registration token for ${effective_repo}; continuing (stateful /mnt/data/actions-runner/.credentials will still be reused if present)." >&2
+          echo "[warn] Failed to mint GitHub runner registration token for ${effective_repo}; continuing (GCS-cached actions-runner credentials will still be reused if present)." >&2
         fi
       else
         echo "[warn] 'gh' CLI is not authenticated and RUNNER_PAT is unset; skipping runner registration-token minting. Run 'gh auth login' or set RUNNER_PAT in development/.env so a new GPU VM can self-register." >&2
@@ -791,13 +932,14 @@ PY
   fi
   echo "Provisioning model: ${provisioning_desc}; VPC: ${vpc_mode_desc}; Runner: ${effective_runner_name} -> ${effective_repo}."
 
-  echo "Enabling required GCP APIs (compute, secretmanager, iap, oslogin, iam) in project: ${effective_project}..."
+  echo "Enabling required GCP APIs (compute, secretmanager, iap, oslogin, iam, storage) in project: ${effective_project}..."
   gcloud services enable \
     compute.googleapis.com \
     secretmanager.googleapis.com \
     iap.googleapis.com \
     oslogin.googleapis.com \
     iam.googleapis.com \
+    storage.googleapis.com \
     --project="${effective_project}" \
     --quiet
 
@@ -817,19 +959,26 @@ PY
     done
   fi
 
-  # Inspect current Terraform state for an existing Stateful MIG (and any legacy 2-VM resources).
-  local raw_state_json state_mig_zone state_mig_name tainted_mig_zone legacy_gpu_zone legacy_ctrl_zone legacy_data_zone
+  # Inspect current Terraform state for an existing Regional MIG, legacy Zonal MIG,
+  # and any legacy 2-VM resources.
+  local raw_state_json state_mig_region state_mig_name state_mig_zones tainted_rmig_region
+  local legacy_zonal_mig_zone tainted_legacy_zonal_mig_zone
+  local legacy_gpu_zone legacy_ctrl_zone legacy_data_zone
   raw_state_json="$("${TF[@]}" state pull 2>/dev/null || true)"
-  read -r state_mig_zone state_mig_name tainted_mig_zone legacy_gpu_zone legacy_ctrl_zone legacy_data_zone < <(
+  read -r state_mig_region state_mig_name state_mig_zones tainted_rmig_region \
+    legacy_zonal_mig_zone tainted_legacy_zonal_mig_zone \
+    legacy_gpu_zone legacy_ctrl_zone legacy_data_zone < <(
     printf '%s' "$raw_state_json" | python3 -c '
 import json, sys
 default_prefix = sys.argv[1]
 try:
     s = json.load(sys.stdin)
 except Exception:
-    print(f"- {default_prefix}-mig - - - -")
+    print(f"- {default_prefix}-mig - - - - - - -")
     sys.exit(0)
-mig_zone = tainted_mig_zone = legacy_gpu_zone = legacy_ctrl_zone = legacy_data_zone = "-"
+rmig_region = rmig_zones = tainted_rmig_region = "-"
+legacy_zonal_zone = tainted_legacy_zonal_zone = "-"
+legacy_gpu_zone = legacy_ctrl_zone = legacy_data_zone = "-"
 mig_name = f"{default_prefix}-mig"
 for r in s.get("resources", []):
     insts = r.get("instances", [])
@@ -838,57 +987,80 @@ for r in s.get("resources", []):
     inst0 = insts[0]
     attrs = inst0.get("attributes", {})
     rtype, rname = r.get("type"), r.get("name")
-    if rtype == "google_compute_instance_group_manager" and rname == "gpu":
-        z = attrs.get("zone") or "-"
+    if rtype == "google_compute_region_instance_group_manager" and rname == "gpu":
+        reg = attrs.get("region") or "-"
         if attrs.get("name"):
             mig_name = attrs["name"]
+        dpz = attrs.get("distribution_policy_zones") or []
+        if isinstance(dpz, list):
+            clean_dpz = [str(z).strip() for z in dpz if str(z).strip()]
+            if clean_dpz:
+                rmig_zones = ",".join(clean_dpz)
         if inst0.get("status") == "tainted" or not attrs.get("self_link"):
-            tainted_mig_zone = z
+            tainted_rmig_region = reg
         else:
-            mig_zone = z
+            rmig_region = reg
+    elif rtype == "google_compute_instance_group_manager" and rname == "gpu":
+        z = attrs.get("zone") or "-"
+        if inst0.get("status") == "tainted" or not attrs.get("self_link"):
+            tainted_legacy_zonal_zone = z
+        else:
+            legacy_zonal_zone = z
     elif rtype == "google_compute_instance" and rname == "gpu_vm":
         legacy_gpu_zone = attrs.get("zone") or "-"
     elif rtype == "google_compute_instance" and rname == "controller":
         legacy_ctrl_zone = attrs.get("zone") or "-"
     elif rtype == "google_compute_disk" and rname == "gpu_data":
         legacy_data_zone = attrs.get("zone") or "-"
-print(f"{mig_zone} {mig_name} {tainted_mig_zone} {legacy_gpu_zone} {legacy_ctrl_zone} {legacy_data_zone}")
+print(
+    f"{rmig_region} {mig_name} {rmig_zones} {tainted_rmig_region} "
+    f"{legacy_zonal_zone} {tainted_legacy_zonal_zone} "
+    f"{legacy_gpu_zone} {legacy_ctrl_zone} {legacy_data_zone}"
+)
 ' "$effective_prefix"
   )
 
-  # Clean up any tainted/uncreated MIG state stub from a failed prior apply so Terraform
+  # Clean up any tainted/uncreated MIG state stubs from a failed prior apply so Terraform
   # does not fail refreshing a non-existent MIG or mis-detect it as active.
-  if [[ "$tainted_mig_zone" != "-" && "$ACTION" == "apply" ]]; then
-    "${TF[@]}" state rm google_compute_instance_group_manager.gpu >/dev/null 2>&1 || true
+  if [[ "$ACTION" == "apply" ]]; then
+    if [[ "$tainted_rmig_region" != "-" ]]; then
+      "${TF[@]}" state rm google_compute_region_instance_group_manager.gpu >/dev/null 2>&1 || true
+    fi
+    if [[ "$tainted_legacy_zonal_mig_zone" != "-" ]]; then
+      "${TF[@]}" state rm google_compute_instance_group_manager.gpu >/dev/null 2>&1 || true
+    fi
   fi
 
   local pinned_plan_region="$default_region"
-  local pinned_plan_zone="$default_zone"
-  if [[ -z "$CLI_ZONE" && "$state_mig_zone" != "-" ]]; then
-    pinned_plan_zone="$state_mig_zone"
-    if [[ -z "$CLI_REGION" ]]; then pinned_plan_region="${state_mig_zone%-*}"; fi
-  elif [[ -z "$CLI_ZONE" && "$tainted_mig_zone" != "-" ]]; then
-    pinned_plan_zone="$tainted_mig_zone"
-    if [[ -z "$CLI_REGION" ]]; then pinned_plan_region="${tainted_mig_zone%-*}"; fi
-  elif [[ -z "$CLI_ZONE" && "$legacy_gpu_zone" != "-" ]]; then
-    pinned_plan_zone="$legacy_gpu_zone"
-    if [[ -z "$CLI_REGION" ]]; then pinned_plan_region="${legacy_gpu_zone%-*}"; fi
-  elif [[ -z "$CLI_ZONE" && "$legacy_ctrl_zone" != "-" ]]; then
-    pinned_plan_zone="$legacy_ctrl_zone"
-    if [[ -z "$CLI_REGION" ]]; then pinned_plan_region="${legacy_ctrl_zone%-*}"; fi
+  local pinned_plan_zones="$explicit_zones_csv"
+  if [[ -z "$CLI_REGION" && -z "$cli_zones_csv" ]]; then
+    if [[ "$state_mig_region" != "-" ]]; then
+      pinned_plan_region="$state_mig_region"
+      if [[ -z "$pinned_plan_zones" && "$state_mig_zones" != "-" ]]; then
+        pinned_plan_zones="$state_mig_zones"
+      fi
+    elif [[ "$tainted_rmig_region" != "-" ]]; then
+      pinned_plan_region="$tainted_rmig_region"
+    elif [[ "$legacy_zonal_mig_zone" != "-" ]]; then
+      pinned_plan_region="${legacy_zonal_mig_zone%-*}"
+    elif [[ "$legacy_gpu_zone" != "-" ]]; then
+      pinned_plan_region="${legacy_gpu_zone%-*}"
+    elif [[ "$legacy_ctrl_zone" != "-" ]]; then
+      pinned_plan_region="${legacy_ctrl_zone%-*}"
+    fi
   fi
 
   if [[ "$ACTION" == "plan" ]]; then
     prepare_runner_bootstrap_auth
     refresh_gcp_credentials
-    build_tf_args "$pinned_plan_region" "$pinned_plan_zone"
+    build_tf_args "$pinned_plan_region" "$pinned_plan_zones"
     "${TF[@]}" plan "${var_args[@]}"
     return 0
   fi
 
   if [[ "$ACTION" == "destroy" ]]; then
     refresh_gcp_credentials
-    build_tf_args "$pinned_plan_region" "$pinned_plan_zone"
+    build_tf_args "$pinned_plan_region" "$pinned_plan_zones"
     "${TF[@]}" destroy "${apply_args[@]}"
     return 0
   fi
@@ -896,7 +1068,7 @@ print(f"{mig_zone} {mig_name} {tainted_mig_zone} {legacy_gpu_zone} {legacy_ctrl_
   prepare_runner_bootstrap_auth
 
   if [[ "$legacy_gpu_zone" != "-" || "$legacy_ctrl_zone" != "-" || "$legacy_data_zone" != "-" ]]; then
-    echo "Detected legacy standalone 2-VM resources in Terraform state (controller=${legacy_ctrl_zone}, gpu_vm=${legacy_gpu_zone}, data=${legacy_data_zone}); releasing them before creating Stateful MIG so GPU/disk quota is free..."
+    echo "Detected legacy standalone 2-VM resources in Terraform state (controller=${legacy_ctrl_zone}, gpu_vm=${legacy_gpu_zone}, data=${legacy_data_zone}); releasing them before creating Regional MIG so GPU/disk quota is free..."
     local -a legacy_targets=()
     for legacy_res in \
       google_compute_instance.gpu_vm \
@@ -908,17 +1080,25 @@ print(f"{mig_zone} {mig_name} {tainted_mig_zone} {legacy_gpu_zone} {legacy_ctrl_
     done
     if [[ ${#legacy_targets[@]} -gt 0 ]]; then
       refresh_gcp_credentials
-      build_tf_args "$pinned_plan_region" "$pinned_plan_zone"
+      build_tf_args "$pinned_plan_region" ""
       "${TF[@]}" destroy -auto-approve "${var_args[@]}" "${legacy_targets[@]}" || true
     fi
   fi
 
-  # Check whether an existing Stateful MIG in state currently has a RUNNING instance.
+  if [[ "$legacy_zonal_mig_zone" != "-" ]]; then
+    echo "Detected legacy zonal MIG (google_compute_instance_group_manager.gpu in ${legacy_zonal_mig_zone}) in Terraform state; releasing it first so GPU quota and MIG name '${effective_prefix}-mig' are freed before creating the Regional MIG..."
+    refresh_gcp_credentials
+    build_tf_args "${legacy_zonal_mig_zone%-*}" ""
+    "${TF[@]}" destroy -auto-approve "${var_args[@]}" \
+      -target=google_compute_instance_group_manager.gpu || true
+  fi
+
+  # Check whether an existing Regional MIG in state currently has a RUNNING instance.
   local state_mig_running="false"
-  if [[ "$state_mig_zone" != "-" ]]; then
+  if [[ "$state_mig_region" != "-" ]]; then
     local state_mig_list_json
     state_mig_list_json="$(gcloud compute instance-groups managed list-instances "$state_mig_name" \
-      --zone="$state_mig_zone" \
+      --region="$state_mig_region" \
       --project="$effective_project" \
       --format=json 2>/dev/null || true)"
     state_mig_running="$(
@@ -935,43 +1115,62 @@ print("true" if running else "false")
     )"
   fi
 
-  local candidate_targets=()
-  if [[ -n "$CLI_ZONE" ]]; then
-    candidate_targets=("${CLI_ZONE%-*}:${CLI_ZONE}")
-  elif [[ "$state_mig_zone" != "-" && "$FORCE_MOVE" != "true" ]] && \
-       { [[ "$state_mig_running" == "true" ]] || [[ "$CYCLE_REGIONS" != "true" && -z "$REGIONS_LIST" ]]; }; then
-    local pinned_region="${state_mig_zone%-*}"
-    echo "Pinning deployment to existing Stateful MIG '${state_mig_name}' in state: ${pinned_region} / ${state_mig_zone} (running=${state_mig_running})"
-    candidate_targets=("${pinned_region}:${state_mig_zone}")
-  elif [[ "$CYCLE_REGIONS" != "true" && -z "$REGIONS_LIST" && -n "$explicit_zone" ]]; then
-    candidate_targets=("${explicit_zone%-*}:${explicit_zone}")
+  # Build region-level candidate list (`region:z1,z2,...`).
+  local candidate_regions=()
+  if [[ -n "$cli_zones_csv" ]]; then
+    candidate_regions=("${default_region}:${cli_zones_csv}")
   else
-    echo "Discovering zones offering ${effective_machine} in project ${effective_project}..."
-    local preferred_state_zone="$state_mig_zone"
-    if [[ "$preferred_state_zone" == "-" ]]; then
-      preferred_state_zone="$tainted_mig_zone"
-    fi
-    if [[ "$preferred_state_zone" == "-" ]]; then
-      preferred_state_zone="$legacy_data_zone"
-    fi
-    if [[ -z "$explicit_region" && -z "$CLI_ZONE" && "$preferred_state_zone" != "-" ]]; then
-      default_region="${preferred_state_zone%-*}"
-    fi
-    local all_machine_zones
-    all_machine_zones="$(gcloud compute machine-types list \
+    echo "Discovering zones offering ${effective_machine} across regions in project ${effective_project}..."
+    local raw_machine_zones
+    raw_machine_zones="$(gcloud compute machine-types list \
       --project="${effective_project}" \
       --filter="name=${effective_machine}" \
-      --format="value(zone)" 2>/dev/null | sort -u || true)"
+      --format="value(zone)" 2>/dev/null || true)"
 
-    mapfile -t candidate_targets < <(
-      python3 - "$default_region" "$REGIONS_LIST" "$CYCLE_REGIONS" "$preferred_state_zone" "$all_machine_zones" <<'PY'
+    if [[ "$state_mig_region" != "-" && "$FORCE_MOVE" != "true" ]] && \
+       { [[ "$state_mig_running" == "true" ]] || [[ "$CYCLE_REGIONS" != "true" && -z "$REGIONS_LIST" ]]; }; then
+      local pinned_zones=""
+      if [[ -n "$explicit_zones_csv" ]] && zones_match_region "$explicit_zones_csv" "$state_mig_region"; then
+        pinned_zones="$explicit_zones_csv"
+      else
+        pinned_zones="$(
+          python3 - "$state_mig_region" "$state_mig_zones" "$raw_machine_zones" <<'PY'
+import sys
+reg, state_zones, raw = sys.argv[1], sys.argv[2], sys.argv[3]
+discovered = sorted({z.strip() for z in raw.splitlines() if z.strip() and z.strip().rsplit("-", 1)[0] == reg})
+if discovered:
+    print(",".join(discovered))
+elif state_zones != "-":
+    print(state_zones)
+PY
+        )"
+      fi
+      echo "Pinning deployment to existing Regional MIG '${state_mig_name}' in state: ${state_mig_region} (zones=${pinned_zones:-all}, running=${state_mig_running})"
+      candidate_regions=("${state_mig_region}:${pinned_zones}")
+    else
+      local preferred_state_region="$state_mig_region"
+      if [[ "$preferred_state_region" == "-" ]]; then
+        preferred_state_region="$tainted_rmig_region"
+      fi
+      if [[ "$preferred_state_region" == "-" && "$legacy_zonal_mig_zone" != "-" ]]; then
+        preferred_state_region="${legacy_zonal_mig_zone%-*}"
+      fi
+      if [[ "$preferred_state_region" == "-" && "$legacy_data_zone" != "-" ]]; then
+        preferred_state_region="${legacy_data_zone%-*}"
+      fi
+      if [[ -z "$explicit_region" && -z "$cli_zones_csv" && "$preferred_state_region" != "-" ]]; then
+        default_region="$preferred_state_region"
+      fi
+
+      mapfile -t candidate_regions < <(
+        python3 - "$default_region" "$REGIONS_LIST" "$CYCLE_REGIONS" "$explicit_zones_csv" "$raw_machine_zones" <<'PY'
 import sys
 
 default_region = sys.argv[1]
 regions_csv = sys.argv[2]
 cycle_all = sys.argv[3] == "true"
-state_zone = sys.argv[4]
-all_zones = [z.strip() for z in sys.argv[5].splitlines() if z.strip()]
+explicit_zones_csv = sys.argv[4]
+all_zones = sorted({z.strip() for z in sys.argv[5].splitlines() if z.strip()})
 
 by_region = {}
 for z in all_zones:
@@ -991,65 +1190,62 @@ preferred_order = [
 ]
 
 if regions_csv:
-    target_regions = [r.strip() for r in regions_csv.split(",") if r.strip()]
+    target_regions = []
+    for r in regions_csv.split(","):
+        r = r.strip()
+        if r and r not in target_regions:
+            target_regions.append(r)
 elif cycle_all:
     target_regions = []
     for r in preferred_order + sorted(by_region.keys()):
         if r in by_region and r not in target_regions:
             target_regions.append(r)
+    if not target_regions and not all_zones:
+        target_regions = [default_region]
 else:
     target_regions = [default_region]
 
-seen = set()
-out = []
-for r in target_regions:
-    zones = list(by_region.get(r, []))
-    if not zones and not all_zones:
-        zones = [f"{r}-a", f"{r}-b", f"{r}-c"]
-    if state_zone != "-" and state_zone in zones:
-        zones.remove(state_zone)
-        zones.insert(0, state_zone)
-    for z in zones:
-        key = f"{r}:{z}"
-        if key not in seen:
-            seen.add(key)
-            out.append(key)
+explicit_zones = [z.strip() for z in explicit_zones_csv.split(",") if z.strip()]
 
-for item in out:
-    print(item)
+for r in target_regions:
+    if not regions_csv and not cycle_all and explicit_zones and all(z.rsplit("-", 1)[0] == r for z in explicit_zones):
+        print(f"{r}:{','.join(explicit_zones)}")
+        continue
+    zones = by_region.get(r, [])
+    if zones:
+        print(f"{r}:{','.join(zones)}")
+    elif not all_zones:
+        # Machine-type zone discovery returned empty (e.g. transient API hiccup); let GCE span all zones in region.
+        print(f"{r}:")
 PY
-    )
+      )
+    fi
   fi
 
-  if [[ ${#candidate_targets[@]} -eq 0 ]]; then
-    echo "[error] No valid zones found for machine type ${effective_machine} in requested region(s)." >&2
+  if [[ ${#candidate_regions[@]} -eq 0 ]]; then
+    echo "[error] No valid GPU-capable zones found for machine type ${effective_machine} in requested region(s)." >&2
     exit 1
   fi
 
-  echo "Candidate region/zone order (${#candidate_targets[@]}): ${candidate_targets[*]}"
+  echo "Candidate region order (${#candidate_regions[@]}): ${candidate_regions[*]}"
 
   has_more_candidates() {
     local cur_idx="$1"
-    local skipped_reg="$2"
-    local j next_target next_reg
-    for ((j = cur_idx + 1; j < ${#candidate_targets[@]}; j++)); do
-      next_target="${candidate_targets[$j]}"
-      next_reg="${next_target%%:*}"
-      if [[ -z "$skipped_reg" || "$next_reg" != "$skipped_reg" ]]; then
-        return 0
-      fi
-    done
-    return 1
+    (( cur_idx + 1 < ${#candidate_regions[@]} ))
   }
 
-  destroy_mig_in_zone() {
+  destroy_mig_in_region() {
     local target_region="$1"
-    local target_zone="$2"
+    local target_zones_csv="${2:-}"
     refresh_gcp_credentials
-    build_tf_args "$target_region" "$target_zone"
+    build_tf_args "$target_region" "$target_zones_csv"
     "${TF[@]}" destroy -auto-approve "${var_args[@]}" \
-      -target=google_compute_instance_group_manager.gpu \
+      -target=google_compute_region_instance_group_manager.gpu \
       -target=google_compute_instance_template.gpu || true
+    # Best-effort cleanup of an empty probe cache bucket when moving off a quota/exhausted region
+    # (non-empty cache buckets remain protected by force_destroy=false).
+    "${TF[@]}" destroy -auto-approve "${var_args[@]}" \
+      -target=google_storage_bucket.gpu_cache || true
   }
 
   classify_mig_instances_json() {
@@ -1058,21 +1254,23 @@ import json, re, sys
 
 raw = sys.stdin.read().strip()
 if not raw:
-    print("WAITING\t-\t-\tno instances reported yet")
+    print("WAITING\t-\t-\t-\tno instances reported yet")
     sys.exit(0)
 try:
     items = json.loads(raw)
 except Exception as exc:
     msg = " ".join(str(exc).split())
-    print(f"WAITING\t-\t-\tinvalid json: {msg}")
+    print(f"WAITING\t-\t-\t-\tinvalid json: {msg}")
     sys.exit(0)
 if not isinstance(items, list) or not items:
-    print("WAITING\t-\t-\tmig creating instance")
+    print("WAITING\t-\t-\t-\tmig creating instance")
     sys.exit(0)
 
 entry = items[0] if isinstance(items[0], dict) else {}
 inst_url = entry.get("instance") or ""
 inst_name = inst_url.rsplit("/", 1)[-1] if inst_url else "-"
+zm = re.search(r"/zones/([^/]+)/instances/", inst_url)
+inst_zone = zm.group(1) if zm else "-"
 inst_status = (entry.get("instanceStatus") or "").upper()
 cur_action = (entry.get("currentAction") or "").upper()
 
@@ -1099,40 +1297,42 @@ status_label = inst_status or "NONE"
 action_label = cur_action or "NONE"
 
 if inst_status == "RUNNING":
-    print(f"RUNNING\t{inst_name}\t{inst_status}\taction={action_label}")
+    print(f"RUNNING\t{inst_name}\t{inst_zone}\t{inst_status}\taction={action_label}")
     sys.exit(0)
 if inst_status in ("PROVISIONING", "STAGING"):
-    print(f"BOOTING\t{inst_name}\t{inst_status}\taction={action_label}")
+    print(f"BOOTING\t{inst_name}\t{inst_zone}\t{inst_status}\taction={action_label}")
     sys.exit(0)
 if combined_err:
     if re.search(r"QUOTA_EXCEEDED|Quota\b.*\bexceeded", combined_err, re.IGNORECASE):
-        print(f"QUOTA\t{inst_name}\t{status_label}\t{combined_err}")
+        print(f"QUOTA\t{inst_name}\t{inst_zone}\t{status_label}\t{combined_err}")
         sys.exit(0)
     if re.search(r"ZONE_RESOURCE_POOL_EXHAUSTED|RESOURCE_POOL_EXHAUSTED|does not have enough resources|stockout|preempted", combined_err, re.IGNORECASE):
-        print(f"EXHAUSTED\t{inst_name}\t{status_label}\t{combined_err}")
+        print(f"EXHAUSTED\t{inst_name}\t{inst_zone}\t{status_label}\t{combined_err}")
         sys.exit(0)
-    print(f"ERROR\t{inst_name}\t{status_label}\t{combined_err}")
+    print(f"ERROR\t{inst_name}\t{inst_zone}\t{status_label}\t{combined_err}")
     sys.exit(0)
 
-print(f"WAITING\t{inst_name}\t{status_label}\taction={action_label}")
+print(f"WAITING\t{inst_name}\t{inst_zone}\t{status_label}\taction={action_label}")
 '
   }
 
   local deployed_region=""
-  local deployed_zone=""
+  local deployed_zones_csv=""
+  local deployed_active_zone=""
   local mig_instance_state="UNKNOWN"
   local exhausted_target=""
-  local skip_region=""
-  local current_state_zone="$state_mig_zone"
+  local current_state_region="$state_mig_region"
+  local current_state_zones="$state_mig_zones"
+  [[ "$current_state_zones" == "-" ]] && current_state_zones=""
   local log_file
   log_file="$(mktemp)"
   trap 'rm -f "${log_file:-}"' EXIT
 
   apply_full_stack() {
     local target_region="$1"
-    local target_zone="$2"
+    local target_zones_csv="${2:-}"
     refresh_gcp_credentials
-    build_tf_args "$target_region" "$target_zone"
+    build_tf_args "$target_region" "$target_zones_csv"
     : > "$log_file"
     set +e
     "${TF[@]}" apply "${apply_args[@]}" 2>&1 | tee "$log_file"
@@ -1163,71 +1363,82 @@ print(f"WAITING\t{inst_name}\t{status_label}\taction={action_label}")
     return "$rc"
   }
 
-  for idx in "${!candidate_targets[@]}"; do
-    local target="${candidate_targets[$idx]}"
+  for idx in "${!candidate_regions[@]}"; do
+    local target="${candidate_regions[$idx]}"
     local cand_region="${target%%:*}"
-    local cand_zone="${target##*:}"
+    local cand_zones_csv="${target#*:}"
 
-    if [[ -n "$skip_region" && "$cand_region" == "$skip_region" ]]; then
-      continue
-    fi
-
-    # When moving an existing MIG to a different zone/region, tear down the old MIG and
+    # When moving an existing Regional MIG to a different region, tear down the old MIG and
     # template first so regional subnetwork replacement never hits a dependency cycle.
-    if [[ "$current_state_zone" != "-" && "$current_state_zone" != "$cand_zone" ]]; then
-      echo "Releasing previous Stateful MIG in ${current_state_zone} before moving to ${cand_zone}..."
-      destroy_mig_in_zone "${current_state_zone%-*}" "$current_state_zone"
-      current_state_zone="-"
+    if [[ "$current_state_region" != "-" && "$current_state_region" != "$cand_region" ]]; then
+      echo "Releasing previous Regional MIG in ${current_state_region} before moving to ${cand_region}..."
+      destroy_mig_in_region "$current_state_region" "$current_state_zones"
+      current_state_region="-"
+      current_state_zones=""
     fi
 
-    echo "Trying region ${cand_region} / zone ${cand_zone} ($((idx + 1))/${#candidate_targets[@]})..."
+    echo "Trying region ${cand_region} (zones=${cand_zones_csv:-all}) ($((idx + 1))/${#candidate_regions[@]})..."
     set +e
-    apply_full_stack "$cand_region" "$cand_zone"
+    apply_full_stack "$cand_region" "$cand_zones_csv"
     local apply_status=$?
     set -e
 
     if [[ $apply_status -ne 0 ]]; then
       if grep -Eqi "QUOTA_EXCEEDED|Quota .* exceeded" "$log_file"; then
-        echo "Region ${cand_region} hit quota limit during apply; skipping remaining zones in ${cand_region}..."
-        skip_region="$cand_region"
+        echo "Region ${cand_region} hit quota limit during apply; trying next region..."
+        destroy_mig_in_region "$cand_region" "$cand_zones_csv"
+        current_state_region="-"
+        current_state_zones=""
         continue
       fi
       if grep -Eqi "ZONE_RESOURCE_POOL_EXHAUSTED|RESOURCE_POOL_EXHAUSTED|does not have enough resources|stockout" "$log_file"; then
-        echo "Zone ${cand_zone} reported capacity exhaustion during apply; trying next candidate..."
-        exhausted_target="${cand_region}:${cand_zone}"
+        echo "Region ${cand_region} reported capacity exhaustion during apply; trying next candidate..."
+        exhausted_target="${cand_region}:${cand_zones_csv}"
+        destroy_mig_in_region "$cand_region" "$cand_zones_csv"
+        current_state_region="-"
+        current_state_zones=""
         continue
       fi
       exit "$apply_status"
     fi
 
-    current_state_zone="$cand_zone"
+    current_state_region="$cand_region"
+    current_state_zones="$cand_zones_csv"
     local mig_name
     mig_name="$("${TF[@]}" output -raw mig_name 2>/dev/null || echo "${effective_prefix}-mig")"
 
-    echo "Polling Stateful MIG '${mig_name}' in ${cand_zone} for RUNNING instance (up to 90s)..."
+    echo "Polling Regional MIG '${mig_name}' in ${cand_region} (zones=${cand_zones_csv:-all}) for RUNNING instance (up to 90s)..."
     local mig_result="TIMEOUT"
     local last_inst_name="-"
+    local last_inst_zone="-"
     local last_inst_status="NONE"
     local last_detail=""
     local prev_poll_summary=""
+    local exhausted_streak=0
+    local exhausted_limit=1
+    if [[ -z "$cand_zones_csv" || "$cand_zones_csv" == *,* ]]; then
+      # Give GCE's multi-zone Regional MIG ~20s to fail over across zones within the region.
+      exhausted_limit=4
+    fi
     local poll_attempt
 
     for poll_attempt in $(seq 1 18); do
-      local list_json poll_state inst_name inst_status detail_msg
+      local list_json poll_state inst_name inst_zone inst_status detail_msg
       list_json="$(gcloud compute instance-groups managed list-instances "$mig_name" \
-        --zone="$cand_zone" \
+        --region="$cand_region" \
         --project="$effective_project" \
         --format=json 2>/dev/null || true)"
-      IFS=$'\t' read -r poll_state inst_name inst_status detail_msg < <(
+      IFS=$'\t' read -r poll_state inst_name inst_zone inst_status detail_msg < <(
         printf '%s' "$list_json" | classify_mig_instances_json
       )
       last_inst_name="$inst_name"
+      last_inst_zone="$inst_zone"
       last_inst_status="$inst_status"
       last_detail="$detail_msg"
 
-      local poll_summary="${poll_state}:${inst_name}:${inst_status}:${detail_msg}"
+      local poll_summary="${poll_state}:${inst_name}:${inst_zone}:${inst_status}:${detail_msg}"
       if [[ "$poll_summary" != "$prev_poll_summary" ]]; then
-        echo "  [poll ${poll_attempt}/18] instance=${inst_name} status=${inst_status} state=${poll_state} (${detail_msg})"
+        echo "  [poll ${poll_attempt}/18] instance=${inst_name} zone=${inst_zone} status=${inst_status} state=${poll_state} (${detail_msg})"
         prev_poll_summary="$poll_summary"
       fi
 
@@ -1241,10 +1452,15 @@ print(f"WAITING\t{inst_name}\t{status_label}\taction={action_label}")
           break
           ;;
         EXHAUSTED)
-          mig_result="EXHAUSTED"
-          break
+          exhausted_streak=$(( exhausted_streak + 1 ))
+          if (( exhausted_streak >= exhausted_limit || poll_attempt == 18 )); then
+            mig_result="EXHAUSTED"
+            break
+          fi
+          sleep 5
           ;;
         BOOTING)
+          exhausted_streak=0
           if [[ "$poll_attempt" -eq 18 ]]; then
             mig_result="BOOTING"
           else
@@ -1252,6 +1468,7 @@ print(f"WAITING\t{inst_name}\t{status_label}\taction={action_label}")
           fi
           ;;
         ERROR)
+          exhausted_streak=0
           if [[ "$poll_attempt" -eq 18 ]]; then
             mig_result="ERROR"
           else
@@ -1259,6 +1476,7 @@ print(f"WAITING\t{inst_name}\t{status_label}\taction={action_label}")
           fi
           ;;
         *)
+          exhausted_streak=0
           if [[ "$poll_attempt" -lt 18 ]]; then
             sleep 5
           fi
@@ -1268,46 +1486,50 @@ print(f"WAITING\t{inst_name}\t{status_label}\taction={action_label}")
 
     case "$mig_result" in
       RUNNING)
-        echo "Managed GPU instance '${last_inst_name}' is RUNNING in ${cand_zone}."
+        echo "Managed GPU instance '${last_inst_name}' is RUNNING in zone ${last_inst_zone} (region ${cand_region})."
         deployed_region="$cand_region"
-        deployed_zone="$cand_zone"
+        deployed_zones_csv="$cand_zones_csv"
+        [[ "$last_inst_zone" != "-" ]] && deployed_active_zone="$last_inst_zone"
         mig_instance_state="RUNNING"
         break
         ;;
       BOOTING)
-        echo "Managed GPU instance '${last_inst_name}' is allocated and booting (${last_inst_status}) in ${cand_zone}."
+        echo "Managed GPU instance '${last_inst_name}' is allocated and booting (${last_inst_status}) in zone ${last_inst_zone} (region ${cand_region})."
         deployed_region="$cand_region"
-        deployed_zone="$cand_zone"
+        deployed_zones_csv="$cand_zones_csv"
+        [[ "$last_inst_zone" != "-" ]] && deployed_active_zone="$last_inst_zone"
         mig_instance_state="$last_inst_status"
         break
         ;;
       QUOTA)
-        echo "Region ${cand_region} hit quota limit (${last_detail}); skipping remaining zones in ${cand_region}..."
-        skip_region="$cand_region"
-        destroy_mig_in_zone "$cand_region" "$cand_zone"
-        current_state_zone="-"
+        echo "Region ${cand_region} hit quota limit (${last_detail}); trying next region..."
+        destroy_mig_in_region "$cand_region" "$cand_zones_csv"
+        current_state_region="-"
+        current_state_zones=""
         continue
         ;;
       EXHAUSTED|TIMEOUT)
-        exhausted_target="${cand_region}:${cand_zone}"
-        if has_more_candidates "$idx" "$skip_region" || [[ "$STAGE_ON_EXHAUSTION" != "true" ]]; then
-          echo "Zone ${cand_zone} has no immediate GPU capacity (${last_detail}); destroying MIG before trying next candidate..."
-          destroy_mig_in_zone "$cand_region" "$cand_zone"
-          current_state_zone="-"
+        exhausted_target="${cand_region}:${cand_zones_csv}"
+        if has_more_candidates "$idx" || [[ "$STAGE_ON_EXHAUSTION" != "true" ]]; then
+          echo "Region ${cand_region} (zones=${cand_zones_csv:-all}) has no immediate GPU capacity (${last_detail}); destroying Regional MIG before trying next candidate..."
+          destroy_mig_in_region "$cand_region" "$cand_zones_csv"
+          current_state_region="-"
+          current_state_zones=""
           continue
         else
-          echo "Zone ${cand_zone} has no immediate GPU capacity (${last_detail}); leaving Stateful MIG '${mig_name}' active to auto-allocate once capacity opens."
+          echo "Region ${cand_region} (zones=${cand_zones_csv:-all}) has no immediate GPU capacity (${last_detail}); leaving Regional MIG '${mig_name}' active to auto-allocate across zones once capacity opens."
           deployed_region="$cand_region"
-          deployed_zone="$cand_zone"
+          deployed_zones_csv="$cand_zones_csv"
           mig_instance_state="PENDING_CAPACITY"
           break
         fi
         ;;
       ERROR)
-        echo "[error] Stateful MIG '${mig_name}' in ${cand_zone} reported an error: ${last_detail}" >&2
-        if has_more_candidates "$idx" "$skip_region"; then
-          destroy_mig_in_zone "$cand_region" "$cand_zone"
-          current_state_zone="-"
+        echo "[error] Regional MIG '${mig_name}' in ${cand_region} reported an error: ${last_detail}" >&2
+        if has_more_candidates "$idx"; then
+          destroy_mig_in_region "$cand_region" "$cand_zones_csv"
+          current_state_region="-"
+          current_state_zones=""
           continue
         fi
         exit 1
@@ -1315,102 +1537,78 @@ print(f"WAITING\t{inst_name}\t{status_label}\taction={action_label}")
     esac
   done
 
-  # If the final candidates hit quota after an earlier quota-valid zone hit stockout,
-  # stage the Stateful MIG in the quota-valid zone when STAGE_ON_EXHAUSTION=true.
-  if [[ -z "$deployed_zone" && -n "$exhausted_target" && "$STAGE_ON_EXHAUSTION" == "true" ]]; then
+  # If the final candidates hit quota after an earlier quota-valid region hit stockout,
+  # stage the Regional MIG in the quota-valid region when STAGE_ON_EXHAUSTION=true.
+  if [[ -z "$deployed_region" && -n "$exhausted_target" && "$STAGE_ON_EXHAUSTION" == "true" ]]; then
     local fb_region="${exhausted_target%%:*}"
-    local fb_zone="${exhausted_target##*:}"
-    echo "All candidate regions/zones out of immediate GPU capacity; keeping Stateful MIG active in ${fb_zone} to auto-allocate as soon as capacity opens..."
-    apply_full_stack "$fb_region" "$fb_zone"
+    local fb_zones="${exhausted_target#*:}"
+    echo "All candidate regions out of immediate GPU capacity; keeping Regional MIG active in ${fb_region} (zones=${fb_zones:-all}) to auto-allocate as soon as capacity opens..."
+    apply_full_stack "$fb_region" "$fb_zones"
     deployed_region="$fb_region"
-    deployed_zone="$fb_zone"
+    deployed_zones_csv="$fb_zones"
     mig_instance_state="PENDING_CAPACITY"
   fi
 
-  if [[ -z "$deployed_zone" ]]; then
-    echo "[error] Failed to allocate GPU capacity across candidates: ${candidate_targets[*]}" >&2
+  if [[ -z "$deployed_region" ]]; then
+    echo "[error] Failed to allocate GPU capacity across candidate regions: ${candidate_regions[*]}" >&2
     exit 1
   fi
 
-  local out_mig_name out_vpc out_secret out_runner_name out_use_spot out_list_cmd
+  local out_mig_name out_vpc out_secret out_runner_name out_use_spot out_cache_bucket_url out_list_cmd
   out_mig_name="$("${TF[@]}" output -raw mig_name 2>/dev/null || echo "${effective_prefix}-mig")"
   out_vpc="$("${TF[@]}" output -raw vpc_network 2>/dev/null || echo "${vpc_mode_desc}")"
   out_secret="$("${TF[@]}" output -raw runner_secret_id 2>/dev/null || echo "${effective_prefix}-runner-bootstrap")"
   out_runner_name="$("${TF[@]}" output -raw runner_name 2>/dev/null || echo "${effective_runner_name}")"
   out_use_spot="$("${TF[@]}" output -raw use_spot 2>/dev/null || echo "${effective_use_spot}")"
-  out_list_cmd="$("${TF[@]}" output -raw list_instances_command 2>/dev/null || echo "gcloud compute instance-groups managed list-instances ${out_mig_name} --zone=${deployed_zone} --project=${effective_project}")"
+  out_cache_bucket_url="$("${TF[@]}" output -raw cache_bucket_url 2>/dev/null || true)"
+  if [[ -z "$out_cache_bucket_url" ]]; then
+    local out_cache_bucket_name
+    out_cache_bucket_name="$("${TF[@]}" output -raw cache_bucket_name 2>/dev/null || compute_cache_bucket_name "$effective_project" "$effective_prefix" "$deployed_region" "$effective_cache_bucket_override")"
+    out_cache_bucket_url="gs://${out_cache_bucket_name}"
+  fi
+  out_list_cmd="$("${TF[@]}" output -raw list_instances_command 2>/dev/null || echo "gcloud compute instance-groups managed list-instances ${out_mig_name} --region=${deployed_region} --project=${effective_project}")"
 
-  # The MIG re-attaches the existing stateful `data` disk on every recreation, so the template's IOPS/throughput only
-  # apply to brand-new disks. Bring the attached data disk to the Terraform values in place (idempotent).
-  sync_data_disk_performance() {
-    local want_iops want_tp inst dev src disk_name disk_zone cur
-    want_iops="$("${TF[@]}" output -raw data_disk_iops 2>/dev/null || true)"
-    want_tp="$("${TF[@]}" output -raw data_disk_throughput_mbps 2>/dev/null || true)"
-    if [[ ! "$want_iops" =~ ^[0-9]+$ || ! "$want_tp" =~ ^[0-9]+$ ]]; then
-      echo "[warn] Terraform outputs data_disk_iops/data_disk_throughput_mbps missing; skipping data disk performance sync."
-      return 0
-    fi
-    local found=false
-    while IFS= read -r inst; do
-      [[ -n "$inst" ]] || continue
-      while IFS=$'\t' read -r dev src; do
-        [[ "$dev" == "data" && -n "$src" ]] || continue
-        found=true
-        disk_name="${src##*/}"
-        disk_zone="$(sed -E 's#.*/zones/([^/]+)/disks/.*#\1#' <<<"$src")"
-        cur="$(gcloud compute disks describe "$disk_name" --zone="$disk_zone" --project="$effective_project" \
-          --format='value(provisionedIops,provisionedThroughput)' 2>/dev/null || true)"
-        if [[ "$cur" == "${want_iops}"$'\t'"${want_tp}" ]]; then
-          echo "[ok] Data disk ${disk_name}: ${want_iops} IOPS / ${want_tp} MiB/s already provisioned."
-          continue
-        fi
-        echo "[deploy] Data disk ${disk_name}: ${cur/$'\t'/ IOPS \/ } MiB/s -> ${want_iops} IOPS / ${want_tp} MiB/s (in place, no detach)..."
-        if ! gcloud compute disks update "$disk_name" --zone="$disk_zone" --project="$effective_project" \
-             --provisioned-iops="$want_iops" --provisioned-throughput="$want_tp" --quiet; then
-          echo "[warn] Could not update ${disk_name} (Hyperdisk performance can only be changed every few hours); re-run deploy.sh later."
-        fi
-      done < <(gcloud compute instances describe "$inst" --zone="$deployed_zone" --project="$effective_project" \
-                 --flatten=disks --format='value(disks.deviceName,disks.source)' 2>/dev/null || true)
-    done < <(gcloud compute instance-groups managed list-instances "$out_mig_name" --zone="$deployed_zone" \
-               --project="$effective_project" --format='value(instance.basename())' 2>/dev/null || true)
-    $found || echo "[info] No MIG instance with a data disk yet; a new disk is created with ${want_iops} IOPS / ${want_tp} MiB/s."
-  }
-  sync_data_disk_performance
-
-  local final_model_desc="SPOT (auto-healed by MIG)"
+  local final_model_desc="SPOT (cross-zone failover via Regional MIG)"
   if [[ "${out_use_spot,,}" == "false" ]]; then
     final_model_desc="STANDARD (on-demand)"
   fi
 
+  local target_zones_display="${deployed_zones_csv:-all zones in ${deployed_region}}"
+  if [[ -n "$deployed_active_zone" ]]; then
+    target_zones_display="${target_zones_display} (active: ${deployed_active_zone})"
+  fi
+
   echo ""
   echo "================================================================"
-  echo "Stateful GPU MIG deployed successfully (GCP)"
+  echo "Stateless Multi-Zone Regional GPU MIG deployed successfully (GCP)"
   echo "================================================================"
   echo "Project:              ${effective_project}"
-  echo "Region / Zone:        ${deployed_region} / ${deployed_zone}"
+  echo "Region:               ${deployed_region}"
+  echo "Target Zones:         ${target_zones_display}"
   echo "Provisioning Model:   ${final_model_desc}"
   echo "Machine Type:         ${effective_machine}"
   echo "VPC Network:          ${out_vpc}"
   echo "MIG Name:             ${out_mig_name} (state=${mig_instance_state})"
   echo "Runner Secret:        ${out_secret} -> ${effective_repo} (runner=${out_runner_name})"
+  echo "Cache Bucket:         ${out_cache_bucket_url}"
   if [[ "$mig_instance_state" == "PENDING_CAPACITY" ]]; then
     echo ""
-    echo "Note: The Stateful MIG is active in ${deployed_zone} and will automatically"
-    echo "      allocate the GPU VM, attach its 3 TB Hyperdisk, and register the runner"
-    echo "      as soon as capacity becomes available."
+    echo "Note: The Regional MIG is active in ${deployed_region} (zones=${deployed_zones_csv:-all}) and"
+    echo "      will automatically allocate the GPU VM in any available zone, restore cached"
+    echo "      state from ${out_cache_bucket_url}, and register the runner as soon as capacity opens."
   fi
   echo ""
   echo "List Managed Instances:"
   echo "  ${out_list_cmd}"
   echo ""
-  echo "Check Runner & MIG Status (zero SSH):"
+  echo "Check Runner & Regional MIG Status (zero SSH):"
   echo "  ./development/scripts/setup.sh --provider=gcp --status"
   echo ""
   echo "Sync development/.env to GitHub Secrets/Variables (if not already synced):"
   echo "  ./development/scripts/setup.sh --provider=gcp"
   echo ""
   gcloud compute instance-groups managed list-instances "${out_mig_name}" \
-    --zone="${deployed_zone}" \
+    --region="${deployed_region}" \
     --project="${effective_project}" || true
 }
 

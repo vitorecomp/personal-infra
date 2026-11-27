@@ -4,21 +4,39 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "GCP region for VPC, Cloud NAT, and GPU Managed Instance Group resources."
+  description = "GCP region for VPC, Cloud NAT, GCS cache bucket, and multi-zone GPU Regional Managed Instance Group resources."
   type        = string
   default     = "europe-west4"
 }
 
+variable "zones" {
+  description = "Target zones within `region` for the multi-zone Regional MIG; when empty, uses `zone` if set or all zones in `region`."
+  type        = list(string)
+  default     = []
+}
+
 variable "zone" {
-  description = "GCP zone for the stateful GPU Managed Instance Group and its Hyperdisk data volume."
+  description = "Optional single-zone override within `region` for backward compatibility (ignored when `zones` is non-empty)."
   type        = string
-  default     = "europe-west4-a"
+  default     = ""
 }
 
 variable "name_prefix" {
   description = "Prefix applied to all created resources."
   type        = string
   default     = "dev-gpu"
+}
+
+variable "cache_bucket_name" {
+  description = "Optional GCS bucket name for persistent Hugging Face weights, stack config, and runner state; defaults to `<project_id>-<name_prefix>-cache-<region>`."
+  type        = string
+  default     = ""
+}
+
+variable "cache_bucket_force_destroy" {
+  description = "Allow Terraform destroy to delete non-empty GCS cache bucket objects."
+  type        = bool
+  default     = false
 }
 
 variable "use_spot" {
@@ -64,13 +82,13 @@ variable "boot_disk_throughput_mbps" {
 }
 
 variable "data_disk_type" {
-  description = "Stateful persistent data disk type for the GPU VM (G4 requires Hyperdisk)."
+  description = "Ephemeral Hyperdisk data disk type for the GPU VM (G4 requires Hyperdisk; persistent state is synced to the regional GCS cache bucket)."
   type        = string
   default     = "hyperdisk-balanced"
 }
 
 variable "data_disk_size_gb" {
-  description = "Stateful persistent Hyperdisk data disk size in GB mounted at /mnt/data on the GPU VM."
+  description = "Ephemeral Hyperdisk data disk size in GB mounted at /mnt/data on the GPU VM (auto-deleted on recreation/zone failover)."
   type        = number
   default     = 3000
 }
@@ -79,15 +97,14 @@ variable "data_disk_size_gb" {
 # full-size replica measured 357 MB/s at 4,000 IOPS (~20 min per cold load) vs ~40 min at the old 3,060 IOPS /
 # 200 MiB/s cap. 8,000 IOPS / 750 MiB/s targets ~700 MB/s (~11 min). europe-west4 list price beyond the free 3,000 IOPS /
 # 140 MiB/s: $0.005 per IOPS-month and $0.042 per MiB/s-month, i.e. ~$51/month on top of capacity.
-# The MIG keeps the existing stateful disk across recreations, so deploy.sh also applies these values to it in place.
 variable "data_disk_iops" {
-  description = "Provisioned IOPS for the GPU VM stateful data Hyperdisk (throughput may be at most IOPS / 4 MiB/s)."
+  description = "Provisioned IOPS for the GPU VM ephemeral data Hyperdisk (throughput may be at most IOPS / 4 MiB/s)."
   type        = number
   default     = 8000
 }
 
 variable "data_disk_throughput_mbps" {
-  description = "Provisioned throughput (MiB/s) for the GPU VM stateful data Hyperdisk."
+  description = "Provisioned throughput (MiB/s) for the GPU VM ephemeral data Hyperdisk."
   type        = number
   default     = 750
 }

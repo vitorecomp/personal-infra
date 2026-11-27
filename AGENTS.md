@@ -9,7 +9,7 @@ Instructions and context for AI coding agents working in `personal-infra`.
 The repository is organized into five top-level domains:
 
 1. **`cloud/`** — `nobuffer-site` + `personal-portifolio` on Vercel (Git integration on their repos); `personal-blog` (Ghost + local MySQL) on the GCE free-tier e2-micro VM `personal-host` behind a shared Caddy (`cloud/edge`); `taiga` on Cloud Run free tier (built and deployed from GitHub Actions by `cloud/taiga/deploy-cloudrun.sh` as `github-deployer` via Workload Identity Federation, database on Neon Postgres 15, media in GCS). The VM never builds images: the Ghost image is built in CI and pulled from GHCR. Terraform in `cloud/infra/envs/{gcp-taiga,oci-blog}` is applied from a workstation, never in CI (`documentation/vm-provisioning.md`); `oci-blog` is a spare OCI A1 VM still being acquired by `tf_apply_retry.sh`, run every 10 min by the `oci-blog-retry.service` unit on the VM (`documentation/vm-provisioning.md`). DNS is on Cloudflare.
-2. **`development/`** — GPU development machine provisioning across `infra/{gcp,azure,on-prem}` via `development/scripts/deploy.sh` (starting with a zero-SSH GCP Stateful Zonal Managed Instance Group `dev-gpu-mig`, `--spot` / `--no-spot`, `--use-default-vpc`, Secret Manager runner bootstrap, and persistent 3 TB Hyperdisk in `development/infra/gcp`) and `development/scripts/setup.sh` (local `gh` variable/secret sync + runner status/removal via `gh api` on GCP; SSH runner setup for Azure/on-prem).
+2. **`development/`** — GPU development machine provisioning across `infra/{gcp,azure,on-prem}` via `development/scripts/deploy.sh` (starting with a zero-SSH GCP Stateless Multi-Zone Regional Managed Instance Group `dev-gpu-mig` with `ANY` target shape and `allow_changing_zone = "YES"`, `--spot` / `--no-spot`, `--use-default-vpc`, `--zones`, `--cache-bucket`, same-region GCS cache bucket `<project>-<prefix>-cache-<region>`, Secret Manager runner bootstrap, and ephemeral 3 TB Hyperdisk in `development/infra/gcp`) and `development/scripts/setup.sh` (local `gh` variable/secret sync + runner & Regional MIG status/removal via `gh api` / `gcloud --region` on GCP; SSH runner setup for Azure/on-prem).
 3. **`home-server/`** — Home server workloads, self-hosted services, networking, and maintenance _(specification pending)_.
 4. **`linux/`** — Linux system bootstrap, package installation, dotfiles, and OS configuration _(specification pending)_.
 5. **`workspace/`** — Local `~/workspace` directory orchestration and GitHub repository synchronization.
@@ -79,13 +79,13 @@ personal-infra/
 │   ├── README.md, .env.example             # Full GPU workflow runbook & template for gitignored `development/.env`
 │   ├── gpu-dev-machine/                    # Podman + podman-compose stack (vllm-server DeepSeek-V4.1-Flash, litellm, deepseek-harness)
 │   ├── infra/
-│   │   ├── gcp/                            # GCP Terraform: Stateful MIG (Spot/Standard, custom/default VPC) + Secret Manager runner bootstrap + 3 TB Hyperdisk
+│   │   ├── gcp/                            # GCP Terraform: Stateless Multi-Zone Regional MIG (Spot/Standard, custom/default VPC) + Same-Region GCS Cache Bucket + Secret Manager runner bootstrap + ephemeral 3 TB Hyperdisk
 │   │   ├── azure/                          # (Planned) Azure GPU VM infrastructure
-│   │   └── on-prem/                        # (Planned) On-prem GPU host infrastructure
+│   │   └── on-prem/                        # (Planned) On-prem GPU host configuration
 │   └── scripts/
-│       ├── deploy.sh                       # Unified machine provisioning entrypoint across GCP, Azure, and on-prem (--spot/--no-spot, --use-default-vpc, --loop, --cycle-regions)
-│       ├── setup.sh                        # Syncs `development/.env` to GitHub via `gh` (zero-SSH on GCP; SSH runner setup for azure/on-prem)
-│       └── deploy_gpu_stack.sh             # Syncs & deploys development/gpu-dev-machine via podman-compose (CI & local)
+│       ├── deploy.sh                       # Unified machine provisioning entrypoint across GCP, Azure, and on-prem (--spot/--no-spot, --use-default-vpc, --zones, --cache-bucket, --loop, --cycle-regions)
+│       ├── setup.sh                        # Syncs `development/.env` to GitHub via `gh` (zero-SSH on GCP incl. Regional MIG `--status`; SSH runner setup for azure/on-prem)
+│       └── deploy_gpu_stack.sh             # Syncs & deploys development/gpu-dev-machine via podman-compose + triggers `gpu-gcs-sync --fast` (CI & local)
 ├── home-server/                            # (Planned) Home server setup and maintenance
 ├── linux/                                  # (Planned) Linux workstation/system configuration
 └── workspace/                              # Local repository management
@@ -155,7 +155,9 @@ terraform -chdir=cloud/infra/envs/gcp-taiga init -backend=false && terraform -ch
 terraform -chdir=development/infra/gcp init -backend=false && terraform -chdir=development/infra/gcp validate
 ./development/scripts/deploy.sh --provider=gcp --loop=5 --dry-run
 ./development/scripts/deploy.sh --provider=gcp --no-spot --use-default-vpc --dry-run
+./development/scripts/deploy.sh --provider=gcp --region=europe-west2 --zones=europe-west2-b,europe-west2-c --dry-run
 ./development/scripts/setup.sh --provider=gcp --dry-run
+./development/scripts/setup.sh --provider=gcp --status --dry-run
 LITELLM_MASTER_KEY=x ./development/scripts/deploy_gpu_stack.sh --dry-run
 
 

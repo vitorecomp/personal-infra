@@ -19,7 +19,7 @@ personal-infra/
 ├── development/              # Cloud & on-prem GPU development machine infrastructure, runner & Podman stack
 │   ├── gpu-dev-machine/      # Podman + podman-compose stack (vLLM DeepSeek-V4.1-Flash, LiteLLM, DeepSeek Harness)
 │   ├── infra/                # Provider-specific GPU machine configs (gcp, azure, on-prem)
-│   └── scripts/              # deploy.sh (MIG/machine provisioning), setup.sh (GitHub env sync/runner) & deploy_gpu_stack.sh
+│   └── scripts/              # deploy.sh (Regional MIG/machine provisioning), setup.sh (GitHub env sync/runner) & deploy_gpu_stack.sh
 ├── home-server/              # Home server / self-hosted services and maintenance (TBD)
 ├── linux/                    # Linux OS bootstrap, packages, and system configuration (TBD)
 └── workspace/                # Local ~/workspace repository inventory and synchronization
@@ -71,18 +71,19 @@ python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --ser
 Provisions and configures GPU development workstations across cloud and on-prem targets:
 
 - **Infrastructure ([`development/infra/`](./development/infra))**:
-  - [`gcp/`](./development/infra/gcp): GCP Terraform provisioning a **zero-SSH Stateful Zonal Managed Instance Group** (`dev-gpu-mig`, `target_size = 1`, `g4-standard-192` by default) configurable as **Spot** (`use_spot = true`, default) or **Standard** on-demand (`--no-spot`), on a custom VPC or existing `default` VPC (`--use-default-vpc`), with a persistent `3000 GB` Hyperdisk (`/mnt/data`, `delete_rule = "NEVER"`) and a **GCP Secret Manager** bootstrap secret (`dev-gpu-runner-bootstrap`). On boot, the GPU VM self-registers as a GitHub Actions runner (`gcp-gpu-runner`) over outbound HTTPS 443 and auto-resumes any deployed Podman stack across Spot recreations.
+  - [`gcp/`](./development/infra/gcp): GCP Terraform provisioning a **zero-SSH Stateless Multi-Zone Regional Managed Instance Group** (`dev-gpu-mig`, `target_size = 1`, `distribution_policy_target_shape = "ANY"`, `allow_changing_zone = "YES"`, `replacement_method = "SUBSTITUTE"`, `g4-standard-192` by default) spanning all GPU-capable zones in the target region (overridable via `--zones` or `--zone`), configurable as **Spot** (`use_spot = true`, default) or **Standard** on-demand (`--no-spot`), on a custom VPC or existing `default` VPC (`--use-default-vpc`), with an ephemeral `3000 GB` Hyperdisk (`auto_delete = true`), a **same-region GCS cache bucket** (`<project>-<prefix>-cache-<region>`, `$0` regional transfer), and a **GCP Secret Manager** bootstrap secret (`dev-gpu-runner-bootstrap`). On boot, the GPU VM restores runner credentials, stack configs, DeepSeek Harness workspace, reverse-tunnel config, and Hugging Face model weights from GCS (falling back to Secret Manager for registration), runs a 15-minute `gpu-gcs-sync.timer` + shutdown flush (`gpu-gcs-sync --fast`), self-starts `gcp-gpu-runner` over outbound HTTPS 443, and auto-resumes any deployed Podman stack across cross-zone Spot failovers.
   - [`azure/`](./development/infra/azure) & [`on-prem/`](./development/infra/on-prem): Reserved target folders (`.gitkeep`) for Azure and on-premises GPU hosts.
 - **GPU Machine Container Stack ([`development/gpu-dev-machine/`](./development/gpu-dev-machine))**: Podman + `podman-compose` stack running `vllm-server` (vLLM's OpenAI server: full unquantized `deepseek-ai/DeepSeek-V4.1-Flash` with CPU offload), `litellm`, and `deepseek-harness` pointed at LiteLLM.
 - **Scripts ([`development/scripts/`](./development/scripts))**:
-  - [`deploy.sh`](./development/scripts/deploy.sh): Unified Terraform provisioning entrypoint (`--provider=<gcp|azure|on-prem>`, `--spot` / `--no-spot`, `--use-default-vpc`, `--cycle-regions`, `--loop=<minutes>`) using logged-in `gcloud` / ADC credentials and active project; auto-mints a runner registration token via `gh api` into Secret Manager on GCP when `RUNNER_PAT` is omitted.
-  - [`setup.sh`](./development/scripts/setup.sh): Reads gitignored `development/.env` ([`.env.example`](./development/.env.example)) and syncs Repository (`GPU_RUNNER`, `GPU_RUNNER_LABELS`) & `gpu` Environment variables/secrets (`GPU_TARGET_MODE=local`, `LITELLM_MASTER_KEY`, etc.) via `gh`. Zero-SSH on GCP (including `--status` and `--remove` via `gh api`); SSH runner setup is used for `azure`, `on-prem`, or explicit `--host=user@ip`.
-  - [`deploy_gpu_stack.sh`](./development/scripts/deploy_gpu_stack.sh): Syncs and deploys `development/gpu-dev-machine` via `podman-compose` directly on the GPU runner (`GPU_TARGET_MODE=local` on GCP, or over SSH for remote hosts).
+  - [`deploy.sh`](./development/scripts/deploy.sh): Unified Terraform provisioning entrypoint (`--provider=<gcp|azure|on-prem>`, `--spot` / `--no-spot`, `--use-default-vpc`, `--zones=z1,z2`, `--cache-bucket=NAME`, `--cycle-regions`, `--loop=<minutes>`) using logged-in `gcloud` / ADC credentials and active project; cycles by region across all GPU zones, enables `storage.googleapis.com`, and auto-mints a runner registration token via `gh api` into Secret Manager on GCP when `RUNNER_PAT` is omitted.
+  - [`setup.sh`](./development/scripts/setup.sh): Reads gitignored `development/.env` ([`.env.example`](./development/.env.example)) and syncs Repository (`GPU_RUNNER`, `GPU_RUNNER_LABELS`) & `gpu` Environment variables/secrets (`GPU_TARGET_MODE=local`, `LITELLM_MASTER_KEY`, etc.) via `gh`. Zero-SSH on GCP (including `--status` inspecting `gh api` runners and Regional MIG instances via `--region`, plus `--remove` via `gh api`); SSH runner setup is used for `azure`, `on-prem`, or explicit `--host=user@ip`.
+  - [`deploy_gpu_stack.sh`](./development/scripts/deploy_gpu_stack.sh): Syncs and deploys `development/gpu-dev-machine` via `podman-compose` directly on the GPU runner (`GPU_TARGET_MODE=local` on GCP, or over SSH for remote hosts) and immediately flushes updated configs to GCS via `gpu-gcs-sync --fast`.
 
 ```bash
 ./development/scripts/setup.sh --provider=gcp --dry-run
 ./development/scripts/deploy.sh --provider=gcp --dry-run
 ./development/scripts/deploy.sh --provider=gcp --no-spot --use-default-vpc --dry-run
+./development/scripts/deploy.sh --provider=gcp --region=europe-west2 --zones=europe-west2-b,europe-west2-c --dry-run
 ```
 
 ### 3. `home-server/`

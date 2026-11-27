@@ -18,20 +18,20 @@ development/
 │   ├── deepseek-harness/             # DeepSeek Harness web UI (:3080 Caddy front with password /login -> 127.0.0.1:3081) pointed at LiteLLM
 │   └── reverse-tunnel/               # Optional autossh reverse-SSH tunnel containers for LiteLLM & DeepSeek Harness
 ├── infra/
-│   ├── gcp/                          # GCP Terraform: Stateful Zonal MIG (Spot/Standard, custom/default VPC) + Secret Manager runner bootstrap + 3 TB Hyperdisk
+│   ├── gcp/                          # GCP Terraform: Stateless Multi-Zone Regional MIG (Spot/Standard, custom/default VPC) + Same-Region GCS Cache Bucket + Secret Manager runner bootstrap + ephemeral 3 TB Hyperdisk
 │   ├── azure/                        # (Planned) Azure GPU VM Terraform
 │   └── on-prem/                      # (Planned) On-prem GPU host configuration
 └── scripts/
-    ├── setup.sh                      # Syncs `development/.env` to GitHub via `gh` (zero-SSH on GCP; SSH runner setup for azure/on-prem)
-    ├── deploy.sh                     # Creates/manages the GPU machine infrastructure (--provider=<gcp|azure|on-prem>)
-    └── deploy_gpu_stack.sh           # Syncs & deploys development/gpu-dev-machine via podman-compose (run by CI or locally)
+    ├── setup.sh                      # Syncs `development/.env` to GitHub via `gh` (zero-SSH on GCP incl. Regional MIG `--status`; SSH runner setup for azure/on-prem)
+    ├── deploy.sh                     # Creates/manages the GPU machine infrastructure (--provider=<gcp|azure|on-prem>, region-level capacity cycling)
+    └── deploy_gpu_stack.sh           # Syncs & deploys development/gpu-dev-machine via podman-compose + triggers `gpu-gcs-sync --fast` (CI or local)
 ```
 
 ---
 
 ## Architecture (`--provider=gcp`)
 
-On GCP, `development/` uses a **zero-SSH single-VM Stateful Zonal Managed Instance Group (`dev-gpu-mig`)** with no separate controller VM. All setup and orchestration work over outbound HTTPS (`443`):
+On GCP, `development/` uses a **zero-SSH single-VM Stateless Multi-Zone Regional Managed Instance Group (`dev-gpu-mig`)** paired with a **same-region GCS cache bucket (`<project>-<prefix>-cache-<region>`)** and no separate controller VM. All setup, cache sync, and orchestration work over outbound HTTPS (`443`):
 
 ```mermaid
 flowchart LR
@@ -39,20 +39,23 @@ flowchart LR
   W -- "Terraform + Secret Manager payload" --> SM["Secret Manager: dev-gpu-runner-bootstrap"]
   GH <-- "Long-poll jobs & git clone (outbound HTTPS 443)" --> G
 
-  subgraph VPC["GCP VPC (Custom 10.10.0.0/24 or existing default VPC)"]
+  subgraph GCP["GCP Region (Custom VPC 10.10.0.0/24 or existing default VPC)"]
     SM -. "secretAccessor (dev-gpu-vm-sa)" .-> G
-    MIG["Stateful Zonal MIG: dev-gpu-mig (target_size = 1)"] --> G["dev-gpu-vm-* : g4-standard-192 (SPOT or STANDARD, 50 GB boot)"]
-    D[("Stateful Disk 'data': 3000 GB hyperdisk-balanced (/mnt/data, delete_rule=NEVER)")]
+    MIG["Stateless Multi-Zone Regional MIG: dev-gpu-mig (target_size = 1, ANY shape, allow_changing_zone = YES)"] -- "Cross-zone Spot/repair placement" --> G["dev-gpu-vm-* : g4-standard-192 (SPOT or STANDARD, 50 GB boot)"]
+    D[("Ephemeral Data Disk 'data': 3000 GB hyperdisk-balanced (/mnt/data, auto_delete=true)")]
     G --- D
+    GCS[("Same-Region GCS Cache Bucket: <project>-dev-gpu-cache-<region> ($0 regional transfer)")]
+    G <-- "Boot restore + 15m timer + shutdown --fast flush" --> GCS
   end
 ```
 
 | Component | Default Spec | Lifecycle & Role |
 | :--- | :--- | :--- |
-| **Stateful Zonal MIG** (`dev-gpu-mig`) | `target_size = 1`, `replacement_method = "RECREATE"`, `default_action_on_failure = "REPAIR"`, `force_update_on_repair = "YES"` | Keeps a single GPU instance alive across Spot preemptions and template updates while preserving the attached stateful `data` disk. |
-| **GPU VM Template** (`dev-gpu-tpl-*`) | `g4-standard-192` (4× NVIDIA RTX PRO 6000, 192 vCPUs, 720 GB RAM), Ubuntu 24.04, `50 GB` `hyperdisk-balanced` boot disk | Configurable via `--spot` (`SPOT`, `instance_termination_action = "STOP"`, default) or `--no-spot` (`STANDARD` on-demand). On boot, `startup-script` installs NVIDIA drivers, Container Toolkit CDI, Podman, and `actions-runner`, self-registers against GitHub, and auto-resumes any deployed stack. |
-| **Stateful Data Disk** (`device_name = "data"`) | `3000 GB` `hyperdisk-balanced` (`delete_rule = "NEVER"`) | Formatted once (`ext4`) and mounted at `/mnt/data` on every boot; persists `/mnt/data/actions-runner` (including `.credentials`), `/mnt/data/containers/storage`, `/mnt/data/huggingface`, `/mnt/data/deepseek-harness`, `/mnt/data/reverse-tunnel`, and `/mnt/data/stacks/gpu-dev-machine`. |
-| **Runner Bootstrap Secret** (`dev-gpu-runner-bootstrap`) | GCP Secret Manager (`secretAccessor` for `dev-gpu-vm-sa` only) | Holds JSON (`github_repo`, `runner_name`, `runner_labels`, `runner_token`, `runner_pat`) passed via `TF_VAR_*` by `deploy.sh`. Never exposed in Terraform CLI args or logs. |
+| **Stateless Multi-Zone Regional MIG** (`dev-gpu-mig`) | `google_compute_region_instance_group_manager`, `target_size = 1`, `distribution_policy_target_shape = "ANY"`, `on_repair { allow_changing_zone = "YES" }`, `replacement_method = "SUBSTITUTE"`, `instance_redistribution_type = "NONE"` | Spans all GPU-capable zones in the target region (overridable via `--zones=z1,z2` or `--zone=z1`). Places a single GPU VM in whichever zone has capacity and automatically fails over across zones on Spot preemption or repair without orphaned disks. |
+| **Same-Region GCS Cache Bucket** (`<project>-<prefix>-cache-<region>`) | `google_storage_bucket.gpu_cache`, `STANDARD` storage class in `upper(var.region)`, `uniform_bucket_level_access = true`, `public_access_prevention = "enforced"`, `roles/storage.objectAdmin` for `dev-gpu-vm-sa` | Persists `actions-runner-state/` (`.runner`, `.credentials`, `.credentials_rsaparams`), `stacks/gpu-dev-machine/` (`compose.yml`, `.env`), `reverse-tunnel/`, `deepseek-harness/` (`dsh-home`, `workspace`), and `huggingface/` model weights across cross-zone VM recreations (`$0` same-region GCS ↔ GCE transfer). Synced on boot, every 15 min via `gpu-gcs-sync.timer`, right after `deploy_gpu_stack.sh`, and on shutdown (`gpu-gcs-sync --fast`). |
+| **GPU VM Template** (`dev-gpu-tpl-*`) | `g4-standard-192` (4× NVIDIA RTX PRO 6000, 192 vCPUs, 720 GB RAM), Ubuntu 24.04, `50 GB` `hyperdisk-balanced` boot disk | Configurable via `--spot` (`SPOT`, `instance_termination_action = "STOP"`, default) or `--no-spot` (`STANDARD` on-demand). On boot, `startup-script` installs Canonical's prebuilt Secure-Boot-signed NVIDIA open driver (`nvidia-driver-*-open` + `linux-modules-nvidia-*-open-$(uname -r)`), Podman, and NVIDIA Container Toolkit CDI, restores runner state, stack config, and model cache from GCS, self-starts/registers `gcp-gpu-runner`, enables `gpu-gcs-sync.timer`, and auto-resumes any deployed stack. |
+| **Ephemeral Data Disk** (`device_name = "data"`) | `3000 GB` `hyperdisk-balanced` (`auto_delete = true`, `8,000 IOPS / 750 MiB/s`) | Formatted (`ext4`) and mounted at `/mnt/data` on each VM boot with 16 MiB readahead for fast safetensors loading; holds local `/mnt/data/actions-runner`, `/mnt/data/containers/storage`, `/mnt/data/vllm-cache`, `/mnt/data/huggingface`, `/mnt/data/deepseek-harness`, `/mnt/data/reverse-tunnel`, and `/mnt/data/stacks/gpu-dev-machine`, and is automatically deleted with the VM when failing over across zones. |
+| **Runner Bootstrap Secret** (`dev-gpu-runner-bootstrap`) | GCP Secret Manager (`secretAccessor` for `dev-gpu-vm-sa` only) | Holds JSON (`github_repo`, `runner_name`, `runner_labels`, `runner_token`, `runner_pat`) passed via `TF_VAR_*` by `deploy.sh`. Used for initial registration and fallback when GCS `actions-runner-state/` is absent or invalid. Never exposed in Terraform CLI args or logs. |
 | **Networking, IAM & Firewall** | Custom VPC (`10.10.0.0/24`) or `default` VPC (`--use-default-vpc`); `dev-gpu-vm-sa` | Ephemeral external IP on `nic0` by default (`enable_external_ip = true`), or Cloud Router + Cloud NAT when disabled. Outbound HTTPS (`443`) is allowed; direct public ingress is disabled by default (`enable_public_ingress = false`), with optional IAP TCP `22` (`35.235.240.0/20`) for admin debugging only. |
 
 ---
@@ -118,10 +121,11 @@ All supported keys in `development/.env`:
 | **`GPU_RUNNER`** | `gcp-gpu` | **Repo Variable** `GPU_RUNNER` + runner label | Selects which runner pool executes `deploy-gpu-machine.yml` (`gcp-gpu`, `azure-gpu`, `on-prem-gpu`). |
 | **`GPU_RUNNER_LABELS`** | `["self-hosted","linux","x64","gcp-gpu"]` | **Repo Variable** `GPU_RUNNER_LABELS` | Full JSON label array synced for `runs-on:`. |
 | **`RUNNER_NAME`** / **`RUNNER_LABELS`** | `gcp-gpu-runner` / `self-hosted,linux,x64,gcp-gpu` | Secret Manager + runner config | Self-hosted runner name and comma-separated labels registered by the GPU VM on boot. |
-| **`RUNNER_PAT`** | *(empty)* | `TF_VAR_runner_pat` → Secret Manager | Optional repo-scoped Fine-Grained PAT (**Administration: Read & Write**). When empty, `deploy.sh` auto-mints a 1-hour registration token via `gh api` and `/mnt/data/actions-runner/.credentials` persists across Spot recreations. |
+| **`RUNNER_PAT`** | *(empty)* | `TF_VAR_runner_pat` → Secret Manager | Optional repo-scoped Fine-Grained PAT (**Administration: Read & Write**). When empty, `deploy.sh` auto-mints a 1-hour registration token via `gh api` and `gs://$CACHE_BUCKET/actions-runner-state/` persists `.runner` / `.credentials` across cross-zone Spot recreations. |
 | **`PROJECT_ID`** | *(empty)* | `deploy.sh` / `setup.sh --status` | Optional GCP project override (defaults to active `gcloud config get-value project`). |
-| **`REGION`** / **`ZONE`** | *(empty)* | `deploy.sh` / `setup.sh --status` | Optional GCP region and zone overrides (defaults to `europe-west4` / `europe-west4-a`, or candidate GPU zones). |
-| **`USE_SPOT`** | `true` | GCP Terraform (`use_spot`) | `true` provisions a Spot GPU VM auto-healed by the MIG; `false` provisions a Standard on-demand GPU VM. |
+| **`REGION`** / **`ZONES`** / **`ZONE`** | *(empty)* | `deploy.sh` / `setup.sh --status` | Optional GCP region (default `europe-west4`), comma-separated `ZONES` list within `REGION` (default: all GPU-capable zones in the region), and optional single-`ZONE` override. |
+| **`CACHE_BUCKET_NAME`** | *(empty)* | GCP Terraform (`cache_bucket_name`) | Optional same-region GCS cache bucket name override (defaults to `<project_id>-<name_prefix>-cache-<region>`). |
+| **`USE_SPOT`** | `true` | GCP Terraform (`use_spot`) | `true` provisions a Spot GPU VM auto-healed across zones by the Regional MIG; `false` provisions a Standard on-demand GPU VM. |
 | **`USE_DEFAULT_VPC`** / **`DEFAULT_VPC_NAME`** | `false` / `default` | GCP Terraform (`use_default_vpc`) | Set `true` (or pass `--use-default-vpc`) to attach the MIG to an existing VPC instead of creating `dev-gpu-vpc`. |
 | **`ENABLE_INGRESS_FIREWALLS`** | `true` | GCP Terraform (`enable_ingress_firewalls`) | Manage VPC ingress firewall rules in Terraform (set `false` if external org policies manage VPC ingress). |
 | **`SSH_PROXY_CIDRS`** | `35.235.240.0/20` | GCP VPC firewall (`allow-iap-ssh`) | Proxy CIDR ranges allowed on TCP `22` for optional admin debugging (defaults to GCP IAP). |
@@ -136,13 +140,13 @@ All supported keys in `development/.env`:
 | **`TUNNEL_BIND_ADDRESS`** | `127.0.0.1` | **`gpu` Variable** `TUNNEL_BIND_ADDRESS` | Address bound on `TUNNEL_SSH_HOST` (`127.0.0.1` or `0.0.0.0`). |
 | **`REMOTE_LITELLM_PORT`** / **`REMOTE_HARNESS_PORT`** | `4000` / `3080` | **`gpu` Variables** | Remote ports opened on `TUNNEL_SSH_HOST` forwarding to `litellm:4000` and `deepseek-harness:3080`. |
 | **`LITELLM_TUNNEL_SSH_*`** / **`HARNESS_TUNNEL_SSH_*`** | *(empty)* | **`gpu` Variables** *(if set)* | Optional per-tunnel `_HOST`, `_PORT`, `_USER` overrides (inherit `TUNNEL_SSH_*` when empty). |
-| **`GPU_TARGET_MODE`** | `local` | **`gpu` Variable** `GPU_TARGET_MODE` | Runner-to-GPU target mode: `local` (default on GCP Stateful MIG since the runner runs directly on the GPU VM), `auto`, or `ssh` (external hosts). |
+| **`GPU_TARGET_MODE`** | `local` | **`gpu` Variable** `GPU_TARGET_MODE` | Runner-to-GPU target mode: `local` (default on GCP Regional MIG since the runner runs directly on the GPU VM), `auto`, or `ssh` (external hosts). |
 | **`GPU_SSH_HOST`** / **`GPU_SSH_KEY_FILE`** / **`GPU_SSH_KNOWN_HOSTS`** | *(empty)* | **`gpu` Vars & Secret** `GPU_SSH_PRIVATE_KEY` | Non-GCP SSH target and private key file path when `GPU_TARGET_MODE=ssh`. |
 | **`TRIGGER_DEPLOY`** | `false` | Post-setup `gh workflow run` | Set `true` (or pass `--trigger-deploy`) to immediately dispatch `deploy-gpu-machine.yml` after setup finishes. |
 
 #### 2.3 Run `setup.sh --provider=gcp` (Purely Local `gh` Sync, Zero SSH)
 
-On GCP (`--provider=gcp` without `--host`), [`setup.sh`](./scripts/setup.sh) **never opens SSH**—it only syncs `development/.env` to GitHub via `gh`, and manages `--status` / `--remove` via `gh api`:
+On GCP (`--provider=gcp` without `--host`), [`setup.sh`](./scripts/setup.sh) **never opens SSH**—it only syncs `development/.env` to GitHub via `gh`, and inspects `--status` / executes `--remove` via `gh api` and `gcloud`:
 
 ```bash
 # 1. Preview all `gh` variable/secret sync commands (safe, read-only)
@@ -151,7 +155,7 @@ On GCP (`--provider=gcp` without `--host`), [`setup.sh`](./scripts/setup.sh) **n
 # 2. Generate any `__generate__` secrets locally and sync Repo & `gpu` Environment via `gh`
 ./development/scripts/setup.sh --provider=gcp
 
-# Check GitHub runner online/offline state & GCP Stateful MIG instances anytime (zero SSH)
+# Check GitHub runner online/offline state & GCP Regional MIG instances anytime (zero SSH)
 ./development/scripts/setup.sh --provider=gcp --status
 ```
 
@@ -159,26 +163,30 @@ On GCP (`--provider=gcp` without `--host`), [`setup.sh`](./scripts/setup.sh) **n
 
 ---
 
-### Step 3 — Preview & Provision the Stateful MIG (`deploy.sh`)
+### Step 3 — Preview & Provision the Regional MIG (`deploy.sh`)
 
 #### 3.1 Preview (`--dry-run`)
 
-Always run `--dry-run` first to verify your resolved `gcloud` account, credential mode (`gcloud` token vs. ADC), active project, Spot/Standard setting, VPC mode, and Terraform commands:
+Always run `--dry-run` first to verify your resolved `gcloud` account, credential mode (`gcloud` token vs. ADC), active project, region/zones, GCS cache bucket, Spot/Standard setting, VPC mode, and Terraform commands:
 
 ```bash
 ./development/scripts/deploy.sh --provider=gcp --dry-run
 ./development/scripts/deploy.sh --provider=gcp --no-spot --use-default-vpc --dry-run
+./development/scripts/deploy.sh --provider=gcp --region=europe-west2 --zones=europe-west2-b,europe-west2-c --dry-run
 ./development/scripts/deploy.sh --provider=gcp --cycle-regions --loop=5 --dry-run
 ```
 
-#### 3.2 Provision the Stateful Zonal MIG (`deploy.sh`)
+#### 3.2 Provision the Multi-Zone Regional MIG (`deploy.sh`)
 
 ```bash
-# Default: Spot GPU VM in the Stateful MIG (custom VPC, tries GPU zones in europe-west4)
+# Default: Spot GPU VM in the Regional MIG (custom VPC, spans all GPU zones in europe-west4)
 ./development/scripts/deploy.sh --provider=gcp
 
 # Standard (on-demand) GPU VM attached to the existing 'default' VPC
 ./development/scripts/deploy.sh --provider=gcp --no-spot --use-default-vpc
+
+# Pin specific zones and/or override the regional GCS cache bucket name
+./development/scripts/deploy.sh --provider=gcp --region=europe-west2 --zones=europe-west2-b,europe-west2-c --cache-bucket=my-gpu-cache
 
 # Cycle across all GPU-capable regions every 5 minutes until Spot capacity opens
 ./development/scripts/deploy.sh --provider=gcp --spot --cycle-regions --loop=5
@@ -189,15 +197,17 @@ Always run `--dry-run` first to verify your resolved `gcloud` account, credentia
 
 **What `deploy.sh --provider=gcp` handles automatically:**
 1. **Smart Credential Selection (`--adc` / `--gcloud-token`):** Uses `GOOGLE_OAUTH_ACCESS_TOKEN` for standard accounts, and automatically switches to Application Default Credentials (`~/.config/gcloud/application_default_credentials.json`) for `*@google.com` CBA accounts.
-2. **API Enablement & Per-Project Workspace:** Enables `compute.googleapis.com`, `secretmanager.googleapis.com`, `iap.googleapis.com`, `oslogin.googleapis.com`, and `iam.googleapis.com`, initializes Terraform, and selects/creates workspace `development/infra/gcp/terraform.tfstate.d/<project_id>/`.
+2. **API Enablement & Per-Project Workspace:** Enables `compute.googleapis.com`, `secretmanager.googleapis.com`, `storage.googleapis.com`, `iap.googleapis.com`, `oslogin.googleapis.com`, and `iam.googleapis.com`, initializes Terraform, and selects/creates workspace `development/infra/gcp/terraform.tfstate.d/<project_id>/`.
 3. **Zero-Leak Runner Bootstrap Auth:** Uses `RUNNER_PAT` if set in `development/.env`, or auto-mints a 1-hour GitHub runner registration token via `gh api`, passing it exclusively via `TF_VAR_runner_pat` / `TF_VAR_runner_token` into GCP Secret Manager (`dev-gpu-runner-bootstrap`).
-4. **Stateful MIG Provisioning & Zone Cycling:** Applies the Stateful MIG (`dev-gpu-mig`, `target_size = 1`) and polls `gcloud compute instance-groups managed list-instances` for up to 90s (`18 * 5s`) to verify `RUNNING` status. On `QUOTA_EXCEEDED` it skips the region; on `ZONE_RESOURCE_POOL_EXHAUSTED` it destroys and tries the next candidate (or leaves the MIG active on the final candidate when `--stage-terminated` is enabled / `--loop` is not set).
-5. **Zero-SSH Self-Registration on Boot (`startup-script`):** Logged to `/var/log/gpu-mig-bootstrap.log` on the GPU VM:
-   - Formats `/dev/disk/by-id/google-data` once (`ext4`) and mounts it at `/mnt/data` (`nofail`).
+4. **Regional MIG Provisioning & Region Cycling:** Queries `gcloud compute machine-types list` once to discover all GPU-capable zones per region, applies the Stateless Multi-Zone Regional MIG (`dev-gpu-mig`, `target_size = 1`, `distribution_policy_target_shape = "ANY"`, `allow_changing_zone = "YES"`) + same-region GCS cache bucket (`google_storage_bucket.gpu_cache`), and polls `gcloud compute instance-groups managed list-instances --region=<region>` for up to 90s (`18 * 5s`) to verify `RUNNING` status (showing whichever zone GCE selected). On `QUOTA_EXCEEDED` or region exhaustion it cleans up the probe MIG/template (and empty probe bucket) and tries the next region (or leaves the MIG active on the final candidate when `--stage-terminated` is enabled / `--loop` is not set).
+5. **Zero-SSH Self-Registration, GCS Cache Restore & Sync on Boot (`startup-script`):** Logged to `/var/log/gpu-mig-bootstrap.log` on the GPU VM:
+   - Formats `/dev/disk/by-id/google-data` (`ext4`, `auto_delete = true`) and mounts it at `/mnt/data` (`nofail`) with 16 MiB readahead.
    - Points Podman `graphroot` at `/mnt/data/containers/storage` so container images never fill the 50 GB boot disk.
    - Creates `github-runner` with passwordless sudo and symlinks `/opt/actions-runner -> /mnt/data/actions-runner`.
-   - Installs OS packages, NVIDIA driver (`nvidia-smi`), `nvidia-container-toolkit` (`/etc/cdi/nvidia.yaml`), Podman, `podman-compose`, and `actions-runner-linux-x64`.
-   - Fetches `dev-gpu-runner-bootstrap` from Secret Manager: reuses preserved `.runner` / `.credentials` on `/mnt/data/actions-runner` if already registered (or registers fresh with `--replace`), installs and starts the `systemd` runner service, and auto-resumes any previously deployed Podman stack in `/mnt/data/stacks/gpu-dev-machine`.
+   - Installs OS packages, Canonical's prebuilt Secure-Boot-signed NVIDIA open driver (`nvidia-driver-*-open` + `linux-modules-nvidia-*-open-$(uname -r)`), `nvidia-container-toolkit` (`/etc/cdi/nvidia.yaml` at CDI `0.6.0`), `netavark` + `aardvark-dns`, Podman, `podman-compose`, and `actions-runner-linux-x64`.
+   - Writes `/etc/gpu-cache-bucket` and installs `/usr/local/bin/gpu-gcs-sync` + `gpu-gcs-sync.service` + 15-minute `gpu-gcs-sync.timer` (plus shutdown flush via `gpu-gcs-sync --fast`).
+   - Restores `actions-runner-state/` (`.runner`, `.credentials`, `.credentials_rsaparams`) from `gs://$CACHE_BUCKET` before registering; if absent or invalid, fetches `dev-gpu-runner-bootstrap` from Secret Manager, registers fresh with `--replace`, and uploads the new credentials to `gs://$CACHE_BUCKET/actions-runner-state/`.
+   - Restores `stacks/gpu-dev-machine/`, `reverse-tunnel/`, `deepseek-harness/`, and `huggingface/` model cache from `gs://$CACHE_BUCKET` (`$0` same-region GCS → GCE transfer), and auto-resumes any previously deployed Podman stack in `/mnt/data/stacks/gpu-dev-machine`.
 
 Verify the GPU VM and GitHub runner are online (zero SSH):
 
@@ -207,7 +217,7 @@ Verify the GPU VM and GitHub runner are online (zero SSH):
 
 ---
 
-### Step 4 — Deploy the Podman Stack & Spot Auto-Recovery
+### Step 4 — Deploy the Podman Stack & Cross-Zone Spot Failover
 
 Once `./development/scripts/setup.sh --provider=gcp --status` shows your self-hosted runner (`gcp-gpu-runner`) is **online**:
 
@@ -216,27 +226,28 @@ Once `./development/scripts/setup.sh --provider=gcp --status` shows your self-ho
    ./development/scripts/setup.sh --provider=gcp --sync-github-only --trigger-deploy
    ```
 2. **Direct Local Execution (`GPU_TARGET_MODE=local`):** Because the runner runs directly on the GPU VM in `dev-gpu-mig`, [`deploy_gpu_stack.sh`](./scripts/deploy_gpu_stack.sh) executes locally:
-   - Ensures `/mnt/data` directories, Podman storage config, NVIDIA driver, and `/etc/cdi/nvidia.yaml` exist.
+   - Ensures `/mnt/data` directories, Podman storage config (`netavark` + `pids_limit = 65536`), NVIDIA driver, and `/etc/cdi/nvidia.yaml` exist.
    - Syncs `development/gpu-dev-machine/` to `/mnt/data/stacks/gpu-dev-machine`, writes mode-`0600` `.env` (plus optional tunnel SSH key), and runs `podman-compose -f compose.yml up -d --build`.
-3. **Automatic Spot Preemption Recovery:**
-   - When a Spot VM is preempted, `shutdown-script` stops Podman containers gracefully and unmounts `/mnt/data`.
-   - `dev-gpu-mig` (`REPAIR` + `RECREATE`, `stateful_disk` `delete_rule = "NEVER"`) provisions a replacement VM with `/mnt/data` attached.
-   - On boot, `startup-script` re-installs the `systemd` runner unit using the preserved `.credentials` on `/mnt/data` (or re-registers via `RUNNER_PAT` if configured) and **automatically runs `podman-compose up -d`** for `/mnt/data/stacks/gpu-dev-machine` without requiring a new CI workflow run.
+   - Immediately runs `sudo /usr/local/bin/gpu-gcs-sync --fast` (when present) so newly deployed `.env`, `compose.yml`, and reverse-tunnel keys are persisted to the regional GCS cache bucket right away.
+3. **Automatic Spot Preemption & Cross-Zone Failover Recovery:**
+   - When a Spot VM is preempted or repaired, `shutdown-script` stops Podman containers gracefully (`podman stop -t 10 --all`), flushes small state (`stacks/gpu-dev-machine/`, `reverse-tunnel/`, `deepseek-harness/`, `actions-runner-state/`) via `/usr/local/bin/gpu-gcs-sync --fast`, and unmounts `/mnt/data` (`auto_delete = true` deletes the ephemeral Hyperdisk cleanly with zero orphaned disks). Meanwhile, the 15-minute `gpu-gcs-sync.timer` keeps `huggingface/` model weights synced to GCS while the VM is running.
+   - `dev-gpu-mig` (`distribution_policy_target_shape = "ANY"`, `on_repair { allow_changing_zone = "YES" }`, `replacement_method = "SUBSTITUTE"`) schedules a replacement VM in any available GPU zone within the region—even if the original zone is out of capacity.
+   - On boot in the new zone, `startup-script` restores `actions-runner-state/` from `gs://$CACHE_BUCKET` (reusing preserved `.credentials` even after the 1-hour registration token expires, or falling back to Secret Manager), starts `gcp-gpu-runner`, pulls `stacks/gpu-dev-machine/`, `reverse-tunnel/`, `deepseek-harness/`, and `huggingface/` from the same-region GCS bucket at `$0` transfer cost, enables `gpu-gcs-sync.timer`, and **automatically runs `podman-compose up -d`** without requiring a new CI workflow run.
 
-| Service in [`compose.yml`](./gpu-dev-machine/compose.yml) | GPU VM Port | Persistent Storage on `/mnt/data` | Role & Configuration |
+| Service in [`compose.yml`](./gpu-dev-machine/compose.yml) | GPU VM Port | Local Storage on `/mnt/data` & Regional GCS Cache | Role & Configuration |
 | :--- | :--- | :--- | :--- |
-| **`vllm-server`** | `127.0.0.1:8000` (OpenAI API) | `/mnt/data/huggingface` | `vllm serve` serving full unquantized `deepseek-ai/DeepSeek-V4.1-Flash` (`--tensor-parallel-size=4`, `--cpu-offload-gb=48`, engram CPU offload, `--kv-cache-dtype=fp8`, `--max-model-len=65536`). **All model & offload parameters are version-controlled directly in [`compose.yml`](./gpu-dev-machine/compose.yml)**—not pipeline variables. |
+| **`vllm-server`** | `127.0.0.1:8000` (OpenAI API) | `/mnt/data/huggingface` *(synced ↔ `gs://$CACHE_BUCKET/huggingface/`)* + `/mnt/data/vllm-cache` *(local JIT cache)* | `vllm serve` serving full unquantized `deepseek-ai/DeepSeek-V4.1-Flash` (`--tensor-parallel-size=4`, `--cpu-offload-gb=48`, engram CPU offload, `--kv-cache-dtype=fp8`, `--max-model-len=65536`). **All model & offload parameters are version-controlled directly in [`compose.yml`](./gpu-dev-machine/compose.yml)**—not pipeline variables. |
 | **`litellm`** | `127.0.0.1:4000` | — | OpenAI-compatible gateway authenticated with `LITELLM_MASTER_KEY`, routing model aliases to `http://vllm-server:8000/v1`. |
-| **`deepseek-harness`** | `127.0.0.1:3080` | `/mnt/data/deepseek-harness/{dsh-home,workspace}` | Runs `@deepseek-ai/dsh` web UI (`127.0.0.1:3081` behind a Caddy front with the password-protected `/login`; served on container `0.0.0.0:3080` by Caddy), pre-wired to `http://litellm:4000/v1` with `LITELLM_MASTER_KEY`. |
-| **`litellm-tunnel`** *(optional)* | Outbound SSH | `/mnt/data/reverse-tunnel` | Started only when `ENABLE_REVERSE_TUNNELS=true`; `autossh` reverse-forwards `TUNNEL_SSH_HOST:REMOTE_LITELLM_PORT` → `litellm:4000`. |
-| **`deepseek-harness-tunnel`** *(optional)* | Outbound SSH | `/mnt/data/reverse-tunnel` | Started only when `ENABLE_REVERSE_TUNNELS=true`; `autossh` reverse-forwards `TUNNEL_SSH_HOST:REMOTE_HARNESS_PORT` → `deepseek-harness:3080`. |
+| **`deepseek-harness`** | `127.0.0.1:3080` | `/mnt/data/deepseek-harness/{dsh-home,workspace}` *(synced ↔ `gs://$CACHE_BUCKET/deepseek-harness/`)* | Runs `@deepseek-ai/dsh` web UI (`127.0.0.1:3081` behind a Caddy front with the password-protected `/login`; served on container `0.0.0.0:3080` by Caddy), pre-wired to `http://litellm:4000/v1` with `LITELLM_MASTER_KEY`. |
+| **`litellm-tunnel`** *(optional)* | Outbound SSH | `/mnt/data/reverse-tunnel` *(synced ↔ `gs://$CACHE_BUCKET/reverse-tunnel/`)* | Started only when `ENABLE_REVERSE_TUNNELS=true`; `autossh` reverse-forwards `TUNNEL_SSH_HOST:REMOTE_LITELLM_PORT` → `litellm:4000`. |
+| **`deepseek-harness-tunnel`** *(optional)* | Outbound SSH | `/mnt/data/reverse-tunnel` *(synced ↔ `gs://$CACHE_BUCKET/reverse-tunnel/`)* | Started only when `ENABLE_REVERSE_TUNNELS=true`; `autossh` reverse-forwards `TUNNEL_SSH_HOST:REMOTE_HARNESS_PORT` → `deepseek-harness:3080`. |
 
-> **Optional Admin Debugging / Local Port-Forward via IAP:** If you disable reverse tunnels (`ENABLE_REVERSE_TUNNELS=false`) and want temporary local access or log inspection (`/var/log/gpu-mig-bootstrap.log`), inspect the active MIG instance name and tunnel over IAP:
+> **Optional Admin Debugging / Local Port-Forward via IAP:** If you disable reverse tunnels (`ENABLE_REVERSE_TUNNELS=false`) and want temporary local access or log inspection (`/var/log/gpu-mig-bootstrap.log`), inspect the active Regional MIG instance (and whichever zone GCE placed it in) and tunnel over IAP:
 > ```bash
 > eval "$(terraform -chdir=development/infra/gcp output -raw list_instances_command)"
 > gcloud compute ssh <MIG_INSTANCE_NAME> \
 >   --project="$(gcloud config get-value project)" \
->   --zone="$(terraform -chdir=development/infra/gcp output -raw zone)" \
+>   --zone="<INSTANCE_ZONE>" \
 >   --tunnel-through-iap \
 >   -- -N -L 4000:127.0.0.1:4000 -L 3080:127.0.0.1:3080
 > ```
@@ -290,22 +301,25 @@ All items below are populated automatically from `development/.env` when you run
 
 ## Step 5 — Day-2 Operations (Pause/Scale, Switch Spot/Standard, Rotate Secrets, Destroy)
 
-### Pause GPU Compute Billing While Preserving the Stateful `data` Disk
-Because `dev-gpu-mig` configures `stateful_disk { device_name = "data", delete_rule = "NEVER" }`, scaling the MIG to `0` deletes the GPU VM instance (zero GPU compute spend) while keeping the `3000 GB` Hyperdisk and its `/mnt/data` contents (Hugging Face weights, container layers, runner `.credentials`, and stack `.env`):
+### Pause GPU Compute Billing While Preserving Cached Weights & Configs in GCS
+Because the ephemeral `3000 GB` Hyperdisk uses `auto_delete = true` and persistent state lives in the same-region GCS cache bucket (`google_storage_bucket.gpu_cache`), scaling the Regional MIG to `0` deletes both the GPU VM and the Hyperdisk (zero GPU compute and zero Hyperdisk spend while paused) while retaining `huggingface/`, `stacks/gpu-dev-machine/`, `reverse-tunnel/`, `deepseek-harness/`, and `actions-runner-state/` in `gs://<cache-bucket>`:
 
 ```bash
-# 1. Pause (scale MIG to 0 — stops GPU compute billing)
+# 1. Optional: flush any brand-new model weights to GCS before pausing (configs flush automatically via shutdown-script)
+#    On the GPU VM: sudo /usr/local/bin/gpu-gcs-sync
+
+# 2. Pause (scale Regional MIG to 0 — stops GPU compute & Hyperdisk billing)
 gcloud compute instance-groups managed resize dev-gpu-mig \
   --size=0 \
-  --zone="$(terraform -chdir=development/infra/gcp output -raw zone)" \
+  --region="$(terraform -chdir=development/infra/gcp output -raw region)" \
   --project="$(gcloud config get-value project)"
 
-# 2. Resume later (either scale back to 1 or re-run deploy.sh)
+# 3. Resume later (either scale back to 1 or re-run deploy.sh)
 ./development/scripts/deploy.sh --provider=gcp
 ```
 
-### Switch Between Spot and Standard (On-Demand) Without Losing `/mnt/data`
-The MIG `update_policy` uses `replacement_method = "RECREATE"`, replacing the VM instance from the new template while reattaching `/mnt/data`:
+### Switch Between Spot and Standard (On-Demand) Without Losing State
+The Regional MIG `update_policy` uses `replacement_method = "SUBSTITUTE"`, replacing the VM instance from the new template while the startup script restores cached weights, runner credentials, and stack config from the regional GCS bucket:
 
 ```bash
 # Switch to Standard on-demand
@@ -364,13 +378,13 @@ disabled and the `dsh web:` URL in the container log (port 3081 there, use 3080)
 ```
 
 ### Cleanly Remove the Runner & Full Teardown (`--destroy`)
-> **Warning:** Back up any data you want to keep in `/mnt/data` before tearing down. Also note that `stateful_disk` uses `delete_rule = "NEVER"`, so check `gcloud compute disks list` after `deploy.sh --destroy` and delete any retained `data` disk manually if you want zero storage billing.
+> **Warning:** The ephemeral `3000 GB` Hyperdisk (`auto_delete = true`) is deleted automatically when the VM is destroyed, whereas the regional GCS cache bucket (`google_storage_bucket.gpu_cache`) defaults to `cache_bucket_force_destroy = false` so cached Hugging Face weights and stack configs are not accidentally lost. Empty or delete `gs://<cache-bucket>` first (or pass `-var="cache_bucket_force_destroy=true"` to Terraform) if you want zero GCS storage billing after `deploy.sh --destroy`.
 
 ```bash
 # 1. Unregister matching runner(s) via GitHub API (zero SSH)
 ./development/scripts/setup.sh --provider=gcp --remove
 
-# 2. Destroy Terraform-managed GCP resources (MIG, template, Secret Manager secret, VPC/NAT)
+# 2. Destroy Terraform-managed GCP resources (Regional MIG, template, GCS bucket if empty, Secret Manager secret, VPC/NAT)
 ./development/scripts/deploy.sh --provider=gcp --destroy
 ```
 
@@ -393,9 +407,11 @@ disabled and the `dsh web:` URL in the container log (port 3081 there, use 3080)
 | `--project=<id>` | Override active `gcloud config` project (`gcp` only). |
 | `--adc` / `--gcloud-token` | Force ADC or `gcloud` CLI token (auto-selects ADC for `*@google.com` CBA accounts and `gcloud` token otherwise). |
 | `--region=<region>` | Target cloud region override (default: `REGION` in `.env`, `terraform.tfvars`, or `europe-west4`). |
-| `--zone=<zone>` | Target cloud zone override (default: `ZONE` in `.env`, `terraform.tfvars`, or candidate GPU zones). |
-| `--regions=r1,r2,...` | Comma-separated list of regions to cycle through for GPU capacity (`gcp`). |
-| `--cycle-regions` | Cycle through all GPU-capable regions until capacity is found (`gcp`). |
+| `--zones=z1,z2,...` | Comma-separated zones within `--region` for the multi-zone Regional MIG (default: `ZONES` in `.env`, or all GPU-capable zones in `--region`). |
+| `--zone=<zone>` | Single-zone override (narrows `zones` to `[ZONE]` and derives `--region` from `${ZONE%-*}` if `--region` is omitted). |
+| `--cache-bucket=<name>` | Optional same-region GCS cache bucket name override (default: `CACHE_BUCKET_NAME` in `.env`, or `<project_id>-<name_prefix>-cache-<region>`). |
+| `--regions=r1,r2,...` | Comma-separated list of regions to cycle through for GPU capacity (`gcp`; each region spans all its GPU-capable zones). |
+| `--cycle-regions` | Cycle through all GPU-capable regions until capacity is found (`gcp`; each region spans all its GPU-capable zones). |
 | `--machine-type=<type>` | Override GPU VM machine type (default: `g4-standard-192`). |
 | `--name-prefix=<prefix>` | Override resource prefix (default: `dev-gpu`). |
 | `--spot` | **(Default)** Provision the GPU VM in the MIG as a Spot VM (`use_spot = true`). |
@@ -404,7 +420,7 @@ disabled and the `dsh web:` URL in the container log (port 3081 there, use 3080)
 | `--default-vpc-name=<name>` | Existing VPC name when `--use-default-vpc` is set (default: `default`). |
 | `--ssh-proxy-cidrs=c1,c2,...` | Proxy CIDRs allowed on TCP `22` for optional debugging (default: `35.235.240.0/20`). |
 | `--ssh-hostname-template=<tpl>` | Optional SSH relay hostname template (`{instance}`, `{zone}`, `{project}`). |
-| `--force-move` | Allow moving to another region/zone even if a MIG already exists in Terraform state. |
+| `--force-move` | Allow moving to another region even if a Regional MIG already exists in Terraform state. |
 | `--no-stage-terminated` | Destroy pending MIG and exit 1 on stockout (default when `--loop` is set). |
 | `--stage-terminated` | Keep MIG active on the final candidate on stockout (even when `--loop` is set). |
 | `--auto-approve` / `--no-auto-approve` | Control `-auto-approve` on `terraform apply` / `destroy` (default: `--auto-approve`). |
@@ -419,7 +435,7 @@ disabled and the `dsh web:` URL in the container log (port 3081 there, use 3080)
 | :--- | :--- |
 | `--provider=<gcp\|azure\|on-prem>` | **(Required)** Target provider (`gcp` is 100% SSH-free unless `--host` is set; `azure`/`on-prem` use SSH). |
 | `--env-file=<path>` | Path to `.env` configuration file (default: `development/.env`). |
-| `--project=<id>` / `--zone=<zone>` | GCP project and zone overrides for `--status` MIG inspection. |
+| `--project=<id>` / `--region=<region>` / `--zone=<zone>` | GCP project, region (preferred for Regional MIG), and optional zonal fallback overrides for `--status` MIG inspection. |
 | `--mig=<name>` / `--name-prefix=<prefix>` | GCP MIG name override (default: `<prefix>-mig`) and prefix override (default: `dev-gpu`) for `--status`. |
 | `--host=<user@host>` / `--ssh-key=<path>` / `--known-hosts=<path>` | Explicit SSH target & key overrides (enables SSH runner setup for `azure`, `on-prem`, or custom hosts). |
 | `--repo=<owner/repo>` | GitHub repository override (default: `GITHUB_REPO` in `.env`, else `vitorecomp/personal-infra`). |
@@ -431,7 +447,7 @@ disabled and the `dsh web:` URL in the container log (port 3081 there, use 3080)
 | `--sync-github-only` | Only sync `development/.env` variables/secrets to GitHub via `gh`. |
 | `--skip-github-sync` | Skip `gh variable/secret set` (SSH mode: only configure the remote runner). |
 | `--trigger-deploy` | Dispatch `gh workflow run deploy-gpu-machine.yml` after setup finishes (or set `TRIGGER_DEPLOY=true` in `.env`). |
-| `--status` | **GCP:** query `gh api` runners & MIG instances (zero SSH). **SSH mode:** check remote `systemd` service. |
+| `--status` | **GCP:** query `gh api` runners & Regional MIG instances (`--region=<region>`, zero SSH). **SSH mode:** check remote `systemd` service. |
 | `--remove` | **GCP:** unregister matching runner(s) via `gh api` (zero SSH). **SSH mode:** stop & remove remote service. |
 | `--dry-run` | Print resolved `gh` / API / SSH steps without mutating anything. |
 
@@ -439,12 +455,12 @@ disabled and the `dsh web:` URL in the container log (port 3081 there, use 3080)
 
 | Flag | Description |
 | :--- | :--- |
-| `--target-mode=<auto\|controller-ssh\|ssh\|local>` | Execution mode (default: `auto` → uses `local` on the GCP MIG runner, or `ssh` if `GPU_SSH_HOST` is set; `.env.example` sets `GPU_TARGET_MODE=local`). |
+| `--target-mode=<auto\|controller-ssh\|ssh\|local>` | Execution mode (default: `auto` → uses `local` on the GCP Regional MIG runner, or `ssh` if `GPU_SSH_HOST` is set; `.env.example` sets `GPU_TARGET_MODE=local`). |
 | `--ssh-host=<user@host>` | Target SSH host when `--target-mode=ssh` (or env `GPU_SSH_HOST`). |
 | `--stack-dir=<path>` | Destination stack directory on the GPU VM (default: `/mnt/data/stacks/gpu-dev-machine`). |
 | `--wait-timeout=<seconds>` | Max seconds to wait for SSH in `controller-ssh` mode (default: `600`). |
-| `--dry-run` | Print resolved target mode, synced env key names (never values), and compose commands without mutating state. |
-| `--no-wait-for-model` | Finish once the containers run (env `WAIT_FOR_MODEL=false`; workflow input `wait_for_model`). By default the deploy waits for `vllm-server` `/health`, fails fast with the root-cause log lines if it restarts or exits, and ends with one chat request through LiteLLM. |
+| `--dry-run` | Print resolved target mode, synced env key names (never values), and compose commands (including post-deploy `gpu-gcs-sync --fast`) without mutating state. |
+| `--no-wait-for-model` | Finish once the containers run (env `WAIT_FOR_MODEL=false`; workflow input `wait_for_model`). By default the deploy waits for `vllm-server` `/health`, fails fast with the root-cause log lines if it restarts or exits, and ends with one chat request through LiteLLM. After starting containers, `deploy_gpu_stack.sh` also runs `sudo /usr/local/bin/gpu-gcs-sync --fast` (when present) to persist the stack config to GCS immediately. |
 | `--model-timeout=<seconds>` | Max wait for the model (default `10800`, repo variable `MODEL_READY_TIMEOUT_SEC`): a first start downloads ~475 GiB and loads it. |
 
 #### What the deploy takes care of on the GPU host (found on a full-size replica, 2026-11-27)
@@ -459,4 +475,4 @@ disabled and the `dsh web:` URL in the container log (port 3081 there, use 3080)
 | `podman stop` takes minutes; old container revived after a recreate | a killed vLLM frees ~200 GiB of pinned memory slowly (28 min while the download saturated the disk) | wait out stops; converge from a clean teardown if compose config hashes differ |
 | every start recompiles kernels | JIT caches in the container (CuTe-DSL's could not be created) | caches persisted in `/mnt/data/vllm-cache` |
 
-The data disk is provisioned at **8,000 IOPS / 750 MiB/s** (`data_disk_iops` / `data_disk_throughput_mbps`; the old 3,060 / 200 capped a cold load at ~40 min, 4,000 IOPS measured 357 MB/s ≈ 20 min, 8,000 targets ~11 min; ≈ US$51/month above the free 3,000 IOPS / 140 MiB/s in europe-west4). The MIG keeps the existing stateful disk across recreations, so `deploy.sh` applies these values to it in place after `terraform apply` (Hyperdisk allows a change only every few hours; a refused update is a warning, re-run later).
+The ephemeral data disk is provisioned on each VM boot at **8,000 IOPS / 750 MiB/s** (`data_disk_iops` / `data_disk_throughput_mbps`; the old 3,060 / 200 capped a cold load at ~40 min, 4,000 IOPS measured 357 MB/s ≈ 20 min, 8,000 targets ~11 min; ≈ US$51/month pro-rated while the VM is running above the free 3,000 IOPS / 140 MiB/s in europe-west4). Because the Regional MIG deletes the ephemeral Hyperdisk with the VM (`auto_delete = true`), each new instance template revision automatically provisions a fresh disk with these performance settings.
