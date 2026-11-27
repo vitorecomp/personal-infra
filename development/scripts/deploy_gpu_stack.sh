@@ -214,6 +214,15 @@ run_target_bash() {
   cat <<'BOOTSTRAP_EOF'
 set -euo pipefail
 
+# On a freshly (re)created GCE VM the startup-script registers this runner first and only then installs the CDI /
+# netavark settings and auto-resumes the stack with podman-compose, so a queued deploy started in the middle of it
+# (seen after a Spot preemption: vllm-server vanished mid-load). Wait for the startup-script to finish.
+for _ in $(seq 1 180); do
+  pgrep -f google_metadata_script_runner >/dev/null 2>&1 || break
+  echo "[bootstrap] Waiting for the VM startup-script to finish before touching Podman..."
+  sleep 10
+done
+
 sudo mkdir -p \
   "${DATA_ROOT}/containers/storage" \
   "${DATA_ROOT}/containers/tmp" \
@@ -528,16 +537,16 @@ if [[ "${WAIT_FOR_MODEL,,}" =~ ^(1|true|yes|on)$ ]]; then
       echo "[error] vllm-server stopped or restarted while starting (state/restarts: ${info}, was running ${restarts0})." >&2
       echo "[error] Root-cause lines from its log:" >&2
       sudo podman logs --tail 600 vllm-server 2>&1 | tr '\r' '\n' | grep -E 'Error|ERROR|Exception|Assertion|Traceback|Killed|out of memory' \
-        | grep -vE 'unauthenticated requests' | tail -25 | cut -c1-300 >&2
+        | grep -vE 'unauthenticated requests' | tail -25 | cut -c1-300 >&2 || true
       exit 1
     fi
     if (( SECONDS - started > MODEL_READY_TIMEOUT_SEC )); then
       echo "[error] vllm-server did not become healthy within ${MODEL_READY_TIMEOUT_SEC}s; last log lines:" >&2
-      sudo podman logs --tail 10 vllm-server 2>&1 | tr '\r' '\n' | tail -10 | cut -c1-200 >&2
+      sudo podman logs --tail 10 vllm-server 2>&1 | tr '\r' '\n' | tail -10 | cut -c1-200 >&2 || true
       exit 1
     fi
     if (( SECONDS - last_report >= 300 )); then
-      echo "[deploy] ...still starting after $(( (SECONDS - started) / 60 )) min: $(sudo podman logs --tail 3 vllm-server 2>&1 | tr '\r' '\n' | grep -v '^\s*$' | tail -1 | cut -c1-140)"
+      echo "[deploy] ...still starting after $(( (SECONDS - started) / 60 )) min: $(sudo podman logs --tail 3 vllm-server 2>&1 | tr '\r' '\n' | grep -v '^\s*$' | tail -1 | cut -c1-140 || true)"
       last_report=$SECONDS
     fi
     sleep 20
@@ -575,7 +584,7 @@ harness_diag() {
   echo "[error] deepseek-harness: $(sudo podman inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}} started={{.State.StartedAt}} error={{.State.Error}}' deepseek-harness 2>/dev/null || echo missing)" >&2
   echo "[error] Last log lines (URLs/tokens redacted):" >&2
   sudo podman logs --tail 40 deepseek-harness 2>&1 | tr '\r' '\n' \
-    | sed -E 's#[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]]+#<url redacted>#g; s#[A-Za-z0-9_+/=-]{24,}#<redacted>#g' | cut -c1-240 >&2
+    | sed -E 's#[a-zA-Z][a-zA-Z0-9+.-]*://[^[:space:]]+#<url redacted>#g; s#[A-Za-z0-9_+/=-]{24,}#<redacted>#g' | cut -c1-240 >&2 || true
 }
 if [[ "$harness_code" == "000" ]]; then
   echo "[error] deepseek-harness is not answering on :3080." >&2
