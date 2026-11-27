@@ -1,493 +1,423 @@
-data "google_client_openid_userinfo" "me" {
-  count = var.enable_os_login && var.register_oslogin_ssh_key && trimspace(var.oslogin_user) == "" ? 1 : 0
-}
-
-# Fixed SSH client keypair (kept in Terraform state, exported locally to ./ssh-key).
-resource "tls_private_key" "ssh" {
-  algorithm = "ED25519"
-}
-
-# Fixed ED25519 + RSA SSH host keypairs so known_hosts never breaks across restarts
-# AND Cloud Console SSH-in-browser (which requires rsa-sha2-256/ssh-rsa) works too.
-resource "tls_private_key" "ssh_host_controller" {
-  algorithm = "ED25519"
-}
-
-resource "tls_private_key" "ssh_host_controller_rsa" {
-  algorithm = "RSA"
-  rsa_bits  = 3072
-}
-
-resource "tls_private_key" "ssh_host_gpu" {
-  algorithm = "ED25519"
-}
-
-resource "tls_private_key" "ssh_host_gpu_rsa" {
-  algorithm = "RSA"
-  rsa_bits  = 3072
-}
-
-# Dedicated ED25519 SSH keypair used by the Controller VM
-# to SSH directly into the GPU VM over the internal VPC (10.10.0.11).
-resource "tls_private_key" "controller_to_gpu" {
-  algorithm = "ED25519"
-}
-
-resource "google_os_login_ssh_public_key" "ssh" {
-  count = var.enable_os_login && var.register_oslogin_ssh_key && local.effective_oslogin_email != "" ? 1 : 0
-
-  user = local.effective_oslogin_email
-  key  = "${trimspace(tls_private_key.ssh.public_key_openssh)} ${var.ssh_username}"
-}
-
-# Dedicated least-privilege Service Account for the Controller VM:
-# can ONLY describe/start the GPU VM and SSH into it via instance-level OS Login.
-resource "google_service_account" "controller" {
-  project      = var.project_id
-  account_id   = "${var.name_prefix}-ctrl"
-  display_name = "Watchdog controller SA for ${var.name_prefix}-vm"
-}
-
-# Dedicated Service Account for the GPU VM so OS Login serviceAccountUser IAM
-# is scoped solely to the GPU VM rather than the project-wide default compute SA.
+# Dedicated least-privilege Service Account for the GPU MIG instances.
 resource "google_service_account" "gpu" {
   project      = var.project_id
   account_id   = "${var.name_prefix}-vm-sa"
-  display_name = "Runtime SA for ${var.name_prefix}-vm"
+  display_name = "Runtime SA for ${var.name_prefix}-mig GPU instances"
 }
 
 locals {
-  controller_zone            = trimspace(var.controller_zone) != "" ? trimspace(var.controller_zone) : var.zone
-  gpu_vm_name                = "${var.name_prefix}-vm"
-  controller_vm_name         = "${var.name_prefix}-controller"
-  ssh_public_key             = "${trimspace(tls_private_key.ssh.public_key_openssh)} ${var.ssh_username}"
-  controller_gpu_public_key  = "${trimspace(tls_private_key.controller_to_gpu.public_key_openssh)} ${var.name_prefix}-controller"
-  controller_to_gpu_ssh_user = var.enable_os_login ? "sa_${google_service_account.controller.unique_id}" : var.ssh_username
-  effective_oslogin_email    = trimspace(var.oslogin_user) != "" ? trimspace(var.oslogin_user) : try(coalesce(data.google_client_openid_userinfo.me[0].email, ""), "")
-  oslogin_username = local.effective_oslogin_email != "" ? replace(
-    lower(local.effective_oslogin_email),
-    "/[^a-z0-9]/",
-    "_",
-  ) : var.ssh_username
-
-  common_ssh_metadata = merge(
-    {
-      enable-oslogin         = var.enable_os_login ? "TRUE" : "FALSE"
-      block-project-ssh-keys = "TRUE"
-    },
-    var.enable_os_login ? {} : {
-      ssh-keys = "${var.ssh_username}:${local.ssh_public_key}"
-    }
+  effective_runner_name = trimspace(var.runner_name) != "" ? trimspace(var.runner_name) : "${var.name_prefix}-runner"
+  create_runner_secret_version = (
+    trimspace(var.github_repo) != "" &&
+    (trimspace(var.runner_token) != "" || trimspace(var.runner_pat) != "")
   )
-
-  # Shared shell helper embedded into both VMs to eliminate duplication while keeping
-  # each VM's fixed ED25519 + RSA SSH host keys and local sudo user idempotent.
-  common_ssh_bootstrap = <<EOB
-install_if_changed() {
-  local src="$1" dst="$2" mode="$3"
-  if ! cmp -s "$src" "$dst" 2>/dev/null; then
-    chmod "$mode" "$src"
-    mv "$src" "$dst"
-    chown root:root "$dst"
-    return 0
-  fi
-  rm -f "$src"
-  return 1
-}
-
-setup_ssh_host_and_user() {
-  local ed_priv="$1"
-  local ed_pub="$2"
-  local rsa_priv="$3"
-  local rsa_pub="$4"
-
-  install -d -m 0755 /etc/ssh /etc/ssh/sshd_config.d
-  printf '%s\n' "$ed_priv" > /etc/ssh/ssh_host_ed25519_key.tmp
-  printf '%s\n' "$ed_pub" > /etc/ssh/ssh_host_ed25519_key.pub.tmp
-  printf '%s\n' "$rsa_priv" > /etc/ssh/ssh_host_rsa_key.tmp
-  printf '%s\n' "$rsa_pub" > /etc/ssh/ssh_host_rsa_key.pub.tmp
-  printf '%s\n%s\n' "HostKey /etc/ssh/ssh_host_ed25519_key" "HostKey /etc/ssh/ssh_host_rsa_key" > /etc/ssh/sshd_config.d/99-fixed-hostkey.conf.tmp
-
-  local changed=0
-  if install_if_changed /etc/ssh/ssh_host_ed25519_key.tmp /etc/ssh/ssh_host_ed25519_key 0600; then changed=1; fi
-  if install_if_changed /etc/ssh/ssh_host_ed25519_key.pub.tmp /etc/ssh/ssh_host_ed25519_key.pub 0644; then changed=1; fi
-  if install_if_changed /etc/ssh/ssh_host_rsa_key.tmp /etc/ssh/ssh_host_rsa_key 0600; then changed=1; fi
-  if install_if_changed /etc/ssh/ssh_host_rsa_key.pub.tmp /etc/ssh/ssh_host_rsa_key.pub 0644; then changed=1; fi
-  if install_if_changed /etc/ssh/sshd_config.d/99-fixed-hostkey.conf.tmp /etc/ssh/sshd_config.d/99-fixed-hostkey.conf 0644; then changed=1; fi
-
-  if [ "$changed" -eq 1 ]; then
-    mkdir -p /run/sshd
-    if sshd -t; then
-      systemctl reload-or-restart ssh || systemctl reload-or-restart sshd || true
-    fi
-  fi
-
-  if ! id -u "${var.ssh_username}" >/dev/null 2>&1; then
-    useradd -m -s /bin/bash "${var.ssh_username}"
-  fi
-  usermod -aG sudo "${var.ssh_username}"
-  echo "${var.ssh_username} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-${var.ssh_username}"
-  chmod 0440 "/etc/sudoers.d/90-${var.ssh_username}"
-
-  local user_home
-  user_home=$(getent passwd "${var.ssh_username}" | cut -d: -f6)
-  install -d -m 0700 -o "${var.ssh_username}" -g "${var.ssh_username}" "$user_home/.ssh"
-  printf '%s\n' "${local.ssh_public_key}" > "$user_home/.ssh/authorized_keys"
-  chown "${var.ssh_username}:${var.ssh_username}" "$user_home/.ssh/authorized_keys"
-  chmod 0600 "$user_home/.ssh/authorized_keys"
-}
-EOB
-
-  controller_startup_script = <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-${local.common_ssh_bootstrap}
-
-CTRL_HOST_KEY=$(cat <<'KEYEOF'
-${trimspace(tls_private_key.ssh_host_controller.private_key_openssh)}
-KEYEOF
-)
-CTRL_HOST_PUB="${trimspace(tls_private_key.ssh_host_controller.public_key_openssh)} ${local.controller_vm_name}-host"
-CTRL_RSA_KEY=$(cat <<'RSAKEYEOF'
-${trimspace(tls_private_key.ssh_host_controller_rsa.private_key_pem)}
-RSAKEYEOF
-)
-CTRL_RSA_PUB="${trimspace(tls_private_key.ssh_host_controller_rsa.public_key_openssh)} ${local.controller_vm_name}-rsa"
-setup_ssh_host_and_user "$CTRL_HOST_KEY" "$CTRL_HOST_PUB" "$CTRL_RSA_KEY" "$CTRL_RSA_PUB"
-
-# Pin the GPU VM host key in system ssh_known_hosts for internal jumps.
-printf '%s %s\n%s %s\n' \
-  "${google_compute_address.gpu_internal_ip.address}" "${trimspace(tls_private_key.ssh_host_gpu.public_key_openssh)}" \
-  "gpu,${local.gpu_vm_name}" "${trimspace(tls_private_key.ssh_host_gpu.public_key_openssh)}" > /etc/ssh/ssh_known_hosts
-chmod 0644 /etc/ssh/ssh_known_hosts
-
-# Configure seamless `ssh gpu` / `gpu-ssh` / `gpu-wait-ssh` access from Controller -> GPU VM.
-install -d -m 0755 /etc/gpu-ssh /etc/ssh/ssh_config.d /etc/skel/.ssh
-chmod 0700 /etc/skel/.ssh
-cat <<'CTRLGPUKEYEOF' > /etc/gpu-ssh/id_ed25519
-${trimspace(tls_private_key.controller_to_gpu.private_key_openssh)}
-CTRLGPUKEYEOF
-chmod 0600 /etc/gpu-ssh/id_ed25519
-chown root:root /etc/gpu-ssh/id_ed25519
-printf '%s\n' "${local.controller_gpu_public_key}" > /etc/gpu-ssh/id_ed25519.pub
-chmod 0644 /etc/gpu-ssh/id_ed25519.pub
-
-cp /etc/gpu-ssh/id_ed25519 /etc/skel/.ssh/gpu_ed25519
-chmod 0600 /etc/skel/.ssh/gpu_ed25519
-mkdir -p /root/.ssh
-chmod 0700 /root/.ssh
-cp /etc/gpu-ssh/id_ed25519 /root/.ssh/gpu_ed25519
-chmod 0600 /root/.ssh/gpu_ed25519
-CTRL_LOCAL_HOME=$(getent passwd "${var.ssh_username}" | cut -d: -f6)
-cp /etc/gpu-ssh/id_ed25519 "$CTRL_LOCAL_HOME/.ssh/gpu_ed25519"
-chown "${var.ssh_username}:${var.ssh_username}" "$CTRL_LOCAL_HOME/.ssh/gpu_ed25519"
-chmod 0600 "$CTRL_LOCAL_HOME/.ssh/gpu_ed25519"
-
-# Provision dedicated non-root GitHub Actions runner user, workspace directory, and GPU SSH key.
-if ! id -u "${var.runner_username}" >/dev/null 2>&1; then
-  useradd -m -s /bin/bash "${var.runner_username}"
-fi
-RUNNER_HOME=$(getent passwd "${var.runner_username}" | cut -d: -f6)
-install -d -m 0700 -o "${var.runner_username}" -g "${var.runner_username}" "$RUNNER_HOME/.ssh"
-cp /etc/gpu-ssh/id_ed25519 "$RUNNER_HOME/.ssh/gpu_ed25519"
-chown "${var.runner_username}:${var.runner_username}" "$RUNNER_HOME/.ssh/gpu_ed25519"
-chmod 0600 "$RUNNER_HOME/.ssh/gpu_ed25519"
-install -d -m 0755 -o "${var.runner_username}" -g "${var.runner_username}" /opt/actions-runner
-
-export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-GPU_SSH_USER="${local.controller_to_gpu_ssh_user}"
-if [ "${var.enable_os_login ? "true" : "false"}" = "true" ]; then
-  for _ in 1 2 3 4 5; do
-    if gcloud compute os-login ssh-keys add --key-file=/etc/gpu-ssh/id_ed25519.pub --project="${var.project_id}" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 3
-  done
-  DETECTED_SA_USER="$(gcloud compute os-login describe-profile --project="${var.project_id}" --format="value(posixAccounts[0].username)" 2>/dev/null || true)"
-  if [ -n "$DETECTED_SA_USER" ]; then
-    GPU_SSH_USER="$DETECTED_SA_USER"
-  fi
-fi
-
-cat <<SSHCONFEOF > /etc/ssh/ssh_config.d/90-gpu.conf
-Host gpu ${local.gpu_vm_name}
-    HostName ${google_compute_address.gpu_internal_ip.address}
-    User $GPU_SSH_USER
-    IdentityFile ~/.ssh/gpu_ed25519
-    IdentitiesOnly yes
-    StrictHostKeyChecking yes
-    GlobalKnownHostsFile /etc/ssh/ssh_known_hosts
-    ServerAliveInterval 30
-    ServerAliveCountMax 4
-SSHCONFEOF
-chmod 0644 /etc/ssh/ssh_config.d/90-gpu.conf
-
-cat <<'KEYINSTEOF' > /usr/local/sbin/gpu-install-user-key
-#!/usr/bin/env bash
-set -euo pipefail
-TARGET_USER="$${SUDO_USER:-}"
-[[ -n "$TARGET_USER" && "$TARGET_USER" != "root" ]] || exit 0
-KEY_CONTENT="$(cat /etc/gpu-ssh/id_ed25519)"
-runuser -u "$TARGET_USER" -- bash -c '
-  umask 077
-  mkdir -p "$HOME/.ssh"
-  printf "%s\n" "$1" > "$HOME/.ssh/gpu_ed25519"
-' _ "$KEY_CONTENT"
-KEYINSTEOF
-chmod 0755 /usr/local/sbin/gpu-install-user-key
-chown root:root /usr/local/sbin/gpu-install-user-key
-echo 'ALL ALL=(root) NOPASSWD: /usr/local/sbin/gpu-install-user-key ""' > /etc/sudoers.d/91-gpu-ssh-key
-chmod 0440 /etc/sudoers.d/91-gpu-ssh-key
-
-cat <<'PROFEOF' > /etc/profile.d/gpu-ssh.sh
-if [ "$(id -u)" -ne 0 ] && [ -n "$${HOME:-}" ] && [ ! -f "$HOME/.ssh/gpu_ed25519" ]; then
-  sudo -n /usr/local/sbin/gpu-install-user-key >/dev/null 2>&1 || true
-fi
-PROFEOF
-chmod 0644 /etc/profile.d/gpu-ssh.sh
-
-cat <<'GPUSSHEOF' > /usr/local/bin/gpu-ssh
-#!/usr/bin/env bash
-set -euo pipefail
-if [ "$(id -u)" -ne 0 ] && [ ! -f "$HOME/.ssh/gpu_ed25519" ]; then
-  sudo -n /usr/local/sbin/gpu-install-user-key
-fi
-exec ssh gpu "$@"
-GPUSSHEOF
-chmod 0755 /usr/local/bin/gpu-ssh
-
-cat <<'GPUWAITEOF' > /usr/local/bin/gpu-wait-ssh
-#!/usr/bin/env bash
-set -euo pipefail
-TIMEOUT_SEC="$${1:-600}"
-DEADLINE=$((SECONDS + TIMEOUT_SEC))
-while (( SECONDS < DEADLINE )); do
-  if /usr/local/bin/gpu-ssh -o ConnectTimeout=5 -o BatchMode=yes true >/dev/null 2>&1; then
-    echo "GPU VM SSH is ready."
-    exit 0
-  fi
-  sleep 5
-done
-echo "Timed out after $${TIMEOUT_SEC}s waiting for GPU VM SSH." >&2
-exit 1
-GPUWAITEOF
-chmod 0755 /usr/local/bin/gpu-wait-ssh
-
-# Install the systemd watchdog that automatically restarts the Spot GPU VM whenever
-# it enters TERMINATED/STOPPED and keeps retrying until Spot capacity returns.
-cat <<'ENVEOF' > /etc/default/gpu-watchdog
-PROJECT_ID="${var.project_id}"
-VM_NAME="${local.gpu_vm_name}"
-VM_ZONE="${var.zone}"
-POLL_INTERVAL_SEC="${var.watchdog_poll_interval_sec}"
-RETRY_INTERVAL_SEC="${var.watchdog_retry_interval_sec}"
-ENVEOF
-chmod 0644 /etc/default/gpu-watchdog
-
-cat <<'WATCHDOGEOF' > /usr/local/bin/gpu-watchdog.sh
-#!/usr/bin/env bash
-set -u
-
-export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-source /etc/default/gpu-watchdog
-PAUSE_FILE="/etc/gpu-watchdog.paused"
-
-log() {
-  echo "[$(date -Is)] [gpu-watchdog] $*"
-}
-
-while true; do
-  if [[ -f "$PAUSE_FILE" ]]; then
-    log "Paused ($PAUSE_FILE exists); skipping check."
-    sleep "$POLL_INTERVAL_SEC"
-    continue
-  fi
-
-  STATUS=$(gcloud compute instances describe "$VM_NAME" \
-    --zone="$VM_ZONE" \
-    --project="$PROJECT_ID" \
-    --format="value(status)" 2>&1 || true)
-
-  case "$STATUS" in
-    RUNNING)
-      sleep "$POLL_INTERVAL_SEC"
-      ;;
-    TERMINATED|STOPPED)
-      log "VM $VM_NAME in $VM_ZONE is $STATUS; issuing start (--async)..."
-      if OUT=$(gcloud compute instances start "$VM_NAME" \
-        --zone="$VM_ZONE" \
-        --project="$PROJECT_ID" \
-        --async 2>&1); then
-        log "Start requested for $VM_NAME: $OUT"
-      else
-        log "Start attempt failed (will retry in $${RETRY_INTERVAL_SEC}s): $OUT"
-      fi
-      sleep "$RETRY_INTERVAL_SEC"
-      ;;
-    SUSPENDED)
-      log "VM $VM_NAME is SUSPENDED; issuing resume (--async)..."
-      gcloud compute instances resume "$VM_NAME" \
-        --zone="$VM_ZONE" \
-        --project="$PROJECT_ID" \
-        --async 2>&1 || true
-      sleep "$RETRY_INTERVAL_SEC"
-      ;;
-    PROVISIONING|STAGING|STOPPING|REPAIRING|DEPROVISIONING)
-      log "VM $VM_NAME in transitional state: $STATUS"
-      sleep "$POLL_INTERVAL_SEC"
-      ;;
-    *)
-      log "Unexpected describe output for $VM_NAME: $STATUS (retrying in $${RETRY_INTERVAL_SEC}s)"
-      sleep "$RETRY_INTERVAL_SEC"
-      ;;
-  esac
-done
-WATCHDOGEOF
-chmod 0755 /usr/local/bin/gpu-watchdog.sh
-
-cat <<'STATUSEOF' > /usr/local/bin/gpu-status
-#!/usr/bin/env bash
-export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-source /etc/default/gpu-watchdog
-echo "=== GPU VM Status ==="
-gcloud compute instances describe "$VM_NAME" --zone="$VM_ZONE" --project="$PROJECT_ID" \
-  --format="table(name,zone.basename(),status,scheduling.provisioningModel,networkInterfaces[0].networkIP)"
-echo "=== Watchdog Service ==="
-systemctl status gpu-watchdog.service --no-pager -n 10 || true
-STATUSEOF
-chmod 0755 /usr/local/bin/gpu-status
-
-cat <<'PAUSEEOF' > /usr/local/bin/gpu-pause
-#!/usr/bin/env bash
-sudo touch /etc/gpu-watchdog.paused
-echo "Paused gpu-watchdog (/etc/gpu-watchdog.paused created)."
-PAUSEEOF
-chmod 0755 /usr/local/bin/gpu-pause
-
-cat <<'RESUMEEOF' > /usr/local/bin/gpu-resume
-#!/usr/bin/env bash
-sudo rm -f /etc/gpu-watchdog.paused
-echo "Resumed gpu-watchdog (/etc/gpu-watchdog.paused removed)."
-RESUMEEOF
-chmod 0755 /usr/local/bin/gpu-resume
-
-cat <<'SVCEOF' > /etc/systemd/system/gpu-watchdog.service
-[Unit]
-Description=Watchdog that automatically restarts Spot GPU VM on preemption
-After=network-online.target snapd.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/gpu-watchdog.sh
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-SVCEOF
-
-systemctl daemon-reload
-systemctl enable --now gpu-watchdog.service
-systemctl restart gpu-watchdog.service
-
-# Pre-install all OS and .NET runtime dependencies required by the GitHub Actions
-# self-hosted runner (`config.sh` / `Runner.Listener`) and GPU sync workflows.
-RUNNER_PACKAGES=(
-  ca-certificates
-  curl
-  git
-  git-lfs
-  jq
-  libicu-dev
-  libkrb5-3
-  libssl-dev
-  rsync
-  tar
-  unzip
-  xz-utils
-  zip
-  zlib1g
-)
-if ! dpkg -s "$${RUNNER_PACKAGES[@]}" >/dev/null 2>&1; then
-  export DEBIAN_FRONTEND=noninteractive
-  for _ in 1 2 3; do
-    if apt-get -o DPkg::Lock::Timeout=120 update -qq && \
-       apt-get -o DPkg::Lock::Timeout=120 install -y -qq --no-install-recommends "$${RUNNER_PACKAGES[@]}"; then
-      break
-    fi
-    sleep 5
-  done
-  git lfs install --system >/dev/null 2>&1 || true
-fi
-
-# Pre-stage the latest GitHub Actions runner binary into /opt/actions-runner (without registering)
-# and run GitHub's dependency verifier so `config.sh` can run immediately later.
-if [ ! -x /opt/actions-runner/config.sh ]; then
-  RUNNER_LATEST_URL="$(curl -fsSLI -o /dev/null -w '%%{url_effective}' https://github.com/actions/runner/releases/latest || true)"
-  RUNNER_VER="$${RUNNER_LATEST_URL##*/v}"
-  if [[ -n "$RUNNER_VER" && "$RUNNER_VER" != "$RUNNER_LATEST_URL" ]]; then
-    TMP_TAR="$(mktemp /tmp/actions-runner.XXXXXX.tar.gz)"
-    if curl -fsSL "https://github.com/actions/runner/releases/download/v$${RUNNER_VER}/actions-runner-linux-x64-$${RUNNER_VER}.tar.gz" -o "$TMP_TAR"; then
-      tar -xzf "$TMP_TAR" -C /opt/actions-runner
-      chown -R "${var.runner_username}:${var.runner_username}" /opt/actions-runner
-      /opt/actions-runner/bin/installdependencies.sh >/dev/null 2>&1 || true
-    fi
-    rm -f "$TMP_TAR"
-  fi
-fi
-EOF
 
   gpu_startup_script = <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-${local.common_ssh_bootstrap}
+mkdir -p /var/log
+exec > >(tee -a /var/log/gpu-mig-bootstrap.log) 2>&1
+export HOME="$${HOME:-/root}"
+export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export DEBIAN_FRONTEND=noninteractive
 
-GPU_HOST_KEY=$(cat <<'KEYEOF'
-${trimspace(tls_private_key.ssh_host_gpu.private_key_openssh)}
-KEYEOF
-)
-GPU_HOST_PUB="${trimspace(tls_private_key.ssh_host_gpu.public_key_openssh)} ${local.gpu_vm_name}-host"
-GPU_RSA_KEY=$(cat <<'RSAKEYEOF'
-${trimspace(tls_private_key.ssh_host_gpu_rsa.private_key_pem)}
-RSAKEYEOF
-)
-GPU_RSA_PUB="${trimspace(tls_private_key.ssh_host_gpu_rsa.public_key_openssh)} ${local.gpu_vm_name}-rsa"
-setup_ssh_host_and_user "$GPU_HOST_KEY" "$GPU_HOST_PUB" "$GPU_RSA_KEY" "$GPU_RSA_PUB"
+echo "=== [gpu-mig-bootstrap] Starting at $(date -Is) ==="
 
-# Also authorize the Controller VM's key for local ssh_username when OS Login is disabled.
-GPU_LOCAL_HOME=$(getent passwd "${var.ssh_username}" | cut -d: -f6)
-if ! grep -qxF "${local.controller_gpu_public_key}" "$GPU_LOCAL_HOME/.ssh/authorized_keys" 2>/dev/null; then
-  printf '%s\n' "${local.controller_gpu_public_key}" >> "$GPU_LOCAL_HOME/.ssh/authorized_keys"
-  chown "${var.ssh_username}:${var.ssh_username}" "$GPU_LOCAL_HOME/.ssh/authorized_keys"
-  chmod 0600 "$GPU_LOCAL_HOME/.ssh/authorized_keys"
-fi
-
-# Format once (if unformatted) and mount the persistent Hyperdisk data volume at /mnt/data.
-# Preserved intact across Spot preemptions and controller restarts.
+# 1. Wait for, format once (if unformatted), and mount the stateful Hyperdisk data volume at /mnt/data.
 DATA_DISK="/dev/disk/by-id/google-data"
 MOUNT_POINT="/mnt/data"
-if [ -b "$DATA_DISK" ]; then
-  mkdir -p "$MOUNT_POINT"
-  if ! blkid "$DATA_DISK" >/dev/null 2>&1; then
-    mkfs.ext4 -F -m 0 -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$DATA_DISK"
+for _ in $(seq 1 30); do
+  if [ -b "$DATA_DISK" ]; then
+    break
   fi
-  if ! mountpoint -q "$MOUNT_POINT"; then
-    mount -o discard,defaults "$DATA_DISK" "$MOUNT_POINT"
-  fi
-  UUID=$(blkid -s UUID -o value "$DATA_DISK")
-  if [ -n "$UUID" ] && ! grep -q "$UUID" /etc/fstab; then
-    echo "UUID=$UUID $MOUNT_POINT ext4 discard,defaults,nofail 0 2" >> /etc/fstab
-  fi
-  chown "${var.ssh_username}:${var.ssh_username}" "$MOUNT_POINT"
-  chmod 1777 "$MOUNT_POINT"
+  sleep 1
+done
+
+if [ ! -b "$DATA_DISK" ]; then
+  echo "[error] Stateful data disk $DATA_DISK not found; aborting bootstrap to avoid filling boot disk." >&2
+  exit 1
 fi
+
+mkdir -p "$MOUNT_POINT"
+if ! blkid "$DATA_DISK" >/dev/null 2>&1; then
+  echo "[bootstrap] Formatting $DATA_DISK as ext4..."
+  mkfs.ext4 -F -m 0 -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$DATA_DISK"
+fi
+if ! mountpoint -q "$MOUNT_POINT"; then
+  mount -o discard,defaults "$DATA_DISK" "$MOUNT_POINT"
+fi
+UUID="$(blkid -s UUID -o value "$DATA_DISK")"
+if [ -n "$UUID" ] && ! grep -q "$UUID" /etc/fstab; then
+  echo "UUID=$UUID $MOUNT_POINT ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+fi
+chmod 1777 "$MOUNT_POINT"
+
+# 2. Create persistent directories on /mnt/data (preserved across Spot preemptions).
+mkdir -p \
+  /mnt/data/containers/storage \
+  /mnt/data/containers/tmp \
+  /mnt/data/huggingface \
+  /mnt/data/deepseek-harness/dsh-home \
+  /mnt/data/deepseek-harness/workspace \
+  /mnt/data/reverse-tunnel/state/litellm \
+  /mnt/data/reverse-tunnel/state/harness \
+  /mnt/data/stacks/gpu-dev-machine \
+  /mnt/data/actions-runner
+
+chmod 0700 /mnt/data/reverse-tunnel
+chmod 1777 \
+  /mnt/data/deepseek-harness \
+  /mnt/data/deepseek-harness/dsh-home \
+  /mnt/data/deepseek-harness/workspace \
+  /mnt/data/reverse-tunnel/state \
+  /mnt/data/reverse-tunnel/state/litellm \
+  /mnt/data/reverse-tunnel/state/harness
+touch /mnt/data/reverse-tunnel/known_hosts
+chmod 0644 /mnt/data/reverse-tunnel/known_hosts
+
+# 3. Point Podman storage at /mnt/data so large container layers never fill the boot disk.
+mkdir -p /etc/containers
+cat <<'STORAGEEOF' > /etc/containers/storage.conf
+[storage]
+driver = "overlay"
+graphroot = "/mnt/data/containers/storage"
+runroot = "/run/containers/storage"
+STORAGEEOF
+
+# 4. Provision local runner user with passwordless sudo and symlink /opt/actions-runner -> /mnt/data/actions-runner.
+RUNNER_USER="${var.runner_username}"
+if ! id -u "$RUNNER_USER" >/dev/null 2>&1; then
+  useradd -m -s /bin/bash "$RUNNER_USER"
+fi
+usermod -aG sudo "$RUNNER_USER" || true
+echo "$RUNNER_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-$RUNNER_USER"
+chmod 0440 "/etc/sudoers.d/90-$RUNNER_USER"
+chown -R "$RUNNER_USER:$RUNNER_USER" /mnt/data/actions-runner /mnt/data/stacks
+if [ -d /opt/actions-runner ] && [ ! -L /opt/actions-runner ]; then
+  rm -rf /opt/actions-runner
+fi
+ln -sfn /mnt/data/actions-runner /opt/actions-runner
+
+# 5. Install required OS, GitHub runner, and Podman packages.
+HOST_PACKAGES=(
+  ca-certificates
+  curl
+  fuse-overlayfs
+  git
+  git-lfs
+  gpg
+  jq
+  libicu-dev
+  libkrb5-3
+  libssl-dev
+  podman
+  podman-compose
+  rsync
+  slirp4netns
+  tar
+  uidmap
+  unzip
+  xz-utils
+  zip
+  zlib1g
+)
+if ! dpkg -s "$${HOST_PACKAGES[@]}" >/dev/null 2>&1; then
+  echo "[bootstrap] Installing OS, runner, and Podman packages..."
+  for _ in 1 2 3; do
+    if apt-get -o DPkg::Lock::Timeout=180 update -qq && \
+       apt-get -o DPkg::Lock::Timeout=180 install -y -qq --no-install-recommends "$${HOST_PACKAGES[@]}"; then
+      break
+    fi
+    sleep 5
+  done
+fi
+git lfs install --system >/dev/null 2>&1 || true
+
+# 6. Install Canonical Secure-Boot-signed NVIDIA Open Kernel GPU driver + NVIDIA Container Toolkit + Podman CDI.
+# Note: GCE Ubuntu 24.04 uses HWE linux-gcp (e.g. 7.0.x-gcp), where Canonical provides prebuilt,
+# Secure-Boot-signed open kernel modules (`linux-modules-nvidia-*-open-$(uname -r)`) that load via
+# modprobe immediately without DKMS build failures.
+if ! nvidia-smi >/dev/null 2>&1; then
+  echo "[bootstrap] Installing Ubuntu prebuilt NVIDIA Open Kernel GPU driver for kernel $(uname -r)..."
+  apt-get -o DPkg::Lock::Timeout=180 update -qq || true
+  if apt-get -o DPkg::Lock::Timeout=180 install -y -qq --no-install-recommends ubuntu-drivers-common; then
+    OPEN_DRV="$(ubuntu-drivers list --gpgpu 2>/dev/null | tr ',' '\n' | grep -Eo 'nvidia-driver-[0-9]+(-server)?-open' | sort -V | tail -n 1 || true)"
+    if [ -n "$OPEN_DRV" ]; then
+      DRV_SUFFIX="$${OPEN_DRV#nvidia-driver-}"
+      KMOD_PKG="linux-modules-nvidia-$${DRV_SUFFIX}-$(uname -r)"
+      echo "[bootstrap] Installing $OPEN_DRV and signed kernel module $KMOD_PKG..."
+      apt-get -o DPkg::Lock::Timeout=180 install -y -qq "$OPEN_DRV" "$KMOD_PKG" || \
+        apt-get -o DPkg::Lock::Timeout=180 install -y -qq "$OPEN_DRV" || \
+        ubuntu-drivers install --gpgpu || true
+    else
+      ubuntu-drivers install --gpgpu || ubuntu-drivers install || echo "[warn] ubuntu-drivers install returned non-zero."
+    fi
+  else
+    echo "[warn] Failed to install ubuntu-drivers-common; continuing bootstrap."
+  fi
+  modprobe nvidia nvidia-uvm nvidia-modeset || true
+fi
+
+if ! command -v nvidia-ctk >/dev/null 2>&1; then
+  echo "[bootstrap] Installing NVIDIA Container Toolkit for Podman CDI..."
+  if curl -fsSL --retry 3 --retry-delay 2 https://nvidia.github.io/libnvidia-container/gpgkey \
+       | gpg --dearmor --yes -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg && \
+     curl -fsSL --retry 3 --retry-delay 2 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+       | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+       > /etc/apt/sources.list.d/nvidia-container-toolkit.list && \
+     apt-get -o DPkg::Lock::Timeout=180 update -qq && \
+     apt-get -o DPkg::Lock::Timeout=180 install -y -qq nvidia-container-toolkit; then
+    echo "[bootstrap] Installed nvidia-container-toolkit."
+  else
+    echo "[warn] Failed to install nvidia-container-toolkit; continuing bootstrap."
+  fi
+fi
+
+# Reboot once if NVIDIA kernel modules require booting into the newly installed kernel/driver
+# before starting the GitHub Actions runner (guarded by /var/lib/gpu-driver-reboot-attempted).
+if ! nvidia-smi >/dev/null 2>&1 && [ ! -f /var/lib/gpu-driver-reboot-attempted ]; then
+  mkdir -p /var/lib
+  touch /var/lib/gpu-driver-reboot-attempted
+  sync
+  echo "[bootstrap] Rebooting once to activate NVIDIA kernel modules before starting runner..."
+  systemctl reboot
+  exit 0
+fi
+
+if command -v nvidia-ctk >/dev/null 2>&1; then
+  mkdir -p /etc/cdi
+  nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml >/dev/null 2>&1 || \
+    echo "[warn] Failed to generate /etc/cdi/nvidia.yaml."
+fi
+
+# 7. Unpack latest GitHub Actions runner binary into /mnt/data/actions-runner if not already present.
+RUNNER_DIR="/mnt/data/actions-runner"
+if [ ! -x "$RUNNER_DIR/config.sh" ]; then
+  echo "[bootstrap] Downloading latest actions-runner-linux-x64 into $RUNNER_DIR..."
+  RUNNER_LATEST_URL="$(curl -fsSLI --retry 3 --retry-delay 2 -o /dev/null -w '%%{url_effective}' https://github.com/actions/runner/releases/latest || true)"
+  RUNNER_VER="$${RUNNER_LATEST_URL##*/v}"
+  if [[ -n "$RUNNER_VER" && "$RUNNER_VER" != "$RUNNER_LATEST_URL" ]]; then
+    TMP_TAR="$(mktemp /tmp/actions-runner.XXXXXX.tar.gz)"
+    if curl -fsSL --retry 3 --retry-delay 2 "https://github.com/actions/runner/releases/download/v$${RUNNER_VER}/actions-runner-linux-x64-$${RUNNER_VER}.tar.gz" -o "$TMP_TAR"; then
+      tar -xzf "$TMP_TAR" -C "$RUNNER_DIR"
+      chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
+    else
+      echo "[warn] Failed to download actions-runner v$${RUNNER_VER}."
+    fi
+    rm -f "$TMP_TAR"
+  else
+    echo "[warn] Could not resolve latest actions-runner release version."
+  fi
+fi
+if [ -x "$RUNNER_DIR/bin/installdependencies.sh" ]; then
+  "$RUNNER_DIR/bin/installdependencies.sh" >/dev/null 2>&1 || true
+fi
+
+# 8. Self-register & start the GitHub Actions runner using GCP Secret Manager bootstrap payload.
+SECRET_ID="${google_secret_manager_secret.runner_bootstrap.secret_id}"
+PROJECT_ID="${var.project_id}"
+BOOTSTRAP_JSON=""
+LAST_SM_ERR=""
+for _ in 1 2 3 4 5; do
+  if command -v gcloud >/dev/null 2>&1; then
+    SM_ERR_FILE="$(mktemp /tmp/sm-err.XXXXXX)"
+    BOOTSTRAP_JSON="$(gcloud secrets versions access latest \
+      --secret="$SECRET_ID" \
+      --project="$PROJECT_ID" 2>"$SM_ERR_FILE" || true)"
+    if [ -n "$BOOTSTRAP_JSON" ] && ! printf '%s' "$BOOTSTRAP_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
+      BOOTSTRAP_JSON=""
+    fi
+    if [ -z "$BOOTSTRAP_JSON" ]; then
+      LAST_SM_ERR="$(tr '\n' ' ' < "$SM_ERR_FILE" | head -c 300 || true)"
+    fi
+    rm -f "$SM_ERR_FILE"
+  fi
+  if [ -z "$BOOTSTRAP_JSON" ]; then
+    ACCESS_TOKEN="$(curl -fsSL -H "Metadata-Flavor: Google" \
+      "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" 2>/dev/null \
+      | jq -r '.access_token // empty' 2>/dev/null || true)"
+    if [ -z "$ACCESS_TOKEN" ] && [ -f /run/google-mds-mtls/root.crt ] && [ -f /run/google-mds-mtls/client.key ]; then
+      CERT_ARG="/run/google-mds-mtls/client.key"
+      [ -f /run/google-mds-mtls/client.crt ] && CERT_ARG="/run/google-mds-mtls/client.crt"
+      ACCESS_TOKEN="$(curl -fsSL \
+        --cacert /run/google-mds-mtls/root.crt \
+        --cert "$CERT_ARG" \
+        --key /run/google-mds-mtls/client.key \
+        -H "Metadata-Flavor: Google" \
+        "https://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token" 2>/dev/null \
+        | jq -r '.access_token // empty' 2>/dev/null || true)"
+    fi
+    if [ -n "$ACCESS_TOKEN" ]; then
+      SM_HTTP_FILE="$(mktemp /tmp/sm-http.XXXXXX)"
+      SM_CODE="$(curl -sSL -o "$SM_HTTP_FILE" -w '%%{http_code}' \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "https://secretmanager.googleapis.com/v1/projects/$PROJECT_ID/secrets/$SECRET_ID/versions/latest:access" 2>/dev/null || true)"
+      if [ "$SM_CODE" != "200" ] && [ -f /run/google-mds-mtls/client.key ]; then
+        CERT_ARG="/run/google-mds-mtls/client.key"
+        [ -f /run/google-mds-mtls/client.crt ] && CERT_ARG="/run/google-mds-mtls/client.crt"
+        SM_CODE="$(curl -sSL -o "$SM_HTTP_FILE" -w '%%{http_code}' \
+          --cert "$CERT_ARG" \
+          --key /run/google-mds-mtls/client.key \
+          -H "Authorization: Bearer $ACCESS_TOKEN" \
+          "https://secretmanager.mtls.googleapis.com/v1/projects/$PROJECT_ID/secrets/$SECRET_ID/versions/latest:access" 2>/dev/null || true)"
+      fi
+      if [ "$SM_CODE" = "200" ]; then
+        SECRET_B64="$(jq -r '.payload.data // empty' < "$SM_HTTP_FILE" 2>/dev/null || true)"
+        if [ -n "$SECRET_B64" ]; then
+          BOOTSTRAP_JSON="$(printf '%s' "$SECRET_B64" | base64 -d 2>/dev/null || true)"
+        fi
+      else
+        LAST_SM_ERR="HTTP $SM_CODE: $(jq -r '.error.message // empty' < "$SM_HTTP_FILE" 2>/dev/null || head -c 200 "$SM_HTTP_FILE")"
+      fi
+      rm -f "$SM_HTTP_FILE"
+      unset ACCESS_TOKEN SECRET_B64 SM_CODE
+    fi
+  fi
+  if [ -n "$BOOTSTRAP_JSON" ]; then
+    break
+  fi
+  sleep 3
+done
+if [ -z "$BOOTSTRAP_JSON" ]; then
+  echo "[warn] Could not read Secret Manager bootstrap secret '$SECRET_ID' in '$PROJECT_ID': $LAST_SM_ERR"
+fi
+
+GITHUB_REPO=""
+RUNNER_NAME=""
+RUNNER_LABELS=""
+RUNNER_TOKEN=""
+RUNNER_PAT=""
+if [ -n "$BOOTSTRAP_JSON" ]; then
+  GITHUB_REPO="$(printf '%s' "$BOOTSTRAP_JSON" | jq -r '.github_repo // empty' 2>/dev/null || true)"
+  RUNNER_NAME="$(printf '%s' "$BOOTSTRAP_JSON" | jq -r '.runner_name // empty' 2>/dev/null || true)"
+  RUNNER_LABELS="$(printf '%s' "$BOOTSTRAP_JSON" | jq -r '.runner_labels // empty' 2>/dev/null || true)"
+  RUNNER_TOKEN="$(printf '%s' "$BOOTSTRAP_JSON" | jq -r '.runner_token // empty' 2>/dev/null || true)"
+  RUNNER_PAT="$(printf '%s' "$BOOTSTRAP_JSON" | jq -r '.runner_pat // empty' 2>/dev/null || true)"
+fi
+
+EXISTING_GH_URL=""
+EXISTING_AGENT_NAME=""
+if [ -f "$RUNNER_DIR/.runner" ] && [ -f "$RUNNER_DIR/.credentials" ]; then
+  EXISTING_GH_URL="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("gitHubUrl", ""))' "$RUNNER_DIR/.runner" 2>/dev/null || true)"
+  EXISTING_AGENT_NAME="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig")).get("agentName", ""))' "$RUNNER_DIR/.runner" 2>/dev/null || true)"
+fi
+
+EXPECTED_GH_URL=""
+if [ -n "$GITHUB_REPO" ]; then
+  EXPECTED_GH_URL="https://github.com/$GITHUB_REPO"
+fi
+EXISTING_GH_NORM="$(printf '%s' "$EXISTING_GH_URL" | tr '[:upper:]' '[:lower:]' | sed 's:/*$::')"
+EXPECTED_GH_NORM="$(printf '%s' "$EXPECTED_GH_URL" | tr '[:upper:]' '[:lower:]' | sed 's:/*$::')"
+
+REUSE_EXISTING=false
+if [ -f "$RUNNER_DIR/.runner" ] && [ -f "$RUNNER_DIR/.credentials" ]; then
+  if [ -z "$EXPECTED_GH_NORM" ] || [ "$EXISTING_GH_NORM" = "$EXPECTED_GH_NORM" ]; then
+    if [ -z "$RUNNER_NAME" ] || [ "$EXISTING_AGENT_NAME" = "$RUNNER_NAME" ]; then
+      REUSE_EXISTING=true
+    fi
+  fi
+fi
+
+RUNNER_STARTED=false
+if [ -x "$RUNNER_DIR/config.sh" ]; then
+  if [ "$REUSE_EXISTING" = "true" ] && [ -x "$RUNNER_DIR/svc.sh" ]; then
+    echo "[bootstrap] Preserved runner credentials found on /mnt/data ($EXISTING_AGENT_NAME); starting systemd service..."
+    if (
+      cd "$RUNNER_DIR" || exit 1
+      ./svc.sh stop >/dev/null 2>&1 || true
+      ./svc.sh uninstall >/dev/null 2>&1 || true
+      rm -f "$RUNNER_DIR/.service"
+      chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
+      ./svc.sh install "$RUNNER_USER" && ./svc.sh start
+    ); then
+      SVC_NAME="$(tr -d '\r\n' < "$RUNNER_DIR/.service" 2>/dev/null || true)"
+      sleep 3
+      if [ -n "$SVC_NAME" ] && systemctl is-active --quiet "$SVC_NAME"; then
+        RUNNER_STARTED=true
+      else
+        echo "[warn] Preserved runner service did not stay active; will attempt fresh registration."
+      fi
+    else
+      echo "[warn] Failed to start runner using preserved credentials; will attempt fresh registration."
+    fi
+  fi
+
+  if [ "$RUNNER_STARTED" != "true" ] && [ -n "$GITHUB_REPO" ]; then
+    EFFECTIVE_RUNNER_NAME="$${RUNNER_NAME:-${local.effective_runner_name}}"
+    EFFECTIVE_RUNNER_LABELS="$${RUNNER_LABELS:-${var.runner_labels}}"
+    REG_TOK=""
+    if [ -n "$RUNNER_PAT" ]; then
+      REG_TOK="$(curl -fsSL --retry 3 --retry-delay 2 -X POST \
+        -H "Authorization: Bearer $RUNNER_PAT" \
+        -H "Accept: application/vnd.github+json" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "https://api.github.com/repos/$GITHUB_REPO/actions/runners/registration-token" 2>/dev/null \
+        | jq -r '.token // empty' 2>/dev/null || true)"
+    fi
+    if [ -z "$REG_TOK" ] && [ -n "$RUNNER_TOKEN" ]; then
+      REG_TOK="$RUNNER_TOKEN"
+    fi
+
+    if [ -n "$REG_TOK" ]; then
+      echo "[bootstrap] Registering GitHub Actions runner '$EFFECTIVE_RUNNER_NAME' against $GITHUB_REPO..."
+      if (
+        cd "$RUNNER_DIR" || exit 1
+        if [ -x ./svc.sh ]; then
+          ./svc.sh stop >/dev/null 2>&1 || true
+          ./svc.sh uninstall >/dev/null 2>&1 || true
+        fi
+        rm -f "$RUNNER_DIR/.service" "$RUNNER_DIR/.runner" "$RUNNER_DIR/.credentials" "$RUNNER_DIR/.credentials_rsaparams"
+        chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
+        sudo -H -u "$RUNNER_USER" "$RUNNER_DIR/config.sh" \
+          --unattended \
+          --url "https://github.com/$GITHUB_REPO" \
+          --token "$REG_TOK" \
+          --name "$EFFECTIVE_RUNNER_NAME" \
+          --labels "$EFFECTIVE_RUNNER_LABELS" \
+          --work _work \
+          --replace && \
+        ./svc.sh install "$RUNNER_USER" && \
+        ./svc.sh start
+      ); then
+        RUNNER_STARTED=true
+      else
+        echo "[warn] GitHub Actions runner registration failed."
+      fi
+    else
+      echo "[warn] No registration token or PAT available for $GITHUB_REPO; skipping runner registration."
+    fi
+  fi
+else
+  echo "[warn] $RUNNER_DIR/config.sh not found; skipping runner setup."
+fi
+unset BOOTSTRAP_JSON RUNNER_TOKEN RUNNER_PAT REG_TOK
+
+# 9. Auto-resume previously deployed Podman stack after Spot recreation.
+STACK_DIR="/mnt/data/stacks/gpu-dev-machine"
+if [ -f "$STACK_DIR/compose.yml" ] && [ -f "$STACK_DIR/.env" ]; then
+  echo "[bootstrap] Detected previously deployed Podman stack in $STACK_DIR; resuming..."
+  podman system migrate >/dev/null 2>&1 || true
+  TUNNEL_HOST_SET="$(grep -E '^(TUNNEL_SSH_HOST|LITELLM_TUNNEL_SSH_HOST|HARNESS_TUNNEL_SSH_HOST)=' "$STACK_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]"'\''' || true)"
+  if [ -n "$TUNNEL_HOST_SET" ] && [ -s /mnt/data/reverse-tunnel/id_ed25519 ]; then
+    (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d) || \
+      echo "[warn] Failed to auto-resume full podman-compose stack."
+  else
+    (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d ray-server litellm deepseek-harness) || \
+      echo "[warn] Failed to auto-resume core podman-compose stack."
+  fi
+fi
+
+echo "=== [gpu-mig-bootstrap] Finished at $(date -Is) (runner_started=$RUNNER_STARTED) ==="
 EOF
 
   gpu_shutdown_script = <<EOF
 #!/usr/bin/env bash
+set -u
+export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+if command -v podman >/dev/null 2>&1; then
+  podman stop -t 15 --all >/dev/null 2>&1 || true
+fi
 sync
 if mountpoint -q /mnt/data; then
   umount -f /mnt/data || true
@@ -495,130 +425,93 @@ fi
 EOF
 }
 
-# Small always-on STANDARD controller + bastion VM owning a fixed external IP
-# and automatically restarting the Spot GPU VM whenever it stops.
-resource "google_compute_instance" "controller" {
-  project                   = var.project_id
-  name                      = local.controller_vm_name
-  machine_type              = var.controller_machine_type
-  zone                      = local.controller_zone
-  tags                      = ["${var.name_prefix}-ssh"]
-  labels                    = var.labels
-  allow_stopping_for_update = true
+# Secret Manager secret holding the GitHub Actions runner bootstrap JSON payload.
+resource "google_secret_manager_secret" "runner_bootstrap" {
+  project   = var.project_id
+  secret_id = "${var.name_prefix}-runner-bootstrap"
+  labels    = var.labels
 
-  boot_disk {
-    auto_delete = true
-    initialize_params {
-      image = var.boot_image
-      type  = var.controller_disk_type
-      size  = var.controller_disk_size_gb
-    }
+  replication {
+    auto {}
   }
+}
 
-  network_interface {
-    subnetwork = google_compute_subnetwork.subnet.id
-    network_ip = google_compute_address.controller_internal_ip.address
+resource "google_secret_manager_secret_iam_member" "gpu_runner_bootstrap" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.runner_bootstrap.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.gpu.email}"
+}
 
-    dynamic "access_config" {
-      for_each = var.enable_external_ip ? [1] : []
-      content {
-        nat_ip       = google_compute_address.external_ip[0].address
-        network_tier = "PREMIUM"
-      }
-    }
-  }
+resource "google_secret_manager_secret_version" "runner_bootstrap" {
+  count = local.create_runner_secret_version ? 1 : 0
 
-  scheduling {
-    on_host_maintenance = "MIGRATE"
-    automatic_restart   = true
-    provisioning_model  = "STANDARD"
-  }
-
-  shielded_instance_config {
-    enable_secure_boot          = var.enable_shielded_vm
-    enable_vtpm                 = var.enable_shielded_vm
-    enable_integrity_monitoring = var.enable_shielded_vm
-  }
-
-  metadata = merge(
-    local.common_ssh_metadata,
-    {
-      startup-script = local.controller_startup_script
-    }
-  )
-
-  service_account {
-    email  = google_service_account.controller.email
-    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
-  }
+  secret = google_secret_manager_secret.runner_bootstrap.id
+  secret_data = jsonencode({
+    github_repo   = trimspace(var.github_repo)
+    runner_name   = local.effective_runner_name
+    runner_labels = var.runner_labels
+    runner_token  = var.runner_token
+    runner_pat    = var.runner_pat
+  })
 
   lifecycle {
-    ignore_changes = [boot_disk[0].initialize_params[0].image]
+    create_before_destroy = true
   }
-
-  depends_on = [google_compute_router_nat.nat]
 }
 
-# Persistent Hyperdisk Balanced data volume surviving Spot STOP preemptions.
-resource "google_compute_disk" "gpu_data" {
-  project                = var.project_id
-  name                   = "${var.name_prefix}-data"
-  zone                   = var.zone
-  type                   = var.data_disk_type
-  size                   = var.data_disk_size_gb
-  provisioned_iops       = var.data_disk_iops
-  provisioned_throughput = var.data_disk_throughput_mbps
-  labels                 = var.labels
-}
+# Instance template for the stateful GPU Managed Instance Group.
+resource "google_compute_instance_template" "gpu" {
+  project      = var.project_id
+  name_prefix  = "${var.name_prefix}-tpl-"
+  region       = var.region
+  machine_type = var.machine_type
+  tags         = ["${var.name_prefix}-vm"]
+  labels       = var.labels
 
-# Development GPU VM (`g4-standard-192` by default) managed by the controller watchdog.
-resource "google_compute_instance" "gpu_vm" {
-  project                   = var.project_id
-  name                      = local.gpu_vm_name
-  machine_type              = var.machine_type
-  zone                      = var.zone
-  tags                      = ["${var.name_prefix}-vm"]
-  labels                    = var.labels
-  allow_stopping_for_update = true
-
-  boot_disk {
-    auto_delete = true
-    initialize_params {
-      image                  = var.boot_image
-      type                   = var.boot_disk_type
-      size                   = var.boot_disk_size_gb
-      provisioned_iops       = var.boot_disk_iops
-      provisioned_throughput = var.boot_disk_throughput_mbps
-    }
+  disk {
+    boot                   = true
+    auto_delete            = true
+    type                   = "PERSISTENT"
+    mode                   = "READ_WRITE"
+    source_image           = var.boot_image
+    disk_type              = var.boot_disk_type
+    disk_size_gb           = var.boot_disk_size_gb
+    provisioned_iops       = var.boot_disk_iops
+    provisioned_throughput = var.boot_disk_throughput_mbps
   }
 
-  attached_disk {
-    source      = google_compute_disk.gpu_data.id
-    device_name = "data"
-    mode        = "READ_WRITE"
+  disk {
+    boot                   = false
+    auto_delete            = false
+    type                   = "PERSISTENT"
+    mode                   = "READ_WRITE"
+    device_name            = "data"
+    disk_type              = var.data_disk_type
+    disk_size_gb           = var.data_disk_size_gb
+    provisioned_iops       = var.data_disk_iops
+    provisioned_throughput = var.data_disk_throughput_mbps
+    labels                 = var.labels
   }
 
-  # Fixed internal IP + optional fixed static external IP (survives Spot STOP/start).
   network_interface {
-    subnetwork = google_compute_subnetwork.subnet.id
+    subnetwork = local.subnetwork_id
     nic_type   = "GVNIC"
-    network_ip = google_compute_address.gpu_internal_ip.address
 
     dynamic "access_config" {
       for_each = var.enable_external_ip ? [1] : []
       content {
-        nat_ip       = google_compute_address.gpu_external_ip[0].address
         network_tier = "PREMIUM"
       }
     }
   }
 
   scheduling {
+    automatic_restart           = !var.use_spot
     on_host_maintenance         = "TERMINATE"
-    automatic_restart           = var.provisioning_model == "STANDARD"
-    preemptible                 = var.provisioning_model == "SPOT"
-    provisioning_model          = var.provisioning_model
-    instance_termination_action = var.provisioning_model == "SPOT" ? "STOP" : null
+    preemptible                 = var.use_spot
+    provisioning_model          = var.use_spot ? "SPOT" : "STANDARD"
+    instance_termination_action = var.use_spot ? "STOP" : null
   }
 
   shielded_instance_config {
@@ -626,60 +519,60 @@ resource "google_compute_instance" "gpu_vm" {
     enable_vtpm                 = var.enable_shielded_vm
     enable_integrity_monitoring = var.enable_shielded_vm
   }
-
-  metadata = merge(
-    local.common_ssh_metadata,
-    var.enable_os_login ? {} : {
-      ssh-keys = "${var.ssh_username}:${local.ssh_public_key}\n${var.ssh_username}:${local.controller_gpu_public_key}"
-    },
-    {
-      startup-script  = local.gpu_startup_script
-      shutdown-script = local.gpu_shutdown_script
-    }
-  )
 
   service_account {
     email  = google_service_account.gpu.email
     scopes = ["https://www.googleapis.com/auth/cloud-platform"]
   }
 
-  # Fail fast (2m instead of 20m) when GCE creates the Spot VM in TERMINATED state
-  # during a stockout so deployment scripts can try other zones or hand off to gpu-watchdog.
-  timeouts {
-    create = "2m"
-    update = "5m"
-    delete = "5m"
+  metadata = {
+    enable-oslogin         = var.enable_os_login ? "TRUE" : "FALSE"
+    block-project-ssh-keys = "TRUE"
+    startup-script         = local.gpu_startup_script
+    shutdown-script        = local.gpu_shutdown_script
   }
 
   lifecycle {
-    ignore_changes = [boot_disk[0].initialize_params[0].image]
+    create_before_destroy = true
+  }
+}
+
+# Single-VM Stateful Zonal Managed Instance Group preserving the 3000 GB Hyperdisk data volume across Spot preemptions.
+resource "google_compute_instance_group_manager" "gpu" {
+  project            = var.project_id
+  name               = "${var.name_prefix}-mig"
+  base_instance_name = "${var.name_prefix}-vm"
+  zone               = var.zone
+  target_size        = 1
+  wait_for_instances = false
+
+  version {
+    name              = "primary"
+    instance_template = google_compute_instance_template.gpu.self_link_unique
   }
 
-  depends_on = [google_compute_router_nat.nat]
-}
+  stateful_disk {
+    device_name = "data"
+    delete_rule = "NEVER"
+  }
 
-# Grant Controller SA permission ONLY on the specific GPU VM instance:
-# 1. compute.instanceAdmin.v1 so gpu-watchdog can describe/start the Spot GPU VM
-# 2. compute.osAdminLogin + iam.serviceAccountUser (on GPU SA only) so the Controller VM
-#    can SSH (`ssh gpu` / `gpu-ssh`) with sudo into the GPU VM.
-resource "google_compute_instance_iam_member" "controller_gpu_admin" {
-  project       = var.project_id
-  zone          = google_compute_instance.gpu_vm.zone
-  instance_name = google_compute_instance.gpu_vm.name
-  role          = "roles/compute.instanceAdmin.v1"
-  member        = "serviceAccount:${google_service_account.controller.email}"
-}
+  instance_lifecycle_policy {
+    default_action_on_failure = "REPAIR"
+    force_update_on_repair    = "YES"
+  }
 
-resource "google_compute_instance_iam_member" "controller_gpu_oslogin" {
-  project       = var.project_id
-  zone          = google_compute_instance.gpu_vm.zone
-  instance_name = google_compute_instance.gpu_vm.name
-  role          = "roles/compute.osAdminLogin"
-  member        = "serviceAccount:${google_service_account.controller.email}"
-}
+  update_policy {
+    type                           = "PROACTIVE"
+    minimal_action                 = "REPLACE"
+    most_disruptive_allowed_action = "REPLACE"
+    replacement_method             = "RECREATE"
+    max_surge_fixed                = 0
+    max_unavailable_fixed          = 1
+  }
 
-resource "google_service_account_iam_member" "controller_gpu_sa_user" {
-  service_account_id = google_service_account.gpu.name
-  role               = "roles/iam.serviceAccountUser"
-  member             = "serviceAccount:${google_service_account.controller.email}"
+  depends_on = [
+    google_compute_router_nat.nat,
+    google_secret_manager_secret_iam_member.gpu_runner_bootstrap,
+    google_secret_manager_secret_version.runner_bootstrap,
+  ]
 }

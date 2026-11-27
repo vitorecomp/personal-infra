@@ -5,18 +5,31 @@ region      = "europe-west4"
 zone        = "europe-west4-a"
 name_prefix = "dev-gpu"
 
-controller_machine_type = "e2-small"
-controller_disk_size_gb = 100
-machine_type            = "g4-standard-192"
-provisioning_model      = "SPOT"
+# Provisioning model:
+#   use_spot = true   -> Spot GPU VM auto-healed/recreated by the Stateful MIG
+#   use_spot = false  -> Standard on-demand GPU VM
+machine_type = "g4-standard-192"
+use_spot     = true
 
-# Public internet ingress is disabled by default; SSH connects via `gcloud compute ssh --tunnel-through-iap`.
-# enable_public_ingress = false
+# Networking:
+#   use_default_vpc = false -> creates a dedicated custom VPC + subnet
+#   use_default_vpc = true  -> attaches to the existing 'default' VPC network
+use_default_vpc = false
+# default_vpc_name = "default"
 
-# Disable if external policy controllers manage VPC ingress rules:
-# enable_ingress_firewalls = false
+# Attach an ephemeral external IP on nic0 (true) or route outbound traffic via Cloud Router + Cloud NAT (false):
+# enable_external_ip = true
 
-# Cloud OS Login defaults to true, and OS Login SSH key import in Terraform is disabled by default
-# (`register_oslogin_ssh_key = false`) because `gcloud compute ssh` manages its own OS Login key natively.
-# register_oslogin_ssh_key = false
-# enable_os_login = false
+# Optional admin SSH debugging ingress (normal workflow is zero-SSH via GitHub Actions outbound HTTPS):
+# enable_public_ingress    = false
+# ssh_proxy_cidrs          = ["35.235.240.0/20"]
+# enable_ingress_firewalls = true
+# enable_os_login          = true
+
+# Self-registering GitHub Actions runner settings (stored in Secret Manager).
+# Pass runner_token / runner_pat via TF_VAR_runner_token / TF_VAR_runner_pat (managed by deploy.sh);
+# never commit tokens or PATs to terraform.tfvars.
+# github_repo     = "owner/repo"
+# runner_name     = "gcp-gpu-runner"
+# runner_labels   = "self-hosted,linux,x64,gcp-gpu"
+# runner_username = "github-runner"

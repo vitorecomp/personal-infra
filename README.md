@@ -19,7 +19,7 @@ personal-infra/
 ├── development/              # Cloud & on-prem GPU development machine infrastructure, runner & Podman stack
 │   ├── gpu-dev-machine/      # Podman + podman-compose stack (Ray Serve DeepSeek-V4.1-Flash, LiteLLM, DeepSeek Harness)
 │   ├── infra/                # Provider-specific GPU machine configs (gcp, azure, on-prem)
-│   └── scripts/              # deploy.sh (machine provisioning) & setup.sh (GitHub runner setup)
+│   └── scripts/              # deploy.sh (MIG/machine provisioning), setup.sh (GitHub env sync/runner) & deploy_gpu_stack.sh
 ├── home-server/              # Home server / self-hosted services and maintenance (TBD)
 ├── linux/                    # Linux OS bootstrap, packages, and system configuration (TBD)
 └── workspace/                # Local ~/workspace repository inventory and synchronization
@@ -71,17 +71,18 @@ python3 cloud/scripts/configure_ai_spend_cap.py <project_id> --amount 1200 --ser
 Provisions and configures GPU development workstations across cloud and on-prem targets:
 
 - **Infrastructure ([`development/infra/`](./development/infra))**:
-  - [`gcp/`](./development/infra/gcp): GCP Terraform pairing an always-on `e2-small` (`STANDARD`) Controller/Watchdog VM (`dev-gpu-controller`) with an auto-restarting Spot GPU VM (`dev-gpu-vm`, `g4-standard-192` by default) and persistent `3000 GB` Hyperdisk (`/mnt/data`).
+  - [`gcp/`](./development/infra/gcp): GCP Terraform provisioning a **zero-SSH Stateful Zonal Managed Instance Group** (`dev-gpu-mig`, `target_size = 1`, `g4-standard-192` by default) configurable as **Spot** (`use_spot = true`, default) or **Standard** on-demand (`--no-spot`), on a custom VPC or existing `default` VPC (`--use-default-vpc`), with a persistent `3000 GB` Hyperdisk (`/mnt/data`, `delete_rule = "NEVER"`) and a **GCP Secret Manager** bootstrap secret (`dev-gpu-runner-bootstrap`). On boot, the GPU VM self-registers as a GitHub Actions runner (`gcp-gpu-runner`) over outbound HTTPS 443 and auto-resumes any deployed Podman stack across Spot recreations.
   - [`azure/`](./development/infra/azure) & [`on-prem/`](./development/infra/on-prem): Reserved target folders (`.gitkeep`) for Azure and on-premises GPU hosts.
 - **GPU Machine Container Stack ([`development/gpu-dev-machine/`](./development/gpu-dev-machine))**: Podman + `podman-compose` stack running `ray-server` (full unquantized `deepseek-ai/DeepSeek-V4.1-Flash` with CPU offload), `litellm`, and `deepseek-harness` pointed at LiteLLM.
 - **Scripts ([`development/scripts/`](./development/scripts))**:
-  - [`deploy.sh`](./development/scripts/deploy.sh): Unified Terraform provisioning entrypoint (`--provider=<gcp|azure|on-prem>`, `--cycle-regions`, `--loop=<minutes>`) using logged-in `gcloud` / ADC credentials and active project.
-  - [`setup.sh`](./development/scripts/setup.sh): Reads gitignored `development/.env` ([`.env.example`](./development/.env.example)), syncs Repository & `gpu` Environment variables/secrets via `gh`, auto-mints runner tokens via `gh api`, and configures the persistent GitHub Actions runner on the deployed machine.
-  - [`deploy_gpu_stack.sh`](./development/scripts/deploy_gpu_stack.sh): Syncs and deploys `development/gpu-dev-machine` via `podman-compose` (invoked by CI or locally).
+  - [`deploy.sh`](./development/scripts/deploy.sh): Unified Terraform provisioning entrypoint (`--provider=<gcp|azure|on-prem>`, `--spot` / `--no-spot`, `--use-default-vpc`, `--cycle-regions`, `--loop=<minutes>`) using logged-in `gcloud` / ADC credentials and active project; auto-mints a runner registration token via `gh api` into Secret Manager on GCP when `RUNNER_PAT` is omitted.
+  - [`setup.sh`](./development/scripts/setup.sh): Reads gitignored `development/.env` ([`.env.example`](./development/.env.example)) and syncs Repository (`GPU_RUNNER`, `GPU_RUNNER_LABELS`) & `gpu` Environment variables/secrets (`GPU_TARGET_MODE=local`, `LITELLM_MASTER_KEY`, etc.) via `gh`. Zero-SSH on GCP (including `--status` and `--remove` via `gh api`); SSH runner setup is used for `azure`, `on-prem`, or explicit `--host=user@ip`.
+  - [`deploy_gpu_stack.sh`](./development/scripts/deploy_gpu_stack.sh): Syncs and deploys `development/gpu-dev-machine` via `podman-compose` directly on the GPU runner (`GPU_TARGET_MODE=local` on GCP, or over SSH for remote hosts).
 
 ```bash
-./development/scripts/deploy.sh --provider=gcp --dry-run
 ./development/scripts/setup.sh --provider=gcp --dry-run
+./development/scripts/deploy.sh --provider=gcp --dry-run
+./development/scripts/deploy.sh --provider=gcp --no-spot --use-default-vpc --dry-run
 ```
 
 ### 3. `home-server/`
@@ -151,7 +152,7 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
 
 ### GitHub Secrets & Variables
 
-- **Environments `blog-prod` / `taiga-prod` / `gpu`** (deployments from `main` only): `blog-prod` and `taiga-prod` hold secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`, `BLOG_ADMIN_EMAIL` / `TAIGA_ADMIN_EMAIL`, and variable `DEPLOY_USER`. `taiga-prod` also holds secrets `TAIGA_DB_HOST` / `TAIGA_DB_USER` / `TAIGA_DB_PASSWORD` (Neon), `TAIGA_ADMIN_PASSWORD`, and variables `TAIGA_DB_NAME`, optional `TAIGA_ADMIN_USER` (default `admin`). `gpu` (gated by required reviewer `vitorecomp`) holds secrets `LITELLM_MASTER_KEY`, optional `HF_TOKEN`, `TUNNEL_SSH_PRIVATE_KEY` and variables `ENABLE_REVERSE_TUNNELS`, `TUNNEL_SSH_HOST`, `TUNNEL_SSH_USER`, `TUNNEL_SSH_PORT`, `TUNNEL_KNOWN_HOSTS`, `TUNNEL_BIND_ADDRESS`, `REMOTE_LITELLM_PORT`, `REMOTE_HARNESS_PORT` (model & offload parameters live directly in [`development/gpu-dev-machine/compose.yml`](./development/gpu-dev-machine/compose.yml)).
+- **Environments `blog-prod` / `taiga-prod` / `gpu`** (deployments from `main` only): `blog-prod` and `taiga-prod` hold secrets `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`, `BLOG_ADMIN_EMAIL` / `TAIGA_ADMIN_EMAIL`, and variable `DEPLOY_USER`. `taiga-prod` also holds secrets `TAIGA_DB_HOST` / `TAIGA_DB_USER` / `TAIGA_DB_PASSWORD` (Neon), `TAIGA_ADMIN_PASSWORD`, and variables `TAIGA_DB_NAME`, optional `TAIGA_ADMIN_USER` (default `admin`). `gpu` (gated by required reviewer `vitorecomp`) holds secrets `LITELLM_MASTER_KEY`, optional `HF_TOKEN`, `TUNNEL_SSH_PRIVATE_KEY`, optional `GPU_SSH_PRIVATE_KEY` and variables `GPU_TARGET_MODE` (`local` on GCP MIG runner), `ENABLE_REVERSE_TUNNELS`, `TUNNEL_SSH_HOST`, `TUNNEL_SSH_USER`, `TUNNEL_SSH_PORT`, `TUNNEL_KNOWN_HOSTS`, `TUNNEL_BIND_ADDRESS`, `REMOTE_LITELLM_PORT`, `REMOTE_HARNESS_PORT` (model & offload parameters live directly in [`development/gpu-dev-machine/compose.yml`](./development/gpu-dev-machine/compose.yml)).
 - **Repository**: secrets `TAIGA_DOMAIN`, `BLOG_DOMAIN`, `ACME_EMAIL`, `TAIGA_UPSTREAM`, `GCP_PROJECT_ID`, `TAIGA_RUN_SA`, `TAIGA_MEDIA_BUCKET`, `BACKUP_BUCKET`, `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SA`, `BLOG_TITLE`, `BLOG_THEME_NAME`, `ADMIN_NAME` (all synced from gitignored root `.env` by [`sync_github_secrets.py`](./cloud/scripts/sync_github_secrets.py) so GitHub Actions masks them in public logs), plus `BLOG_ADMIN_PASSWORD` and `METRICS_TOKEN`; variable `GPU_RUNNER` (`gcp-gpu`, `azure-gpu`, `on-prem-gpu`; optional `GPU_RUNNER_LABELS`).
 - No cloud keys live in GitHub: Terraform runs from a workstation; the Taiga deploy impersonates `github-deployer` through Workload Identity Federation (this repo, `main`, `taiga-prod` only); the blog image goes to GHCR with the job's `GITHUB_TOKEN`.
 

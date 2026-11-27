@@ -1,90 +1,64 @@
 output "project_id" {
-  value = var.project_id
+  description = "GCP project ID hosting the GPU Managed Instance Group."
+  value       = var.project_id
 }
 
 output "region" {
-  value = var.region
+  description = "GCP region for VPC, Cloud NAT, and instance template."
+  value       = var.region
 }
 
 output "zone" {
-  value = var.zone
+  description = "GCP zone for the stateful GPU Managed Instance Group."
+  value       = var.zone
 }
 
-output "controller_zone" {
-  value = local.controller_zone
+output "gpu_zone" {
+  description = "Alias for the GCP zone hosting the GPU Managed Instance Group."
+  value       = var.zone
 }
 
-output "controller_name" {
-  value = google_compute_instance.controller.name
+output "vpc_network" {
+  description = "VPC network name attached to the GPU instances."
+  value       = local.vpc_name
 }
 
-output "controller_external_ip" {
-  description = "Fixed regional Static External IP attached to the always-on STANDARD Controller VM."
-  value       = var.enable_external_ip ? google_compute_address.external_ip[0].address : null
+output "use_spot" {
+  description = "Whether the GPU Managed Instance Group provisions Spot VMs (true) or Standard on-demand VMs (false)."
+  value       = var.use_spot
 }
 
-output "controller_internal_ip" {
-  value = google_compute_address.controller_internal_ip.address
+output "mig_name" {
+  description = "Name of the stateful zonal Managed Instance Group."
+  value       = google_compute_instance_group_manager.gpu.name
 }
 
-output "gpu_vm_name" {
-  value = google_compute_instance.gpu_vm.name
+output "instance_template" {
+  description = "Name of the active GCE instance template."
+  value       = google_compute_instance_template.gpu.name
 }
 
-output "gpu_external_ip" {
-  description = "Fixed regional Static External IP attached to the Spot GPU VM (preserved across STOP/start)."
-  value       = var.enable_external_ip ? google_compute_address.gpu_external_ip[0].address : null
+output "service_account_email" {
+  description = "Runtime service account email attached to GPU MIG instances."
+  value       = google_service_account.gpu.email
 }
 
-output "gpu_vm_internal_ip" {
-  value = google_compute_address.gpu_internal_ip.address
+output "runner_secret_id" {
+  description = "Secret Manager secret ID storing the self-hosted runner bootstrap payload."
+  value       = google_secret_manager_secret.runner_bootstrap.secret_id
 }
 
-output "ssh_username" {
-  value = var.enable_os_login ? local.oslogin_username : var.ssh_username
-}
-
-output "local_ssh_username" {
-  value = var.ssh_username
+output "runner_name" {
+  description = "Effective self-hosted GitHub Actions runner name."
+  value       = local.effective_runner_name
 }
 
 output "runner_username" {
-  value = var.runner_username
+  description = "Local non-root OS user executing the GitHub Actions self-hosted runner."
+  value       = var.runner_username
 }
 
-output "ssh_public_key" {
-  value = local.ssh_public_key
-}
-
-output "ssh_private_key" {
-  value     = tls_private_key.ssh.private_key_openssh
-  sensitive = true
-}
-
-output "controller_host_public_key" {
-  value = "${trimspace(tls_private_key.ssh_host_controller.public_key_openssh)} ${local.controller_vm_name}-host"
-}
-
-output "gpu_host_public_key" {
-  value = "${trimspace(tls_private_key.ssh_host_gpu.public_key_openssh)} ${local.gpu_vm_name}-host"
-}
-
-output "known_hosts_entries" {
-  description = "Deterministic known_hosts entries for Controller and GPU VMs."
-  value = join("\n", compact([
-    var.enable_external_ip ? "${google_compute_address.external_ip[0].address} ${trimspace(tls_private_key.ssh_host_controller.public_key_openssh)}" : "",
-    "${google_compute_address.controller_internal_ip.address} ${trimspace(tls_private_key.ssh_host_controller.public_key_openssh)}",
-    var.enable_external_ip ? "${google_compute_address.gpu_external_ip[0].address} ${trimspace(tls_private_key.ssh_host_gpu.public_key_openssh)}" : "",
-    "${google_compute_address.gpu_internal_ip.address} ${trimspace(tls_private_key.ssh_host_gpu.public_key_openssh)}",
-  ]))
-}
-
-output "controller_ssh_command" {
-  description = "Connect to the Controller VM via gcloud IAP tunnel (public ingress disabled)."
-  value       = "gcloud compute ssh ${google_compute_instance.controller.name} --zone=${local.controller_zone} --project=${var.project_id} --tunnel-through-iap"
-}
-
-output "gpu_ssh_command" {
-  description = "Connect directly to the GPU VM via gcloud IAP tunnel (public ingress disabled)."
-  value       = "gcloud compute ssh ${google_compute_instance.gpu_vm.name} --zone=${var.zone} --project=${var.project_id} --tunnel-through-iap"
+output "list_instances_command" {
+  description = "gcloud command to inspect the current managed GPU instance status."
+  value       = "gcloud compute instance-groups managed list-instances ${google_compute_instance_group_manager.gpu.name} --zone=${var.zone} --project=${var.project_id}"
 }

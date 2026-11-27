@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # Syncs `development/.env` to GitHub Repository & `gpu` Environment variables/secrets
-# via `gh`, mints a runner registration token via `gh api` (unless explicit `--token` /
-# `--pat` is provided), and configures the persistent GitHub Actions self-hosted runner
-# on the deployed GPU controller/host (`gcloud compute ssh --tunnel-through-iap` on GCP).
+# via `gh`, and manages GitHub Actions self-hosted runners across providers.
+#
+# Provider modes:
+#   * GCP (`--provider=gcp`, zero SSH):
+#       - Default (`configure`): generates missing `__generate__` secrets locally,
+#         persists them to `development/.env` (mode 0600), and syncs GitHub Repo
+#         Variables + `gpu` Environment Secrets/Variables (`GPU_TARGET_MODE=local`).
+#         The GCP Stateful MIG self-registers its runner on boot via Secret Manager
+#         when provisioned with `./development/scripts/deploy.sh --provider=gcp`.
+#       - `--status`: inspects registered GitHub runners via `gh api` and, if
+#         `gcloud` is available, prints managed instances for the GCP Stateful MIG.
+#       - `--remove`: unregisters matching runner(s) directly via `gh api -X DELETE`.
+#   * Azure / On-Prem / Explicit `--host=USER@IP` (SSH mode):
+#       - Syncs `development/.env` to GitHub and installs/checks/removes the
+#         persistent `actions-runner` systemd service over SSH.
 #
 # Usage:
-#   # Fill in `development/.env`, then run:
-#   ./development/scripts/setup.sh --provider=gcp
-#
-#   # Preview everything without mutating GitHub or connecting over SSH:
 #   ./development/scripts/setup.sh --provider=gcp --dry-run
-#
-#   # Sync `development/.env` -> GitHub Variables/Secrets only (skip VM SSH step):
-#   ./development/scripts/setup.sh --provider=gcp --sync-github-only
-#
-#   # Check status or remove the runner:
+#   ./development/scripts/setup.sh --provider=gcp
 #   ./development/scripts/setup.sh --provider=gcp --status
 #   ./development/scripts/setup.sh --provider=gcp --remove
+#   ./development/scripts/setup.sh --provider=on-prem --host=dev@192.0.2.10
 
 set -euo pipefail
 
@@ -34,7 +39,8 @@ CALLER_SSH_KEY_FILE="${SSH_KEY_FILE:-}"
 CALLER_KNOWN_HOSTS_FILE="${KNOWN_HOSTS_FILE:-}"
 CALLER_PROJECT_ID="${PROJECT_ID:-}"
 CALLER_ZONE="${ZONE:-}"
-CALLER_INSTANCE_NAME="${INSTANCE_NAME:-}"
+CALLER_MIG_NAME="${MIG_NAME:-}"
+CALLER_NAME_PREFIX="${NAME_PREFIX:-}"
 CALLER_REPO_SPEC="${GITHUB_REPO:-}"
 CALLER_RUNNER_TOKEN="${RUNNER_TOKEN:-}"
 CALLER_RUNNER_PAT="${RUNNER_PAT:-}"
@@ -50,7 +56,8 @@ CLI_SSH_KEY_FILE=""
 CLI_KNOWN_HOSTS_FILE=""
 CLI_PROJECT_ID=""
 CLI_ZONE=""
-CLI_INSTANCE_NAME=""
+CLI_MIG_NAME=""
+CLI_NAME_PREFIX=""
 CLI_REPO_SPEC=""
 CLI_GITHUB_ENV=""
 CLI_RUNNER_TOKEN=""
@@ -71,39 +78,62 @@ usage() {
   cat <<'EOF'
 Usage: ./development/scripts/setup.sh --provider=<gcp|azure|on-prem> [options]
 
-Reads configuration from `development/.env` (or --env-file=PATH), syncs GitHub
-Repository & Environment secrets/variables via `gh`, and registers/starts the
-self-hosted runner on the deployed machine.
+Reads configuration from `development/.env` (or --env-file=PATH), generates any
+`__generate__` secrets locally, syncs GitHub Repository & Environment variables
+and secrets via `gh`, and manages self-hosted runner lifecycle.
+
+On GCP (`--provider=gcp` without `--host`), this script is 100% SSH-free:
+  - Default mode syncs GitHub variables/secrets; the Stateful MIG GPU VM
+    self-registers its runner automatically on boot via Secret Manager.
+  - `--status` queries GitHub Actions runners via `gh api` + GCP MIG instances.
+  - `--remove` deletes matching runner registration(s) via `gh api`.
 
 Target Selection:
   --provider=PROVIDER           Target provider: gcp, azure, or on-prem
   --env-file=PATH               Path to .env file (default: development/.env)
-  --project=PROJECT_ID          GCP project override (defaults to active gcloud project)
-  --zone=ZONE                   GCP controller zone override (resolved from Terraform / gcloud when omitted)
-  --instance=NAME               GCP controller VM name override (default: dev-gpu-controller)
-  --host=USER@HOST              Explicit SSH target (for on-prem / azure, or custom SSH override)
-  --ssh-key=PATH                SSH private key path override
-  --known-hosts=PATH            SSH known_hosts file override (non-GCP SSH)
+  --project=PROJECT_ID          GCP project override for `--status` MIG inspection
+  --zone=ZONE                   GCP zone override for `--status` MIG inspection
+  --mig=NAME                    GCP MIG name override for `--status` (default: <prefix>-mig)
+  --name-prefix=PREFIX          GCP resource prefix override (default: dev-gpu)
+  --host=USER@HOST              Explicit SSH target (enables SSH runner setup for on-prem/azure)
+  --ssh-key=PATH                SSH private key path override (SSH mode only)
+  --known-hosts=PATH            SSH known_hosts file override (SSH mode only)
 
 GitHub & Runner Options (override `development/.env`):
   --repo=OWNER/REPO             GitHub repository (default: GITHUB_REPO in .env, else vitorecomp/personal-infra)
   --github-env=NAME             GitHub Environment name for stack secrets/vars (default: gpu)
-  --token=TOKEN                 Explicit runner registration token (auto-minted via `gh api` when omitted)
-  --pat=PAT                     Alternative: Fine-Grained PAT with repo Administration Read/Write
-  --name=NAME                   Runner name in GitHub (default: <provider>-gpu-controller)
-  --labels=L1,L2,...            Comma-separated labels (default: self-hosted,linux,x64,<provider>-gpu)
-  --runner-user=USER            Non-root OS user for the runner service (default: github-runner)
-  --runner-dir=DIR              Runner install directory on target host (default: /opt/actions-runner)
-  --work-dir=DIR                Runner work folder (default: _work)
+  --token=TOKEN                 Explicit runner registration/removal token (SSH mode; auto-minted via `gh api` when omitted)
+  --pat=PAT                     Fine-Grained PAT with repo Administration Read/Write (SSH mode)
+  --name=NAME                   Runner name in GitHub (default: RUNNER_NAME in .env, else <provider>-gpu-runner)
+  --labels=L1,L2,...            Comma-separated runner labels (default: self-hosted,linux,x64,<GPU_RUNNER>)
+  --runner-user=USER            Non-root OS user for the runner service in SSH mode (default: github-runner)
+  --runner-dir=DIR              Runner install directory on SSH host (default: /opt/actions-runner)
+  --work-dir=DIR                Runner work folder on SSH host (default: _work)
 
 Modes & Flags:
-  --sync-github-only            Only sync `development/.env` variables/secrets to GitHub via `gh` (skip VM SSH)
-  --skip-github-sync            Skip `gh variable/secret set` and only configure the runner on the VM
-  --trigger-deploy              Trigger `gh workflow run deploy-gpu-machine.yml` after setup completes
-  --status                      Show current GitHub runner systemd service status on the target machine
-  --remove                      Stop, uninstall systemd service, and unregister the runner via `gh api`
-  --dry-run                     Print resolved `gh` commands and remote setup steps without executing
-  -h, --help                    Show this help message
+  --sync-github-only            Only sync `development/.env` variables/secrets to GitHub via `gh`
+  --skip-github-sync            Skip `gh variable/secret set` (SSH mode: only configure remote runner)
+  --trigger-deploy              Dispatch `gh workflow run deploy-gpu-machine.yml` after setup completes
+  --status                      GCP: query `gh api` runners & MIG instances (zero SSH); SSH mode: check remote systemd service
+  --remove                      GCP: unregister matching runner(s) via `gh api` (zero SSH); SSH mode: stop & remove remote service
+  --dry-run                     Print resolved `gh` / API / SSH steps without mutating anything
+  -h, --help                    Show this help message and exit
+
+Examples:
+  # Preview GitHub sync on GCP (zero SSH, safe read-only):
+  ./development/scripts/setup.sh --provider=gcp --dry-run
+
+  # Generate secrets in development/.env and sync GitHub Repo & `gpu` Environment:
+  ./development/scripts/setup.sh --provider=gcp
+
+  # Check self-hosted runner online/offline state & GCP Stateful MIG instances (zero SSH):
+  ./development/scripts/setup.sh --provider=gcp --status
+
+  # Delete offline/stale GCP runner registration(s) via GitHub API (zero SSH):
+  ./development/scripts/setup.sh --provider=gcp --remove
+
+  # Sync GitHub settings and install the runner over SSH on an on-prem host:
+  ./development/scripts/setup.sh --provider=on-prem --host=dev@192.0.2.10
 EOF
 }
 
@@ -125,8 +155,10 @@ while [[ $# -gt 0 ]]; do
     --project) require_arg "$1" "${2:-}"; CLI_PROJECT_ID="$2"; shift 2 ;;
     --zone=*) CLI_ZONE="${1#*=}"; shift ;;
     --zone) require_arg "$1" "${2:-}"; CLI_ZONE="$2"; shift 2 ;;
-    --instance=*) CLI_INSTANCE_NAME="${1#*=}"; shift ;;
-    --instance) require_arg "$1" "${2:-}"; CLI_INSTANCE_NAME="$2"; shift 2 ;;
+    --mig=*) CLI_MIG_NAME="${1#*=}"; shift ;;
+    --mig) require_arg "$1" "${2:-}"; CLI_MIG_NAME="$2"; shift 2 ;;
+    --name-prefix=*) CLI_NAME_PREFIX="${1#*=}"; shift ;;
+    --name-prefix) require_arg "$1" "${2:-}"; CLI_NAME_PREFIX="$2"; shift 2 ;;
     --host=*) CLI_HOST_TARGET="${1#*=}"; shift ;;
     --host) require_arg "$1" "${2:-}"; CLI_HOST_TARGET="$2"; shift 2 ;;
     --ssh-key=*) CLI_SSH_KEY_FILE="${1#*=}"; shift ;;
@@ -174,7 +206,7 @@ load_dotenv_file() {
     DOTENV["$k"]="$v"
   done < <(
     python3 - "$path" <<'PY'
-import os, sys
+import sys
 
 path = sys.argv[1]
 with open(path, encoding="utf-8") as fh:
@@ -216,8 +248,10 @@ env_or_dotenv() {
 
 expand_tilde() {
   local p="$1"
-  if [[ "$p" == "~/"* ]]; then
-    printf '%s/%s' "$HOME" "${p#~/}"
+  if [[ "$p" == "~" ]]; then
+    printf '%s' "$HOME"
+  elif [[ "$p" == "~/"* ]]; then
+    printf '%s/%s' "$HOME" "${p#"~/"}"
   else
     printf '%s' "$p"
   fi
@@ -225,11 +259,12 @@ expand_tilde() {
 
 PROVIDER="${CLI_PROVIDER:-${CALLER_PROVIDER:-${DOTENV[PROVIDER]:-}}}"
 HOST_TARGET="${CLI_HOST_TARGET:-${CALLER_HOST_TARGET:-${DOTENV[DEPLOY_HOST]:-}}}"
-SSH_KEY_FILE="${CLI_SSH_KEY_FILE:-${CALLER_SSH_KEY_FILE:-${DOTENV[SSH_KEY_FILE]:-}}}"
-KNOWN_HOSTS_FILE="${CLI_KNOWN_HOSTS_FILE:-${CALLER_KNOWN_HOSTS_FILE:-${DOTENV[KNOWN_HOSTS_FILE]:-}}}"
+SSH_KEY_FILE="$(expand_tilde "${CLI_SSH_KEY_FILE:-${CALLER_SSH_KEY_FILE:-${DOTENV[SSH_KEY_FILE]:-}}}")"
+KNOWN_HOSTS_FILE="$(expand_tilde "${CLI_KNOWN_HOSTS_FILE:-${CALLER_KNOWN_HOSTS_FILE:-${DOTENV[KNOWN_HOSTS_FILE]:-}}}")"
 PROJECT_ID="${CLI_PROJECT_ID:-${CALLER_PROJECT_ID:-${DOTENV[PROJECT_ID]:-}}}"
 ZONE="${CLI_ZONE:-${CALLER_ZONE:-${DOTENV[ZONE]:-}}}"
-INSTANCE_NAME="${CLI_INSTANCE_NAME:-${CALLER_INSTANCE_NAME:-${DOTENV[INSTANCE_NAME]:-}}}"
+MIG_NAME="${CLI_MIG_NAME:-${CALLER_MIG_NAME:-${DOTENV[MIG_NAME]:-}}}"
+NAME_PREFIX="${CLI_NAME_PREFIX:-${CALLER_NAME_PREFIX:-${DOTENV[NAME_PREFIX]:-dev-gpu}}}"
 
 REPO_SPEC="${CLI_REPO_SPEC:-${CALLER_REPO_SPEC:-${DOTENV[GITHUB_REPO]:-vitorecomp/personal-infra}}}"
 GITHUB_ENV_NAME="${CLI_GITHUB_ENV:-$(env_or_dotenv GITHUB_ENV gpu)}"
@@ -264,7 +299,7 @@ fi
 EFFECTIVE_TAG="${PROVIDER:-gcp}"
 GPU_RUNNER_VAL="$(env_or_dotenv GPU_RUNNER "${EFFECTIVE_TAG}-gpu")"
 GPU_RUNNER_LABELS_VAL="$(env_or_dotenv GPU_RUNNER_LABELS "")"
-RUNNER_NAME="${RUNNER_NAME:-${EFFECTIVE_TAG}-gpu-controller}"
+RUNNER_NAME="${RUNNER_NAME:-${EFFECTIVE_TAG}-gpu-runner}"
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,x64,${GPU_RUNNER_VAL}}"
 
 # Normalize GitHub owner/repo and full URL
@@ -279,6 +314,7 @@ if [[ -n "$REPO_SPEC" ]]; then
   else
     REPO_PATH="${REPO_SPEC#/}"
     REPO_PATH="${REPO_PATH%/}"
+    REPO_PATH="${REPO_PATH%.git}"
     REPO_URL="https://github.com/${REPO_PATH}"
   fi
 fi
@@ -289,7 +325,7 @@ if [[ "$MODE" == "configure" && -z "$REPO_URL" ]]; then
 fi
 
 # Ensure `gh` authentication (uses GH_TOKEN from development/.env, active `gh auth login`,
-# or falls back to GITHUB_TOKEN in repo root `.env` if needed).
+# or falls back to GH_TOKEN / GITHUB_TOKEN in repo root `.env` if needed).
 ensure_gh_auth() {
   if ! command -v gh >/dev/null 2>&1; then
     echo "[error] GitHub CLI ('gh') not found on PATH. Install with: sudo apt-get install -y gh" >&2
@@ -353,7 +389,7 @@ HARNESS_TUNNEL_HOST_VAL="$(env_or_dotenv HARNESS_TUNNEL_SSH_HOST "")"
 HARNESS_TUNNEL_PORT_VAL="$(env_or_dotenv HARNESS_TUNNEL_SSH_PORT "")"
 HARNESS_TUNNEL_USER_VAL="$(env_or_dotenv HARNESS_TUNNEL_SSH_USER "")"
 
-GPU_TARGET_MODE_VAL="$(env_or_dotenv GPU_TARGET_MODE "auto")"
+GPU_TARGET_MODE_VAL="$(env_or_dotenv GPU_TARGET_MODE "local")"
 GPU_SSH_HOST_VAL="$(env_or_dotenv GPU_SSH_HOST "")"
 GPU_SSH_KEY_FILE_VAL="$(expand_tilde "$(env_or_dotenv GPU_SSH_KEY_FILE "")")"
 GPU_SSH_PRIV_KEY_INLINE="$(env_or_dotenv GPU_SSH_PRIVATE_KEY "")"
@@ -391,7 +427,6 @@ PY
 runner_token_is_fresh() {
   local tok="$1" exp="$2"
   [[ -n "$tok" && "$tok" != "__generate__" ]] || return 1
-  # Explicit CLI `--token` without an expiry timestamp is trusted as-is.
   if [[ -n "$CLI_RUNNER_TOKEN" || -n "$CALLER_RUNNER_TOKEN" ]]; then
     return 0
   fi
@@ -405,7 +440,7 @@ sys.exit(0 if (exp - now).total_seconds() > 300 else 1)
 PY
 }
 
-# Mints a fresh registration token via `gh api` and persists RUNNER_TOKEN + RUNNER_TOKEN_EXPIRES_AT in .env.
+# Mints a fresh registration token via `gh api` (used only in SSH runner setup mode).
 ensure_fresh_runner_registration_token() {
   [[ -z "$RUNNER_PAT_VAL" && -n "$REPO_PATH" ]] || return 0
   if runner_token_is_fresh "$RUNNER_TOKEN_VAL" "$RUNNER_TOKEN_EXPIRES_VAL"; then
@@ -418,11 +453,6 @@ ensure_fresh_runner_registration_token() {
   resp="$(gh api -X POST "repos/${REPO_PATH}/actions/runners/registration-token")"
   RUNNER_TOKEN_VAL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["token"])' "$resp")"
   RUNNER_TOKEN_EXPIRES_VAL="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("expires_at",""))' "$resp")"
-  if [[ -f "$ENV_FILE" && -n "$RUNNER_TOKEN_VAL" ]]; then
-    persist_key_in_dotenv "$ENV_FILE" "RUNNER_TOKEN" "$RUNNER_TOKEN_VAL"
-    [[ -n "$RUNNER_TOKEN_EXPIRES_VAL" ]] && persist_key_in_dotenv "$ENV_FILE" "RUNNER_TOKEN_EXPIRES_AT" "$RUNNER_TOKEN_EXPIRES_VAL"
-    echo "[gh] Saved RUNNER_TOKEN (expires ${RUNNER_TOKEN_EXPIRES_VAL}) to $ENV_FILE (mode 0600)."
-  fi
 }
 
 sync_github_settings() {
@@ -476,7 +506,7 @@ sync_github_settings() {
     fi
   fi
 
-  # Persist default runner identity & mint/refresh RUNNER_TOKEN in `development/.env`.
+  # Persist default runner identity keys in `development/.env` if empty.
   if [[ -f "$ENV_FILE" ]]; then
     [[ -z "${DOTENV[RUNNER_NAME]:-}" ]] && persist_key_in_dotenv "$ENV_FILE" "RUNNER_NAME" "$RUNNER_NAME"
     [[ -z "${DOTENV[RUNNER_LABELS]:-}" ]] && persist_key_in_dotenv "$ENV_FILE" "RUNNER_LABELS" "$RUNNER_LABELS"
@@ -485,7 +515,6 @@ sync_github_settings() {
       persist_key_in_dotenv "$ENV_FILE" "GPU_RUNNER_LABELS" "$GPU_RUNNER_LABELS_VAL"
     fi
   fi
-  ensure_fresh_runner_registration_token
 
   # Ensure the target GitHub Environment exists without clobbering existing protection rules.
   if ! gh api "repos/${REPO_PATH}/environments/${GITHUB_ENV_NAME}" >/dev/null 2>&1; then
@@ -576,62 +605,202 @@ gcloud_config_value() {
   printf '%s' "$val"
 }
 
-TRANSPORT="ssh"
-GCP_PROJECT=""
-GCP_CTRL_NAME=""
-GCP_CTRL_ZONE=""
-
-if [[ "$PROVIDER" == "gcp" && -z "$HOST_TARGET" ]]; then
-  TRANSPORT="gcloud"
-  INFRA_DIR="$DEV_ROOT/infra/gcp"
+resolve_gcp_mig_metadata() {
+  local infra_dir="$DEV_ROOT/infra/gcp"
   GCP_PROJECT="${PROJECT_ID:-$(gcloud_config_value project)}"
-  GCP_CTRL_NAME="$INSTANCE_NAME"
-  GCP_CTRL_ZONE="$ZONE"
+  GCP_MIG_NAME="$MIG_NAME"
+  GCP_MIG_ZONE="$ZONE"
 
-  tf_bin=()
+  local -a tf_bin=()
   if command -v terraform >/dev/null 2>&1; then
-    tf_bin=(terraform -chdir="$INFRA_DIR")
+    tf_bin=(terraform -chdir="$infra_dir")
   elif command -v mise >/dev/null 2>&1; then
-    tf_bin=(mise exec --cd "$REPO_ROOT" -- terraform -chdir="$INFRA_DIR")
+    tf_bin=(mise exec --cd "$REPO_ROOT" -- terraform -chdir="$infra_dir")
   fi
 
-  if [[ ${#tf_bin[@]} -gt 0 && -d "$INFRA_DIR/.terraform" ]]; then
-    if [[ -n "$GCP_PROJECT" ]]; then
-      "${tf_bin[@]}" workspace select "$GCP_PROJECT" >/dev/null 2>&1 || true
-    fi
-    [[ -z "$GCP_PROJECT" ]] && GCP_PROJECT="$("${tf_bin[@]}" output -raw project_id 2>/dev/null || true)"
-    [[ -z "$GCP_CTRL_NAME" ]] && GCP_CTRL_NAME="$("${tf_bin[@]}" output -raw controller_name 2>/dev/null || true)"
-    [[ -z "$GCP_CTRL_ZONE" ]] && GCP_CTRL_ZONE="$("${tf_bin[@]}" output -raw controller_zone 2>/dev/null || true)"
-    if [[ -z "$RUNNER_USER" ]]; then
-      RUNNER_USER="$("${tf_bin[@]}" output -raw runner_username 2>/dev/null || true)"
-    fi
+  if [[ ${#tf_bin[@]} -gt 0 && -d "$infra_dir/.terraform" ]]; then
+    local -a tf_env=()
+    [[ -n "$GCP_PROJECT" ]] && tf_env=(env "TF_WORKSPACE=${GCP_PROJECT}")
+    [[ -z "$GCP_PROJECT" ]] && GCP_PROJECT="$("${tf_env[@]}" "${tf_bin[@]}" output -raw project_id 2>/dev/null || true)"
+    [[ -z "$GCP_MIG_NAME" ]] && GCP_MIG_NAME="$("${tf_env[@]}" "${tf_bin[@]}" output -raw mig_name 2>/dev/null || true)"
+    [[ -z "$GCP_MIG_ZONE" ]] && GCP_MIG_ZONE="$("${tf_env[@]}" "${tf_bin[@]}" output -raw zone 2>/dev/null || "${tf_env[@]}" "${tf_bin[@]}" output -raw gpu_zone 2>/dev/null || true)"
   fi
 
-  GCP_CTRL_NAME="${GCP_CTRL_NAME:-dev-gpu-controller}"
+  GCP_MIG_NAME="${GCP_MIG_NAME:-${NAME_PREFIX}-mig}"
 
-  if [[ -z "$GCP_CTRL_ZONE" && -n "$GCP_PROJECT" ]] && ! $DRY_RUN && command -v gcloud >/dev/null 2>&1; then
-    GCP_CTRL_ZONE="$(gcloud compute instances list \
+  if [[ -z "$GCP_MIG_ZONE" && -n "$GCP_PROJECT" ]] && ! $DRY_RUN && command -v gcloud >/dev/null 2>&1; then
+    GCP_MIG_ZONE="$(gcloud compute instance-groups managed list \
       --project="$GCP_PROJECT" \
-      --filter="name=${GCP_CTRL_NAME}" \
+      --filter="name=${GCP_MIG_NAME}" \
       --format="value(zone.basename())" 2>/dev/null | head -n 1 || true)"
   fi
+}
 
-  # Persist resolved GCP target metadata into `development/.env` when empty.
-  if ! $DRY_RUN && [[ -f "$ENV_FILE" && "$MODE" == "configure" ]]; then
-    [[ -z "${DOTENV[PROJECT_ID]:-}" && -n "$GCP_PROJECT" ]] && persist_key_in_dotenv "$ENV_FILE" "PROJECT_ID" "$GCP_PROJECT"
-    [[ -z "${DOTENV[ZONE]:-}" && -n "$GCP_CTRL_ZONE" ]] && persist_key_in_dotenv "$ENV_FILE" "ZONE" "$GCP_CTRL_ZONE"
-    [[ -z "${DOTENV[INSTANCE_NAME]:-}" && -n "$GCP_CTRL_NAME" ]] && persist_key_in_dotenv "$ENV_FILE" "INSTANCE_NAME" "$GCP_CTRL_NAME"
+gcp_zero_ssh_status() {
+  if [[ -z "$REPO_PATH" ]]; then
+    echo "[error] GITHUB_REPO (in development/.env or --repo=owner/repo) is required for --status." >&2
+    exit 1
+  fi
+  ensure_gh_auth
+
+  echo "[gh] Querying self-hosted runners on ${REPO_PATH} (filter: name='${RUNNER_NAME}' or label='${GPU_RUNNER_VAL}')..."
+  local runners_json
+  runners_json="$(gh api --paginate "repos/${REPO_PATH}/actions/runners")"
+
+  python3 - "$RUNNER_NAME" "$GPU_RUNNER_VAL" "$REPO_PATH" 3<<<"$runners_json" <<'PY'
+import json, os, sys
+
+target_name, target_label, repo = sys.argv[1], sys.argv[2], sys.argv[3]
+with os.fdopen(3, encoding="utf-8") as fh:
+    raw = fh.read()
+dec = json.JSONDecoder()
+pos = 0
+runners = []
+while pos < len(raw):
+    while pos < len(raw) and raw[pos].isspace():
+        pos += 1
+    if pos >= len(raw):
+        break
+    obj, end = dec.raw_decode(raw, pos)
+    pos = end
+    if isinstance(obj, dict) and isinstance(obj.get("runners"), list):
+        runners.extend(obj["runners"])
+
+def labels_of(r):
+    return [lbl.get("name", "") for lbl in (r.get("labels") or []) if isinstance(lbl, dict)]
+
+def matches(r):
+    if r.get("name") == target_name:
+        return True
+    if target_label and target_label in labels_of(r):
+        return True
+    return False
+
+matched = [r for r in runners if matches(r)]
+others = [r for r in runners if not matches(r)]
+
+def print_table(rows):
+    headers = ("ID", "NAME", "STATUS", "BUSY", "LABELS")
+    data = [
+        (
+            str(r.get("id", "")),
+            str(r.get("name", "")),
+            str(r.get("status", "")),
+            "yes" if r.get("busy") else "no",
+            ",".join(labels_of(r)),
+        )
+        for r in rows
+    ]
+    widths = [max(len(headers[i]), *(len(row[i]) for row in data)) for i in range(len(headers))]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*headers))
+    print(fmt.format(*("-" * w for w in widths)))
+    for row in data:
+        print(fmt.format(*row))
+
+if matched:
+    print_table(matched)
+else:
+    print(f"[gh] No self-hosted runners matching name='{target_name}' or label='{target_label}' found on {repo}.")
+    if others:
+        print("[gh] Other runners registered on repository:")
+        print_table(others)
+PY
+
+  if command -v gcloud >/dev/null 2>&1; then
+    resolve_gcp_mig_metadata
+    if [[ -n "$GCP_PROJECT" && -n "$GCP_MIG_NAME" && -n "$GCP_MIG_ZONE" ]]; then
+      echo ""
+      echo "[gcp] Managed instances for MIG '${GCP_MIG_NAME}' (project=${GCP_PROJECT}, zone=${GCP_MIG_ZONE}):"
+      gcloud compute instance-groups managed list-instances "$GCP_MIG_NAME" \
+        --zone="$GCP_MIG_ZONE" \
+        --project="$GCP_PROJECT" || true
+    elif [[ -n "$GCP_PROJECT" ]]; then
+      echo ""
+      echo "[gcp] No Stateful MIG named '${GCP_MIG_NAME}' found in project '${GCP_PROJECT}' (pass --zone or deploy via ./development/scripts/deploy.sh --provider=gcp)."
+    fi
+  fi
+}
+
+gcp_zero_ssh_remove() {
+  if [[ -z "$REPO_PATH" ]]; then
+    echo "[error] GITHUB_REPO (in development/.env or --repo=owner/repo) is required for --remove." >&2
+    exit 1
+  fi
+  ensure_gh_auth
+
+  echo "[gh] Looking up self-hosted runners on ${REPO_PATH} matching name='${RUNNER_NAME}' or label='${GPU_RUNNER_VAL}'..."
+  local runners_json
+  runners_json="$(gh api --paginate "repos/${REPO_PATH}/actions/runners")"
+
+  local matched_lines
+  matched_lines="$(python3 - "$RUNNER_NAME" "$GPU_RUNNER_VAL" 3<<<"$runners_json" <<'PY'
+import json, os, sys
+
+target_name, target_label = sys.argv[1], sys.argv[2]
+with os.fdopen(3, encoding="utf-8") as fh:
+    raw = fh.read()
+dec = json.JSONDecoder()
+pos = 0
+runners = []
+while pos < len(raw):
+    while pos < len(raw) and raw[pos].isspace():
+        pos += 1
+    if pos >= len(raw):
+        break
+    obj, end = dec.raw_decode(raw, pos)
+    pos = end
+    if isinstance(obj, dict) and isinstance(obj.get("runners"), list):
+        runners.extend(obj["runners"])
+
+for r in runners:
+    rname = str(r.get("name", ""))
+    lbls = [lbl.get("name", "") for lbl in (r.get("labels") or []) if isinstance(lbl, dict)]
+    if rname == target_name or (target_label and target_label in lbls):
+        rid = str(r.get("id", ""))
+        rstatus = str(r.get("status", ""))
+        rbusy = "true" if r.get("busy") else "false"
+        print(f"{rid}\t{rname}\t{rstatus}\t{rbusy}")
+PY
+)"
+
+  if [[ -z "$matched_lines" ]]; then
+    echo "[gh] No matching self-hosted runners found on ${REPO_PATH}; nothing to remove."
+    return 0
   fi
 
-  if ! $SYNC_GITHUB_ONLY && [[ -z "$GCP_PROJECT" || -z "$GCP_CTRL_ZONE" ]]; then
-    if $DRY_RUN; then
-      GCP_PROJECT="${GCP_PROJECT:-<gcloud-active-project>}"
-      GCP_CTRL_ZONE="${GCP_CTRL_ZONE:-europe-west4-a}"
-    else
-      echo "[error] Could not resolve GCP project or controller VM zone (project='${GCP_PROJECT:-<unset>}', instance='${GCP_CTRL_NAME}')." >&2
-      echo "[error] Deploy first with './development/scripts/deploy.sh --provider=gcp' or pass --project / --zone." >&2
-      exit 1
+  local rid rname rstatus rbusy failed=0
+  while IFS=$'\t' read -r rid rname rstatus rbusy; do
+    [[ -z "$rid" ]] && continue
+    if [[ "$rbusy" == "true" ]]; then
+      echo "[warn] Runner id=${rid} name='${rname}' is currently busy; skipping deletion (wait for job completion or cancel it first)." >&2
+      failed=1
+      continue
     fi
+    if gh api -X DELETE "repos/${REPO_PATH}/actions/runners/${rid}" >/dev/null; then
+      echo "[gh] Removed runner registration: id=${rid} name='${rname}' (status was ${rstatus})."
+    else
+      echo "[error] Failed to delete runner id=${rid} name='${rname}' via GitHub API." >&2
+      failed=1
+    fi
+  done <<< "$matched_lines"
+
+  echo "[gcp] Note: To prevent the Stateful MIG VM from re-registering on reboot, destroy or scale down the MIG with './development/scripts/deploy.sh --provider=gcp --destroy'."
+  return "$failed"
+}
+
+# GCP without explicit --host is 100% SSH-free (MIG self-registers via Secret Manager).
+GCP_ZERO_SSH=false
+TRANSPORT="ssh"
+GCP_PROJECT=""
+GCP_MIG_NAME=""
+GCP_MIG_ZONE=""
+
+if [[ "$PROVIDER" == "gcp" && -z "$HOST_TARGET" ]]; then
+  GCP_ZERO_SSH=true
+  TRANSPORT="github-api"
+  if [[ "$MODE" == "status" ]] && $DRY_RUN; then
+    resolve_gcp_mig_metadata
   fi
 elif ! $SYNC_GITHUB_ONLY; then
   if [[ -n "$PROVIDER" ]]; then
@@ -640,7 +809,7 @@ elif ! $SYNC_GITHUB_ONLY; then
     [[ -z "$KNOWN_HOSTS_FILE" && -f "$INFRA_DIR/known_hosts" ]] && KNOWN_HOSTS_FILE="$INFRA_DIR/known_hosts"
 
     if [[ -z "$HOST_TARGET" && -d "$INFRA_DIR/.terraform" ]] && command -v terraform >/dev/null 2>&1; then
-      host_ip="$(terraform -chdir="$INFRA_DIR" output -raw controller_external_ip 2>/dev/null || terraform -chdir="$INFRA_DIR" output -raw external_ip 2>/dev/null || true)"
+      host_ip="$(terraform -chdir="$INFRA_DIR" output -raw external_ip 2>/dev/null || terraform -chdir="$INFRA_DIR" output -raw controller_external_ip 2>/dev/null || true)"
       ssh_user="$(terraform -chdir="$INFRA_DIR" output -raw ssh_username 2>/dev/null || true)"
       [[ -n "$host_ip" && -n "$ssh_user" ]] && HOST_TARGET="${ssh_user}@${host_ip}"
     fi
@@ -648,7 +817,7 @@ elif ! $SYNC_GITHUB_ONLY; then
 
   if [[ -z "$HOST_TARGET" ]]; then
     if $DRY_RUN; then
-      HOST_TARGET="<deployed-${EFFECTIVE_TAG}-controller-user@ip>"
+      HOST_TARGET="<deployed-${EFFECTIVE_TAG}-host-user@ip>"
     else
       echo "[error] Could not resolve target SSH host for provider '${PROVIDER:-custom}'. Pass --host=USER@IP." >&2
       exit 1
@@ -658,30 +827,15 @@ fi
 
 RUNNER_USER="${RUNNER_USER:-github-runner}"
 
-GCLOUD_SSH_CMD=()
 SSH_ARGS=()
-if ! $SYNC_GITHUB_ONLY; then
-  if [[ "$TRANSPORT" == "gcloud" ]]; then
-    GCLOUD_SSH_CMD=(
-      gcloud compute ssh "$GCP_CTRL_NAME"
-      --project="$GCP_PROJECT"
-      --zone="$GCP_CTRL_ZONE"
-      --tunnel-through-iap
-      --quiet
-      --strict-host-key-checking=no
-    )
-    if [[ -n "$SSH_KEY_FILE" && -f "$SSH_KEY_FILE" && -f "${SSH_KEY_FILE}.pub" ]]; then
-      GCLOUD_SSH_CMD+=(--ssh-key-file="$SSH_KEY_FILE")
-    fi
-  else
-    SSH_ARGS=(-o ConnectTimeout=15 -o ServerAliveInterval=30)
-    [[ -n "$SSH_KEY_FILE" ]] && SSH_ARGS+=(-i "$SSH_KEY_FILE" -o IdentitiesOnly=yes)
-    [[ -n "$KNOWN_HOSTS_FILE" ]] && SSH_ARGS+=(-o "UserKnownHostsFile=$KNOWN_HOSTS_FILE" -o StrictHostKeyChecking=yes)
-  fi
+if ! $SYNC_GITHUB_ONLY && ! $GCP_ZERO_SSH; then
+  SSH_ARGS=(-o ConnectTimeout=15 -o ServerAliveInterval=30)
+  [[ -n "$SSH_KEY_FILE" ]] && SSH_ARGS+=(-i "$SSH_KEY_FILE" -o IdentitiesOnly=yes)
+  [[ -n "$KNOWN_HOSTS_FILE" ]] && SSH_ARGS+=(-o "UserKnownHostsFile=$KNOWN_HOSTS_FILE" -o StrictHostKeyChecking=yes)
 fi
 
 if $DRY_RUN; then
-  echo "[dry-run] Mode:                 $MODE (sync_github=$SYNC_GITHUB, sync_github_only=$SYNC_GITHUB_ONLY)"
+  echo "[dry-run] Provider / Mode:      ${PROVIDER:-custom} / $MODE (sync_github=$SYNC_GITHUB, sync_github_only=$SYNC_GITHUB_ONLY, gcp_zero_ssh=$GCP_ZERO_SSH)"
   echo "[dry-run] Env File:             $ENV_FILE ($( [[ -f "$ENV_FILE" ]] && echo "loaded" || echo "not present; using defaults/CLI" ))"
   echo "[dry-run] GitHub Repo / Env:    ${REPO_PATH:-$REPO_URL} / $GITHUB_ENV_NAME"
   if $SYNC_GITHUB && [[ "$MODE" == "configure" ]]; then
@@ -691,35 +845,49 @@ if $DRY_RUN; then
     echo "[dry-run]   gh secret set LITELLM_MASTER_KEY --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted / auto-generated if __generate__>)"
     [[ -n "$HF_TOKEN_VAL" ]] && echo "[dry-run]   gh secret set HF_TOKEN --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"
     [[ -n "$TUNNEL_KEY_FILE_VAL" || -n "$TUNNEL_PRIV_KEY_INLINE" ]] && echo "[dry-run]   gh secret set TUNNEL_SSH_PRIVATE_KEY --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"
-    echo "[dry-run]   gh variable set ENABLE_REVERSE_TUNNELS, TUNNEL_*, REMOTE_* --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME"
+    [[ -n "$GPU_SSH_KEY_FILE_VAL" || -n "$GPU_SSH_PRIV_KEY_INLINE" ]] && echo "[dry-run]   gh secret set GPU_SSH_PRIVATE_KEY --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"
+    echo "[dry-run]   gh variable set ENABLE_REVERSE_TUNNELS, TUNNEL_*, REMOTE_*, GPU_TARGET_MODE=${GPU_TARGET_MODE_VAL} --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME"
   fi
-  if ! $SYNC_GITHUB_ONLY; then
-    if [[ "$TRANSPORT" == "gcloud" ]]; then
-      echo "[dry-run] SSH Transport:        gcloud compute ssh $GCP_CTRL_NAME --project=$GCP_PROJECT --zone=$GCP_CTRL_ZONE --tunnel-through-iap"
-    else
-      echo "[dry-run] SSH Transport:        ssh $HOST_TARGET"
-    fi
+  if $GCP_ZERO_SSH; then
+    echo "[dry-run] Transport:            none (GCP zero-SSH mode; Stateful MIG self-registers via Secret Manager)"
+    case "$MODE" in
+      configure)
+        echo "[dry-run] GCP Runner Setup:     Self-registered automatically on boot by './development/scripts/deploy.sh --provider=gcp' (runner=${RUNNER_NAME}, labels=${RUNNER_LABELS})"
+        ;;
+      status)
+        echo "[dry-run] Status Commands (zero SSH):"
+        echo "[dry-run]   gh api --paginate repos/${REPO_PATH:-<repo>}/actions/runners  # filter: name=${RUNNER_NAME} or label=${GPU_RUNNER_VAL}"
+        echo "[dry-run]   gcloud compute instance-groups managed list-instances ${GCP_MIG_NAME:-${NAME_PREFIX}-mig} --zone=${GCP_MIG_ZONE:-<mig-zone>} --project=${GCP_PROJECT:-<gcloud-active-project>}"
+        ;;
+      remove)
+        echo "[dry-run] Remove Commands (zero SSH):"
+        echo "[dry-run]   gh api --paginate repos/${REPO_PATH:-<repo>}/actions/runners  # find matching name=${RUNNER_NAME} or label=${GPU_RUNNER_VAL}"
+        echo "[dry-run]   gh api -X DELETE repos/${REPO_PATH:-<repo>}/actions/runners/<runner_id>"
+        ;;
+    esac
+  elif ! $SYNC_GITHUB_ONLY; then
+    echo "[dry-run] SSH Transport:        ssh $HOST_TARGET"
     echo "[dry-run] Runner User / Dir:    $RUNNER_USER / $RUNNER_DIR"
     if [[ "$MODE" == "configure" ]]; then
       echo "[dry-run] Runner Name / Labels: $RUNNER_NAME / $RUNNER_LABELS"
       if [[ -n "$RUNNER_PAT_VAL" ]]; then
         echo "[dry-run] Runner Auth:          --pat (<redacted>)"
-      elif [[ -n "$RUNNER_TOKEN_VAL" ]]; then
+      elif [[ -n "$RUNNER_TOKEN_VAL" && "$RUNNER_TOKEN_VAL" != "__generate__" ]]; then
         echo "[dry-run] Runner Auth:          --token (<redacted>)"
       else
         echo "[dry-run] Runner Auth:          gh api -X POST repos/${REPO_PATH:-<repo>}/actions/runners/registration-token -q .token"
       fi
-      echo "[dry-run] Remote VM Steps:"
+      echo "[dry-run] Remote SSH Steps:"
       echo "[dry-run]   1. Ensure user '$RUNNER_USER', '$RUNNER_DIR', OS/.NET runner packages, and actions-runner binary exist"
       echo "[dry-run]   2. Stop/uninstall any prior systemd runner unit in '$RUNNER_DIR' if re-registering"
       echo "[dry-run]   3. Run 'sudo -u $RUNNER_USER $RUNNER_DIR/config.sh --unattended --url $REPO_URL --name $RUNNER_NAME --labels $RUNNER_LABELS --work $WORK_DIR --replace'"
       echo "[dry-run]   4. Run 'sudo ./svc.sh install $RUNNER_USER && sudo ./svc.sh start && sudo ./svc.sh status'"
     elif [[ "$MODE" == "remove" ]]; then
-      echo "[dry-run] Remote VM Steps:"
+      echo "[dry-run] Remote SSH Steps:"
       echo "[dry-run]   1. Auto-mint remove token via 'gh api -X POST repos/${REPO_PATH:-<repo>}/actions/runners/remove-token' (if --token/--pat omitted)"
       echo "[dry-run]   2. Stop & uninstall systemd runner service in '$RUNNER_DIR' and run './config.sh remove'"
     else
-      echo "[dry-run] Remote VM Steps:"
+      echo "[dry-run] Remote SSH Steps:"
       echo "[dry-run]   Check '$RUNNER_DIR/svc.sh status'"
     fi
   fi
@@ -729,12 +897,48 @@ if $DRY_RUN; then
   exit 0
 fi
 
+# ------------------------------------------------------------------------------
+# GCP Zero-SSH Path (default configure / --status / --remove)
+# ------------------------------------------------------------------------------
+if $GCP_ZERO_SSH; then
+  case "$MODE" in
+    status)
+      gcp_zero_ssh_status
+      exit 0
+      ;;
+    remove)
+      gcp_zero_ssh_remove
+      exit $?
+      ;;
+    configure)
+      if $SYNC_GITHUB; then
+        sync_github_settings
+      fi
+      echo ""
+      echo "[gcp] GitHub variables & '${GITHUB_ENV_NAME}' environment secrets synced for ${REPO_PATH} (GPU_TARGET_MODE=${GPU_TARGET_MODE_VAL})."
+      echo "[gcp] Zero-SSH mode: the GCP Stateful MIG GPU VM self-registers runner '${RUNNER_NAME}' (${RUNNER_LABELS}) automatically on boot via Secret Manager."
+      echo "[gcp] Provision / update the MIG: ./development/scripts/deploy.sh --provider=gcp"
+      echo "[gcp] Check runner & MIG status:  ./development/scripts/setup.sh --provider=gcp --status"
+      if [[ "${TRIGGER_DEPLOY,,}" == "true" && -n "$REPO_PATH" ]]; then
+        ensure_gh_auth
+        echo "[gh] Triggering workflow deploy-gpu-machine.yml on ${REPO_PATH}..."
+        gh workflow run deploy-gpu-machine.yml --repo "$REPO_PATH"
+      fi
+      exit 0
+      ;;
+  esac
+fi
+
+# ------------------------------------------------------------------------------
+# SSH Path (azure / on-prem / explicit --host=USER@IP)
+# ------------------------------------------------------------------------------
 if $SYNC_GITHUB && [[ "$MODE" == "configure" ]]; then
   sync_github_settings
 fi
 
 if $SYNC_GITHUB_ONLY; then
-  if [[ "${TRIGGER_DEPLOY,,}" == "true" ]]; then
+  if [[ "${TRIGGER_DEPLOY,,}" == "true" && -n "$REPO_PATH" ]]; then
+    ensure_gh_auth
     echo "[gh-sync] Triggering deploy-gpu-machine.yml on ${REPO_PATH}..."
     gh workflow run deploy-gpu-machine.yml --repo "$REPO_PATH"
   fi
@@ -743,21 +947,12 @@ fi
 
 run_remote_command() {
   local cmd="$1"
-  if [[ "$TRANSPORT" == "gcloud" ]]; then
-    gcloud services enable iap.googleapis.com --project="$GCP_PROJECT" --quiet >/dev/null 2>&1 || true
-    "${GCLOUD_SSH_CMD[@]}" --command="$cmd"
-  else
-    ssh "${SSH_ARGS[@]}" "$HOST_TARGET" "$cmd"
-  fi
+  ssh "${SSH_ARGS[@]}" "$HOST_TARGET" "$cmd"
 }
 
 run_remote_stdin_script() {
-  if [[ "$TRANSPORT" == "gcloud" ]]; then
-    gcloud services enable iap.googleapis.com --project="$GCP_PROJECT" --quiet >/dev/null 2>&1 || true
-    "${GCLOUD_SSH_CMD[@]}" --ssh-flag="-T" --command="bash -s"
-  else
-    ssh "${SSH_ARGS[@]}" "$HOST_TARGET" "bash -s"
-  fi
+  echo "[ssh] Connecting via: ssh ${SSH_ARGS[*]} $HOST_TARGET 'bash -s'"
+  ssh "${SSH_ARGS[@]}" "$HOST_TARGET" "bash -s"
 }
 
 if [[ "$MODE" == "status" ]]; then
@@ -801,6 +996,7 @@ fi
   printf 'REMOTE_WORK_DIR=%q\n' "$WORK_DIR"
   cat <<'REMOTE_EOF'
 set -euo pipefail
+echo "[host] Connected to $(hostname) as $(whoami)."
 
 if [[ "$REMOTE_MODE" == "remove" ]]; then
   if [[ ! -d "$REMOTE_RUNNER_DIR" ]]; then
@@ -824,6 +1020,7 @@ if [[ "$REMOTE_MODE" == "remove" ]]; then
 fi
 
 # Wait briefly if cloud-init / startup script is still finishing initial package setup.
+echo "[host] Ensuring runner dependencies and directory ($REMOTE_RUNNER_DIR)..."
 for _ in $(seq 1 24); do
   if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
     break
@@ -831,7 +1028,6 @@ for _ in $(seq 1 24); do
   sleep 5
 done
 
-# Ensure required OS/.NET packages exist (no-op on GCP where controller_startup_script pre-installs them).
 RUNNER_PACKAGES=(
   ca-certificates curl git git-lfs jq libicu-dev libkrb5-3
   libssl-dev rsync tar unzip xz-utils zip zlib1g
@@ -843,13 +1039,6 @@ fi
 
 if ! id -u "$REMOTE_RUNNER_USER" >/dev/null 2>&1; then
   sudo useradd -m -s /bin/bash "$REMOTE_RUNNER_USER"
-fi
-if [[ -f /etc/gpu-ssh/id_ed25519 ]]; then
-  RUNNER_HOME="$(getent passwd "$REMOTE_RUNNER_USER" | cut -d: -f6)"
-  sudo install -d -m 0700 -o "$REMOTE_RUNNER_USER" -g "$REMOTE_RUNNER_USER" "$RUNNER_HOME/.ssh"
-  sudo cp /etc/gpu-ssh/id_ed25519 "$RUNNER_HOME/.ssh/gpu_ed25519"
-  sudo chown "$REMOTE_RUNNER_USER:$REMOTE_RUNNER_USER" "$RUNNER_HOME/.ssh/gpu_ed25519"
-  sudo chmod 0600 "$RUNNER_HOME/.ssh/gpu_ed25519"
 fi
 
 sudo install -d -m 0755 -o "$REMOTE_RUNNER_USER" -g "$REMOTE_RUNNER_USER" "$REMOTE_RUNNER_DIR"
@@ -886,6 +1075,7 @@ else
   AUTH_ARGS=(--token "$REMOTE_TOKEN")
 fi
 
+echo "[host] Registering runner '$REMOTE_RUNNER_NAME' ($REMOTE_RUNNER_LABELS) against $REMOTE_REPO_URL..."
 sudo -u "$REMOTE_RUNNER_USER" ./config.sh \
   --unattended \
   --url "$REMOTE_REPO_URL" \

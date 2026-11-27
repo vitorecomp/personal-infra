@@ -3,11 +3,9 @@
 # the target GPU machine from a self-hosted GitHub Actions runner (or locally).
 #
 # Supports three target modes (`--target-mode` / `GPU_TARGET_MODE`):
-#   * `controller-ssh`: runs on the always-on Controller VM (`dev-gpu-controller`),
-#                       waits for Spot GPU VM SSH (`gpu-wait-ssh`), syncs files,
-#                       and deploys over `gpu-ssh` (`gpu` host alias).
+#   * `local`:          deploys directly on the current GPU host (default on GCP Stateful MIG runner).
 #   * `ssh`:            syncs and deploys over standard SSH to `GPU_SSH_HOST`.
-#   * `local`:          deploys directly on the current host (e.g. on-prem GPU runner).
+#   * `controller-ssh`: syncs and deploys over `/usr/local/bin/gpu-ssh` (`gpu` host alias) if present.
 #   * `auto` (default): picks `controller-ssh` if `/usr/local/bin/gpu-ssh` exists,
 #                       else `ssh` if `GPU_SSH_HOST` is set, else `local`.
 #
@@ -31,13 +29,27 @@ usage() {
   cat <<'EOF'
 Usage: ./development/scripts/deploy_gpu_stack.sh [options]
 
+Deploys `development/gpu-dev-machine` (Ray Serve DeepSeek-V4.1-Flash, LiteLLM,
+DeepSeek Harness, and optional reverse SSH tunnels) via Podman + podman-compose.
+
 Options:
-  --target-mode=MODE      Target execution mode: auto, controller-ssh, ssh, or local (default: auto)
+  --target-mode=MODE      Execution mode: auto, local, ssh, or controller-ssh (default: auto -> local on GPU runner)
   --ssh-host=USER@HOST    Target SSH host when --target-mode=ssh (or env GPU_SSH_HOST)
-  --stack-dir=PATH        Destination directory on GPU machine (default: /mnt/data/stacks/gpu-dev-machine)
-  --wait-timeout=SECONDS  Max seconds to wait for Spot GPU VM SSH in controller-ssh mode (default: 600)
-  --dry-run               Print resolved target, synced env key names, and commands without mutating state
-  -h, --help              Show this help message
+  --stack-dir=PATH        Destination stack directory on GPU host (default: /mnt/data/stacks/gpu-dev-machine)
+  --wait-timeout=SECONDS  Max seconds to wait for GPU SSH in controller-ssh mode (default: 600)
+  --dry-run               Print resolved target, synced env key names (never values), and commands without executing
+  -h, --help              Show this help message and exit
+
+Environment Secrets / Variables (supplied by `.github/workflows/deploy-gpu-machine.yml`):
+  LITELLM_MASTER_KEY      Required Bearer token securing LiteLLM (:4000) and DeepSeek Harness
+  HF_TOKEN                Optional Hugging Face read token for model weight downloads
+  ENABLE_REVERSE_TUNNELS  Set true to start litellm-tunnel and deepseek-harness-tunnel (default: false)
+  TUNNEL_SSH_HOST/USER    Destination host & user when reverse SSH tunnels are enabled
+  TUNNEL_SSH_PRIVATE_KEY  OpenSSH private key content for reverse SSH tunnels
+
+Examples:
+  LITELLM_MASTER_KEY=sk-test ./development/scripts/deploy_gpu_stack.sh --dry-run
+  ./development/scripts/deploy_gpu_stack.sh --target-mode=local
 EOF
 }
 
@@ -224,11 +236,20 @@ if ! dpkg -s "${HOST_PKGS[@]}" >/dev/null 2>&1; then
   sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y -qq --no-install-recommends "${HOST_PKGS[@]}"
 fi
 
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "[bootstrap] Installing NVIDIA GPU driver..."
+if ! nvidia-smi >/dev/null 2>&1; then
+  echo "[bootstrap] Installing Ubuntu prebuilt NVIDIA Open Kernel GPU driver..."
   sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 update -qq
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y -qq ubuntu-drivers-common
-  sudo ubuntu-drivers install --gpgpu || sudo ubuntu-drivers install
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y -qq --no-install-recommends ubuntu-drivers-common
+  OPEN_DRV="$(sudo ubuntu-drivers list --gpgpu 2>/dev/null | tr ',' '\n' | grep -Eo 'nvidia-driver-[0-9]+(-server)?-open' | sort -V | tail -n 1 || true)"
+  if [[ -n "$OPEN_DRV" ]]; then
+    DRV_SUFFIX="${OPEN_DRV#nvidia-driver-}"
+    KMOD_PKG="linux-modules-nvidia-${DRV_SUFFIX}-$(uname -r)"
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y -qq "$OPEN_DRV" "$KMOD_PKG" || \
+      sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y -qq "$OPEN_DRV" || \
+      sudo ubuntu-drivers install --gpgpu
+  else
+    sudo ubuntu-drivers install --gpgpu || sudo ubuntu-drivers install
+  fi
   sudo modprobe nvidia nvidia-uvm nvidia-modeset || true
 fi
 
