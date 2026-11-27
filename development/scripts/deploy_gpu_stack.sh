@@ -313,12 +313,12 @@ TUNNEL_KNOWN_HOSTS_FILE=${DATA_ROOT}/reverse-tunnel/known_hosts
 TUNNEL_BIND_ADDRESS=${TUNNEL_BIND_ADDRESS:-127.0.0.1}
 REMOTE_LITELLM_PORT=${REMOTE_LITELLM_PORT:-4000}
 REMOTE_HARNESS_PORT=${REMOTE_HARNESS_PORT:-3080}
-LITELLM_TUNNEL_SSH_HOST=${LITELLM_TUNNEL_SSH_HOST:-}
-LITELLM_TUNNEL_SSH_PORT=${LITELLM_TUNNEL_SSH_PORT:-}
-LITELLM_TUNNEL_SSH_USER=${LITELLM_TUNNEL_SSH_USER:-}
-HARNESS_TUNNEL_SSH_HOST=${HARNESS_TUNNEL_SSH_HOST:-}
-HARNESS_TUNNEL_SSH_PORT=${HARNESS_TUNNEL_SSH_PORT:-}
-HARNESS_TUNNEL_SSH_USER=${HARNESS_TUNNEL_SSH_USER:-}
+LITELLM_TUNNEL_SSH_HOST=${LITELLM_TUNNEL_SSH_HOST:-${TUNNEL_SSH_HOST:-}}
+LITELLM_TUNNEL_SSH_PORT=${LITELLM_TUNNEL_SSH_PORT:-${TUNNEL_SSH_PORT:-22}}
+LITELLM_TUNNEL_SSH_USER=${LITELLM_TUNNEL_SSH_USER:-${TUNNEL_SSH_USER:-}}
+HARNESS_TUNNEL_SSH_HOST=${HARNESS_TUNNEL_SSH_HOST:-${TUNNEL_SSH_HOST:-}}
+HARNESS_TUNNEL_SSH_PORT=${HARNESS_TUNNEL_SSH_PORT:-${TUNNEL_SSH_PORT:-22}}
+HARNESS_TUNNEL_SSH_USER=${HARNESS_TUNNEL_SSH_USER:-${TUNNEL_SSH_USER:-}}
 EOF
 )"
 
@@ -388,5 +388,23 @@ if (( ${#not_running[@]} )); then
   exit 1
 fi
 echo "[ok] All ${#expected[@]} containers are running (vllm-server may still be loading the model; see its healthcheck)."
+
+# A tunnel that cannot connect still looks "running" for a moment: autossh exits when the first ssh attempt
+# fails within its gate time and podman restarts it. Let them settle, then require no restarts.
+if [[ "$ENABLE_TUNNELS" == "true" ]]; then
+  sleep 45
+  bad_tunnels=()
+  for name in litellm-tunnel deepseek-harness-tunnel; do
+    info="$(sudo podman inspect -f '{{.State.Status}} {{.RestartCount}}' "$name" 2>/dev/null || echo "missing ?")"
+    echo "[deploy] ${name}: state/restarts = ${info}; last log lines:"
+    sudo podman logs --tail 5 "$name" 2>&1 | sed 's/^/    /' || true
+    [[ "$info" == "running 0" ]] || bad_tunnels+=("$name")
+  done
+  if (( ${#bad_tunnels[@]} )); then
+    echo "[error] Reverse tunnels are not holding a connection: ${bad_tunnels[*]} (see the log lines above)." >&2
+    exit 1
+  fi
+  echo "[ok] Reverse tunnels are up and stable."
+fi
 DEPLOY_EOF
 } | run_target_bash

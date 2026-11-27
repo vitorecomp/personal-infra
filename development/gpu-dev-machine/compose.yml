@@ -127,9 +127,11 @@ services:
     security_opt:
       - label=disable
     environment:
-      TUNNEL_SSH_HOST: ${LITELLM_TUNNEL_SSH_HOST:-${TUNNEL_SSH_HOST:-}}
-      TUNNEL_SSH_PORT: ${LITELLM_TUNNEL_SSH_PORT:-${TUNNEL_SSH_PORT:-22}}
-      TUNNEL_SSH_USER: ${LITELLM_TUNNEL_SSH_USER:-${TUNNEL_SSH_USER:-}}
+      # Single-level only: podman-compose 1.0.x passes nested ${A:-${B}} defaults through literally.
+      # deploy_gpu_stack.sh writes the resolved per-tunnel values (falling back to TUNNEL_SSH_*) into .env.
+      TUNNEL_SSH_HOST: ${LITELLM_TUNNEL_SSH_HOST:-}
+      TUNNEL_SSH_PORT: ${LITELLM_TUNNEL_SSH_PORT:-22}
+      TUNNEL_SSH_USER: ${LITELLM_TUNNEL_SSH_USER:-}
       TUNNEL_BIND_ADDRESS: ${TUNNEL_BIND_ADDRESS:-127.0.0.1}
       REMOTE_PORT: ${REMOTE_LITELLM_PORT:-4000}
       TARGET_HOST: litellm
@@ -159,9 +161,11 @@ services:
     security_opt:
       - label=disable
     environment:
-      TUNNEL_SSH_HOST: ${HARNESS_TUNNEL_SSH_HOST:-${TUNNEL_SSH_HOST:-}}
-      TUNNEL_SSH_PORT: ${HARNESS_TUNNEL_SSH_PORT:-${TUNNEL_SSH_PORT:-22}}
-      TUNNEL_SSH_USER: ${HARNESS_TUNNEL_SSH_USER:-${TUNNEL_SSH_USER:-}}
+      # Single-level only: podman-compose 1.0.x passes nested ${A:-${B}} defaults through literally.
+      # deploy_gpu_stack.sh writes the resolved per-tunnel values (falling back to TUNNEL_SSH_*) into .env.
+      TUNNEL_SSH_HOST: ${HARNESS_TUNNEL_SSH_HOST:-}
+      TUNNEL_SSH_PORT: ${HARNESS_TUNNEL_SSH_PORT:-22}
+      TUNNEL_SSH_USER: ${HARNESS_TUNNEL_SSH_USER:-}
       TUNNEL_BIND_ADDRESS: ${TUNNEL_BIND_ADDRESS:-127.0.0.1}
       REMOTE_PORT: ${REMOTE_HARNESS_PORT:-3080}
       TARGET_HOST: deepseek-harness
