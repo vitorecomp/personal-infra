@@ -743,6 +743,7 @@ PY
       apply)
         echo "[dry-run]   ${TF[*]} apply ${apply_args[*]}"
         echo "[dry-run]   gcloud compute instance-groups managed list-instances ${effective_prefix}-mig --zone=${default_zone} --project=${effective_project} --format=json  # poll until RUNNING"
+        echo "[dry-run]   gcloud compute disks update <MIG data disk> --provisioned-iops=<tf output data_disk_iops> --provisioned-throughput=<tf output data_disk_throughput_mbps>  # in place, only if different"
         ;;
     esac
     return 0
@@ -1338,6 +1339,43 @@ print(f"WAITING\t{inst_name}\t{status_label}\taction={action_label}")
   out_runner_name="$("${TF[@]}" output -raw runner_name 2>/dev/null || echo "${effective_runner_name}")"
   out_use_spot="$("${TF[@]}" output -raw use_spot 2>/dev/null || echo "${effective_use_spot}")"
   out_list_cmd="$("${TF[@]}" output -raw list_instances_command 2>/dev/null || echo "gcloud compute instance-groups managed list-instances ${out_mig_name} --zone=${deployed_zone} --project=${effective_project}")"
+
+  # The MIG re-attaches the existing stateful `data` disk on every recreation, so the template's IOPS/throughput only
+  # apply to brand-new disks. Bring the attached data disk to the Terraform values in place (idempotent).
+  sync_data_disk_performance() {
+    local want_iops want_tp inst dev src disk_name disk_zone cur
+    want_iops="$("${TF[@]}" output -raw data_disk_iops 2>/dev/null || true)"
+    want_tp="$("${TF[@]}" output -raw data_disk_throughput_mbps 2>/dev/null || true)"
+    if [[ ! "$want_iops" =~ ^[0-9]+$ || ! "$want_tp" =~ ^[0-9]+$ ]]; then
+      echo "[warn] Terraform outputs data_disk_iops/data_disk_throughput_mbps missing; skipping data disk performance sync."
+      return 0
+    fi
+    local found=false
+    while IFS= read -r inst; do
+      [[ -n "$inst" ]] || continue
+      while IFS=$'\t' read -r dev src; do
+        [[ "$dev" == "data" && -n "$src" ]] || continue
+        found=true
+        disk_name="${src##*/}"
+        disk_zone="$(sed -E 's#.*/zones/([^/]+)/disks/.*#\1#' <<<"$src")"
+        cur="$(gcloud compute disks describe "$disk_name" --zone="$disk_zone" --project="$effective_project" \
+          --format='value(provisionedIops,provisionedThroughput)' 2>/dev/null || true)"
+        if [[ "$cur" == "${want_iops}"$'\t'"${want_tp}" ]]; then
+          echo "[ok] Data disk ${disk_name}: ${want_iops} IOPS / ${want_tp} MiB/s already provisioned."
+          continue
+        fi
+        echo "[deploy] Data disk ${disk_name}: ${cur/$'\t'/ IOPS \/ } MiB/s -> ${want_iops} IOPS / ${want_tp} MiB/s (in place, no detach)..."
+        if ! gcloud compute disks update "$disk_name" --zone="$disk_zone" --project="$effective_project" \
+             --provisioned-iops="$want_iops" --provisioned-throughput="$want_tp" --quiet; then
+          echo "[warn] Could not update ${disk_name} (Hyperdisk performance can only be changed every few hours); re-run deploy.sh later."
+        fi
+      done < <(gcloud compute instances describe "$inst" --zone="$deployed_zone" --project="$effective_project" \
+                 --flatten=disks --format='value(disks.deviceName,disks.source)' 2>/dev/null || true)
+    done < <(gcloud compute instance-groups managed list-instances "$out_mig_name" --zone="$deployed_zone" \
+               --project="$effective_project" --format='value(instance.basename())' 2>/dev/null || true)
+    $found || echo "[info] No MIG instance with a data disk yet; a new disk is created with ${want_iops} IOPS / ${want_tp} MiB/s."
+  }
+  sync_data_disk_performance
 
   local final_model_desc="SPOT (auto-healed by MIG)"
   if [[ "${out_use_spot,,}" == "false" ]]; then

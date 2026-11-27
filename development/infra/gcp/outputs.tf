@@ -33,6 +33,16 @@ output "mig_name" {
   value       = google_compute_instance_group_manager.gpu.name
 }
 
+output "data_disk_iops" {
+  description = "Desired provisioned IOPS of the stateful data disk (deploy.sh applies it to the existing disk)."
+  value       = var.data_disk_iops
+}
+
+output "data_disk_throughput_mbps" {
+  description = "Desired provisioned throughput (MiB/s) of the stateful data disk (deploy.sh applies it in place)."
+  value       = var.data_disk_throughput_mbps
+}
+
 output "instance_template" {
   description = "Name of the active GCE instance template."
   value       = google_compute_instance_template.gpu.name

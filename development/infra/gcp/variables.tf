@@ -75,16 +75,21 @@ variable "data_disk_size_gb" {
   default     = 3000
 }
 
+# Model loading (475 GiB, mmap page faults) is IOPS-bound: with 16 MiB readahead the reads average ~92 KiB, so a
+# full-size replica measured 357 MB/s at 4,000 IOPS (~20 min per cold load) vs ~40 min at the old 3,060 IOPS /
+# 200 MiB/s cap. 8,000 IOPS / 750 MiB/s targets ~700 MB/s (~11 min). europe-west4 list price beyond the free 3,000 IOPS /
+# 140 MiB/s: $0.005 per IOPS-month and $0.042 per MiB/s-month, i.e. ~$51/month on top of capacity.
+# The MIG keeps the existing stateful disk across recreations, so deploy.sh also applies these values to it in place.
 variable "data_disk_iops" {
-  description = "Provisioned IOPS for the GPU VM stateful data Hyperdisk."
+  description = "Provisioned IOPS for the GPU VM stateful data Hyperdisk (throughput may be at most IOPS / 4 MiB/s)."
   type        = number
-  default     = 3060
+  default     = 8000
 }
 
 variable "data_disk_throughput_mbps" {
   description = "Provisioned throughput (MiB/s) for the GPU VM stateful data Hyperdisk."
   type        = number
-  default     = 200
+  default     = 750
 }
 
 variable "enable_shielded_vm" {
