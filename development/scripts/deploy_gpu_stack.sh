@@ -230,11 +230,31 @@ runroot = "/run/containers/storage"
 STORAGE_EOF
 fi
 
-HOST_PKGS=(podman podman-compose uidmap slirp4netns fuse-overlayfs curl gpg ca-certificates rsync)
+HOST_PKGS=(podman podman-compose netavark aardvark-dns uidmap slirp4netns fuse-overlayfs curl gpg ca-certificates rsync)
 if ! dpkg -s "${HOST_PKGS[@]}" >/dev/null 2>&1; then
   sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 update -qq
   sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y -qq --no-install-recommends "${HOST_PKGS[@]}"
 fi
+
+# Container DNS: Ubuntu's Podman 4.9 falls back to the CNI backend without a DNS plugin, so containers cannot
+# resolve each other (litellm -> vllm-server, tunnels -> litellm: "connect_to litellm: unknown host"). Use netavark
+# + aardvark-dns. Hosts still on CNI get the stack's containers and network recreated once (images are kept).
+# Same setting as the GPU VM startup-script in development/infra/gcp/main.tf.
+sudo mkdir -p /etc/containers/containers.conf.d
+NETAVARK_CONF=/etc/containers/containers.conf.d/50-personal-infra-netavark.conf
+NETAVARK_WANT=$'# Managed by personal-infra (development/scripts/deploy_gpu_stack.sh)\n[network]\nnetwork_backend = "netavark"\n'
+if [[ "$(sudo cat "$NETAVARK_CONF" 2>/dev/null)"$'\n' != "$NETAVARK_WANT" ]]; then
+  printf '%s' "$NETAVARK_WANT" | sudo tee "$NETAVARK_CONF" >/dev/null
+fi
+if sudo podman network exists gpu-dev-net 2>/dev/null && \
+   [[ "$(sudo podman network inspect gpu-dev-net --format '{{.DNSEnabled}}' 2>/dev/null)" != "true" ]]; then
+  echo "[bootstrap] Recreating the stack on the netavark backend (gpu-dev-net had no DNS)..."
+  for c in deepseek-harness-tunnel litellm-tunnel deepseek-harness litellm vllm-server ray-server; do
+    sudo timeout 300 podman rm -f -t 10 "$c" >/dev/null 2>&1 || true
+  done
+  sudo podman network rm -f gpu-dev-net >/dev/null 2>&1 || true
+fi
+echo "[bootstrap] Podman network backend: $(sudo podman info --format '{{.Host.NetworkBackend}}')"
 
 if ! nvidia-smi >/dev/null 2>&1; then
   echo "[bootstrap] Installing Ubuntu prebuilt NVIDIA Open Kernel GPU driver..."

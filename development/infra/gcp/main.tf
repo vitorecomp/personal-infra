@@ -113,6 +113,8 @@ HOST_PACKAGES=(
   libssl-dev
   podman
   podman-compose
+  netavark
+  aardvark-dns
   rsync
   slirp4netns
   tar
@@ -415,6 +417,11 @@ unset BOOTSTRAP_JSON RUNNER_TOKEN RUNNER_PAT REG_TOK
 STACK_DIR="/mnt/data/stacks/gpu-dev-machine"
 if [ -f "$STACK_DIR/compose.yml" ] && [ -f "$STACK_DIR/.env" ]; then
   echo "[bootstrap] Detected previously deployed Podman stack in $STACK_DIR; resuming..."
+  # Container DNS needs netavark + aardvark-dns (Podman 4.9's CNI fallback has no DNS plugin); same setting as
+  # development/scripts/deploy_gpu_stack.sh. Written before any podman command so it applies to this boot.
+  mkdir -p /etc/containers/containers.conf.d
+  printf '# Managed by personal-infra (development/infra/gcp/main.tf)\n[network]\nnetwork_backend = "netavark"\n' \
+    > /etc/containers/containers.conf.d/50-personal-infra-netavark.conf
   podman system migrate >/dev/null 2>&1 || true
   TUNNEL_HOST_SET="$(grep -E '^(TUNNEL_SSH_HOST|LITELLM_TUNNEL_SSH_HOST|HARNESS_TUNNEL_SSH_HOST)=' "$STACK_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]"'\''' || true)"
   if [ -n "$TUNNEL_HOST_SET" ] && [ -s /mnt/data/reverse-tunnel/id_ed25519 ]; then
