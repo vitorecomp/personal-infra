@@ -125,6 +125,18 @@ Manages the local `~/workspace` directory hierarchy based on a tracked inventory
   python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
   python3 workspace/scripts/scan_repo_secrets.py --install-hook
   ```
+- **Backup & Restore Workspace `.env` Files ([`workspace_envs.sh`](./workspace/scripts/workspace_envs.sh))**: Unified wrapper entrypoint (`--backup` default, `--restore` to restore) that runs the underlying Python scripts ([`backup_workspace_envs.py`](./workspace/scripts/backup_workspace_envs.py) & [`restore_workspace_envs.py`](./workspace/scripts/restore_workspace_envs.py)) inside an isolated, gitignored `workspace/.venv` virtual environment (`--venv-dir`, `--rebuild-venv`; read-only on `--dry-run` / `--help`). Discovers `.env` and non-template `.env.*` files across `~/workspace` (including hidden config paths like `.agents/skills/taiga/.env`, while skipping templates and `node_modules`/`.venv`/`.git`), idempotently backs them up to a gitignored mode-`0600` zip (`workspace/backups/workspace-envs.zip`) and/or Bitwarden Secure Notes (`workspace-envs` folder via `bw` + `BW_SESSION`), and safely restores them to `0600` files with `ZipSlip` protection, `--overwrite`, and `--existing-dirs-only`.
+  ```bash
+  # Preview backup & restore actions (read-only; does not create workspace/.venv)
+  ./workspace/scripts/workspace_envs.sh --zip --dry-run
+  ./workspace/scripts/workspace_envs.sh --backup --bitwarden --dry-run
+  ./workspace/scripts/workspace_envs.sh --restore --zip --dry-run
+  ./workspace/scripts/workspace_envs.sh --restore --bitwarden --dry-run
+
+  # Back up to gitignored zip and Bitwarden Vault, then restore safely
+  ./workspace/scripts/workspace_envs.sh --zip --bitwarden
+  ./workspace/scripts/workspace_envs.sh --restore --zip --existing-dirs-only
+  ```
 - **Enroll GitHub Repositories on Taiga ([`enroll_taiga_projects.py`](./workspace/scripts/enroll_taiga_projects.py))**: Idempotently enrolls GitHub repositories from `repo_stats.json` as Scrum projects on `$TAIGA_URL` and orders them with the most recently committed repository first.
   ```bash
   python3 workspace/scripts/enroll_taiga_projects.py --dry-run

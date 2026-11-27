@@ -96,6 +96,9 @@ personal-infra/
         ├── sync_workspace_repos.py         # Moves/clones repos into ~/workspace/<folder>/<name>
         ├── validate_repos_pushed.py        # Validates whether git repos in a folder are clean and pushed
         ├── scan_repo_secrets.py            # Scans repos/history for leaked keys/secrets & installs pre-commit hook
+        ├── workspace_envs.sh               # Isolated workspace/.venv wrapper entrypoint for backup/restore (--backup default, --restore)
+        ├── backup_workspace_envs.py        # Backs up ~/workspace .env files to gitignored mode-0600 zip and/or Bitwarden
+        ├── restore_workspace_envs.py       # Safely restores ~/workspace .env files from zip or Bitwarden (mode 0600)
         ├── enroll_taiga_projects.py        # Idempotently enrolls GitHub repos from repo_stats.json as Taiga projects
         └── taiga_cli.py                    # Wrapper CLI delegating to .agents/skills/taiga/scripts/taiga_cli.py
 ```
@@ -173,6 +176,15 @@ python3 workspace/scripts/validate_repos_pushed.py personal
 python3 workspace/scripts/scan_repo_secrets.py --history
 python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
 python3 workspace/scripts/scan_repo_secrets.py --install-hook
+
+# Preview, back up, list, or restore ~/workspace .env files via isolated workspace/.venv wrapper (--backup default, --restore to restore; or direct .py scripts)
+./workspace/scripts/workspace_envs.sh --zip --dry-run
+./workspace/scripts/workspace_envs.sh --backup --bitwarden --dry-run
+./workspace/scripts/workspace_envs.sh --zip --bitwarden
+./workspace/scripts/workspace_envs.sh --restore --zip --dry-run
+./workspace/scripts/workspace_envs.sh --restore --bitwarden --dry-run
+./workspace/scripts/workspace_envs.sh --restore --zip --list
+./workspace/scripts/workspace_envs.sh --restore --bitwarden --existing-dirs-only
 
 # Preview or enroll GitHub repositories from repo_stats.json as projects on Taiga
 python3 workspace/scripts/enroll_taiga_projects.py --dry-run

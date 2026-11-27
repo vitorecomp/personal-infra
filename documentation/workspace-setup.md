@@ -122,3 +122,66 @@ python3 workspace/scripts/taiga_cli.py projects get personal-infra
 python3 workspace/scripts/taiga_cli.py sprints create personal-infra --name "Sprint 1" --start 2026-11-01 --end 2026-11-15
 python3 workspace/scripts/taiga_cli.py stories create personal-infra --subject "Add feature" --points 3 --sprint "Sprint 1"
 ```
+
+### 3.7 Backing Up & Restoring Workspace `.env` Files (`workspace_envs.sh`)
+
+[`workspace/scripts/workspace_envs.sh`](../workspace/scripts/workspace_envs.sh) is the primary CLI entrypoint for backing up (`--backup`, default) and restoring (`--restore`) local environment files across `~/workspace` (overridable via `--workspace PATH` or `WORKSPACE_DIR`).
+
+The wrapper executes the underlying zero-dependency Python 3.10+ scripts ([`backup_workspace_envs.py`](../workspace/scripts/backup_workspace_envs.py) and [`restore_workspace_envs.py`](../workspace/scripts/restore_workspace_envs.py)) inside an isolated, gitignored Python virtual environment at `workspace/.venv`:
+- Override the virtual environment location with `WORKSPACE_VENV_DIR` or `--venv-dir PATH` / `--venv-dir=PATH`, or force recreation with `--rebuild-venv`.
+- Falls back cleanly to `python3 -m venv --without-pip` when `ensurepip` (`python3-venv`) is unavailable (or uses `uv` if installed) and syncs optional `workspace/requirements.txt` if present.
+- Keeps `--dry-run` and `-h` / `--help` completely read-only (never creates or mutates `workspace/.venv` during dry-runs or help output).
+
+#### Discovery Rules (`backup_workspace_envs.py`)
+- Recursively scans `~/workspace` (or an optional category `folder` such as `personal` or `work`, while always recording paths relative to the workspace root like `personal/personal-infra/.env`).
+- Captures `.env` and non-template `.env.*` files—including hidden configuration paths such as `.agents/skills/taiga/.env`—while automatically skipping:
+  - Template and temporary suffixes (`.example`, `.sample`, `.template`, `.dist`, `.bak`, `.swp`, `.orig`, `.tmp`).
+  - Heavy VCS, dependency, build, and cache directories (`.git`, `node_modules`, `.venv`, `venv`, `.terraform`, `dist`, `build`, `__pycache__`, etc.), symlinks, and `.zip` archives.
+- Optional filters: `--exact-only` (match only exact `.env` filenames) and `--skip-tracked` (exclude files tracked by Git).
+
+#### Backup Targets (`--zip` & `--bitwarden`)
+- **Zip Archive (`--zip [PATH]` / `--output PATH`)**:
+  - Defaults to `workspace/backups/workspace-envs.zip` written atomically with mode `0600` (`rw-------`).
+  - Always Git-ignored: `.gitignore` ignores `*.zip` and `workspace/backups/` (paired with `workspace/backups/.gitignore` and `scan_repo_secrets.py` archive globs), and if `--zip` targets a path inside another Git repository, `backup_workspace_envs.py` automatically appends the relative archive path to that repository's `.git/info/exclude` if it is not already ignored.
+  - Embeds a deterministic `_manifest.json` index (with `rel_path`, `sha256`, `size`, and `git_tracked`) and idempotently skips rewriting the zip when all member SHA-256 hashes match (unless `--force` is set).
+- **Bitwarden Vault (`--bitwarden`)**:
+  - Uses the official Bitwarden CLI (`bw`, or `--bw-bin` / `BW_CLI`) authenticated via `BW_SESSION` (or `BW_PASSWORD` / interactive `bw unlock --raw`).
+  - Runs `bw sync` (unless `--no-sync` is passed) and stores each file idempotently as a Secure Note named `workspace-env:<rel_path>` (prefix configurable via `--bw-prefix` / `BW_ITEM_PREFIX`) inside folder `workspace-envs` (configurable via `--bw-folder` / `BW_FOLDER`), carrying `rel_path`, `sha256`, `encoding`, and `git_tracked` custom fields.
+  - Compares `sha256` digests so unchanged items require zero edits; creates missing notes, updates modified notes, and optionally deletes orphaned notes in `--bw-folder` with `--prune`.
+
+#### Safe Idempotent Restoration (`restore_workspace_envs.py`)
+- Restores `.env` files from `--zip [PATH]` (or `--input PATH`) or `--bitwarden` back to `~/workspace/<rel_path>` (optionally filtered by category `folder` or `--folder`), writing files atomically with mode `0600` (`rw-------`).
+- Rejects path traversal (`ZipSlip`: absolute paths, `..` components, `_manifest.json`, and symlinked parents or targets).
+- Leaves matching local files untouched (`unchanged`) and safely skips differing local files unless `--overwrite` (alias `--force`) is passed; combine with `--backup-existing` to copy replaced local files to `<file>.bak` (`0600`).
+- Supports `--list` (inspect archive or vault entries without writing files), `--existing-dirs-only` (only restore into directories that already exist locally, skipping uncloned repos), and `--dry-run`.
+
+```bash
+# Show wrapper options and underlying Python script flags (all, backup-only, or restore-only)
+./workspace/scripts/workspace_envs.sh --help
+./workspace/scripts/workspace_envs.sh --backup --help
+./workspace/scripts/workspace_envs.sh --restore --help
+
+# Preview discovered .env files and planned backup actions (read-only; does not create workspace/.venv)
+./workspace/scripts/workspace_envs.sh --zip --dry-run
+./workspace/scripts/workspace_envs.sh --backup --bitwarden --dry-run
+
+# Back up all workspace .env files to the default gitignored zip and Bitwarden Secure Notes
+./workspace/scripts/workspace_envs.sh --zip --bitwarden
+
+# Back up only a single workspace category folder to a custom zip path
+./workspace/scripts/workspace_envs.sh personal --zip ~/backups/personal-envs.zip
+
+# List entries available in the zip archive or Bitwarden folder
+./workspace/scripts/workspace_envs.sh --restore --zip --list
+./workspace/scripts/workspace_envs.sh --restore --bitwarden --list
+
+# Preview and execute restoration (creates missing directories by default; skips differing files)
+./workspace/scripts/workspace_envs.sh --restore --zip --dry-run
+./workspace/scripts/workspace_envs.sh --restore --bitwarden --dry-run
+./workspace/scripts/workspace_envs.sh --restore --zip --existing-dirs-only
+./workspace/scripts/workspace_envs.sh --restore --bitwarden personal --overwrite --backup-existing
+
+# Direct Python invocation (without the virtualenv wrapper) is also supported:
+# python3 workspace/scripts/backup_workspace_envs.py --zip --dry-run
+# python3 workspace/scripts/restore_workspace_envs.py --zip --dry-run
+```

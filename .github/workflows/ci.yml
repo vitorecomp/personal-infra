@@ -48,6 +48,15 @@ jobs:
         python3 workspace/scripts/download_workspace_repos.py --dry-run
         python3 workspace/scripts/validate_repos_pushed.py --dry-run
         python3 workspace/scripts/scan_repo_secrets.py --install-hook --dry-run
+        bash -n workspace/scripts/workspace_envs.sh
+        ./workspace/scripts/workspace_envs.sh --zip --dry-run
+        ./workspace/scripts/workspace_envs.sh --backup --bitwarden --dry-run
+        ./workspace/scripts/workspace_envs.sh --restore --zip --dry-run
+        ./workspace/scripts/workspace_envs.sh --restore --bitwarden --dry-run
+        python3 workspace/scripts/backup_workspace_envs.py --zip --dry-run
+        python3 workspace/scripts/backup_workspace_envs.py --bitwarden --dry-run
+        python3 workspace/scripts/restore_workspace_envs.py --zip --dry-run
+        python3 workspace/scripts/restore_workspace_envs.py --bitwarden --dry-run
         python3 workspace/scripts/enroll_taiga_projects.py --dry-run
         python3 workspace/scripts/taiga_cli.py projects create --name ci-test --dry-run
 

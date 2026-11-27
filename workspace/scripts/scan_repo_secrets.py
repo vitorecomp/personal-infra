@@ -109,6 +109,9 @@ FORBIDDEN_FILE_GLOBS = (
     "*.tfstate",
     "*.tfstate.*",
     "*.tfplan",
+    "*env*.zip",
+    "*envs*.zip",
+    "*.env.zip",
 )
 
 LINE_SECRET_RULES: list[tuple[str, re.Pattern[str]]] = [
@@ -868,6 +871,12 @@ def run_self_test() -> int:
 
     if not is_forbidden_secret_path(".env") or not is_forbidden_secret_path("keys/id_ed25519"):
         print("[error] Self-test failed on forbidden filename detection.", file=sys.stderr)
+        return 1
+    if not is_forbidden_secret_path("workspace/backups/workspace-envs.zip") or not is_forbidden_secret_path("backup.env.zip"):
+        print("[error] Self-test failed on forbidden env zip archive detection.", file=sys.stderr)
+        return 1
+    if is_forbidden_secret_path("tests/fixtures/fixture.zip"):
+        print("[error] Self-test false positive on unrelated fixture.zip path.", file=sys.stderr)
         return 1
     if is_forbidden_secret_path(".env.example") or is_forbidden_secret_path("cloud/infra/envs/prod/terraform.tfvars.example"):
         print("[error] Self-test failed on allowed .example template path.", file=sys.stderr)

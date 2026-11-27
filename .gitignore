@@ -215,3 +215,7 @@ terraform.rc
 cloud/*/app/
 *.sql.gz
 *.dump
+
+# Workspace .env backup archives
+*.zip
+workspace/backups/
