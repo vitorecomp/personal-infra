@@ -599,7 +599,8 @@ sync_github_settings() {
   for kv in "${env_secrets_to_set[@]}"; do
     vname="${kv%%=*}"
     vbody="${kv#*=}"
-    printf '%s\n' "$vbody" | gh secret set "$vname" --repo "$REPO_PATH" --env "$GITHUB_ENV_NAME"
+    # No trailing newline: the value is used verbatim (a "host\n" would break ssh).
+    printf '%s' "$vbody" | gh secret set "$vname" --repo "$REPO_PATH" --env "$GITHUB_ENV_NAME"
     # Drop an older plain variable of the same name (it would show up unmasked in logs).
     gh variable delete "$vname" --repo "$REPO_PATH" --env "$GITHUB_ENV_NAME" >/dev/null 2>&1 || true
     synced_secret_names+=("$vname")
