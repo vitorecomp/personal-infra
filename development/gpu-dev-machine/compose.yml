@@ -29,6 +29,10 @@ services:
       HF_HOME: /mnt/data/huggingface
       VLLM_ENGINE_READY_TIMEOUT_S: "7200" # loading the 475 GiB checkpoint takes long
       VLLM_USE_V2_MODEL_RUNNER: "1"
+      # Rust thread pools (HF tokenizers) default to one thread per CPU in every worker process: 4 TP workers x 192
+      # vCPUs blew through Podman's default 2048-task limit right after loading ("ThreadPoolBuildError ... Resource
+      # temporarily unavailable"). Cap them; the deploy also raises Podman's pids_limit (containers.conf.d).
+      RAYON_NUM_THREADS: "16"
     command:
       - deepseek-ai/DeepSeek-V4.1-Flash # full unquantized checkpoint (no --quantization)
       - --served-model-name=deepseek-ai/DeepSeek-V4.1-Flash

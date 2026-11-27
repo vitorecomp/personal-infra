@@ -266,6 +266,15 @@ if sudo podman network exists gpu-dev-net 2>/dev/null && \
 fi
 echo "[bootstrap] Podman network backend: $(sudo podman info --format '{{.Host.NetworkBackend}}')"
 
+# Podman caps every container at 2048 tasks by default; vLLM's 4 TP workers on a 192-vCPU host exceed that right
+# after loading the model (ThreadPoolBuildError / EAGAIN) and the container restart-loops. podman-compose 1.0.6
+# ignores `pids_limit`, so raise the default for new containers here (also in the VM startup-script, main.tf).
+PIDS_CONF=/etc/containers/containers.conf.d/51-personal-infra-pids.conf
+PIDS_WANT=$'# Managed by personal-infra (development/scripts/deploy_gpu_stack.sh)\n[containers]\npids_limit = 65536\n'
+if [[ "$(sudo cat "$PIDS_CONF" 2>/dev/null)"$'\n' != "$PIDS_WANT" ]]; then
+  printf '%s' "$PIDS_WANT" | sudo tee "$PIDS_CONF" >/dev/null
+fi
+
 if ! nvidia-smi >/dev/null 2>&1; then
   echo "[bootstrap] Installing Ubuntu prebuilt NVIDIA Open Kernel GPU driver..."
   sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 update -qq

@@ -428,6 +428,9 @@ if [ -f "$STACK_DIR/compose.yml" ] && [ -f "$STACK_DIR/.env" ]; then
   mkdir -p /etc/containers/containers.conf.d
   printf '# Managed by personal-infra (development/infra/gcp/main.tf)\n[network]\nnetwork_backend = "netavark"\n' \
     > /etc/containers/containers.conf.d/50-personal-infra-netavark.conf
+  # Default 2048-task limit per container is too low for vLLM's 4 TP workers on 192 vCPUs (EAGAIN after loading).
+  printf '# Managed by personal-infra (development/infra/gcp/main.tf)\n[containers]\npids_limit = 65536\n' \
+    > /etc/containers/containers.conf.d/51-personal-infra-pids.conf
   podman system migrate >/dev/null 2>&1 || true
   TUNNEL_HOST_SET="$(grep -E '^(TUNNEL_SSH_HOST|LITELLM_TUNNEL_SSH_HOST|HARNESS_TUNNEL_SSH_HOST)=' "$STACK_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]"'\''' || true)"
   if [ -n "$TUNNEL_HOST_SET" ] && [ -s /mnt/data/reverse-tunnel/id_ed25519 ]; then
