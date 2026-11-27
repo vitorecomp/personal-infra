@@ -420,18 +420,39 @@ not_running_list() {
   done
 }
 
-compose_up
-# When compose.yml changed, podman-compose recreates the stack. A killed vLLM takes a while to exit (it releases
-# ~200 GiB of pinned host memory, and with a saturated data disk it waited 28 min); podman gives up after a few
-# seconds, leaves it "stopping" and the new containers fail with "name already in use". Wait for that, converge again.
-if [[ -n "$(not_running_list)" ]]; then
+# Every container podman-compose creates carries the config hash of compose.yml; after a good `up` they all match.
+config_hashes() {
+  local name
+  for name in "${expected[@]}"; do
+    sudo podman inspect -f '{{index .Config.Labels "io.podman.compose.config-hash"}}' "$name" 2>/dev/null || echo missing
+  done | sort -u
+}
+# Stop and remove the stack's containers, waiting out slow exits: a killed vLLM releases ~200 GiB of pinned host
+# memory (28 min while the disk was saturated by the download), longer than podman waits.
+teardown_stack() {
+  local name state
+  for name in "${expected[@]}" litellm-tunnel deepseek-harness-tunnel; do
+    sudo timeout 120 podman stop -t 30 "$name" >/dev/null 2>&1 || true
+  done
   for _ in $(seq 1 120); do
-    stopping="$(sudo podman ps -a --format '{{.Names}} {{.State}}' | awk '$2=="stopping"{printf "%s ", $1}')"
-    [[ -z "$stopping" ]] && break
-    echo "[deploy] Waiting for containers to finish stopping: ${stopping}"
+    state="$(sudo podman ps -a --format '{{.Names}} {{.State}}' | awk '$2=="stopping" || $2=="running" {printf "%s ", $1}')"
+    [[ -z "$state" ]] && break
+    echo "[deploy] Waiting for containers to stop: ${state}"
     sleep 15
   done
-  echo "[deploy] Re-running podman-compose up after the slow stop..."
+  for name in "${expected[@]}" litellm-tunnel deepseek-harness-tunnel; do
+    sudo podman rm -f "$name" >/dev/null 2>&1 || true
+  done
+}
+
+compose_up
+# When compose.yml changed, podman-compose recreates the stack, but if the old vllm-server is still exiting, its
+# removal fails, `podman run` hits "name already in use" and podman-compose falls back to `podman start`, which
+# revives the OLD container (seen: v0.33.0 kept running after the image moved to v0.34.0). Detect a mixed or failed
+# stack and converge from a clean teardown.
+if [[ -n "$(not_running_list)" || "$(config_hashes | wc -l)" -ne 1 ]]; then
+  echo "[deploy] Stack did not converge (stale or stopped containers); tearing down and starting again..."
+  teardown_stack
   compose_up
 fi
 
@@ -445,7 +466,12 @@ if (( ${#not_running[@]} )); then
   echo "[error] See the build/start errors above." >&2
   exit 1
 fi
-echo "[ok] All ${#expected[@]} containers are running (vllm-server may still be loading the model; see its healthcheck)."
+if [[ "$(config_hashes | wc -l)" -ne 1 ]]; then
+  echo "[error] Containers run different compose.yml revisions (a stale container survived): $(config_hashes | tr '\n' ' ')" >&2
+  exit 1
+fi
+echo "[ok] All ${#expected[@]} containers are running the current compose.yml (vllm-server may still be loading the model; see its healthcheck)."
+echo "[deploy] vllm-server image: $(sudo podman inspect -f '{{.ImageName}}' vllm-server 2>/dev/null)"
 
 # A tunnel that cannot connect still looks "running" for a moment: autossh exits when the first ssh attempt
 # fails within its gate time and podman restarts it. Let them settle, then require no restarts.
