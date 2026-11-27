@@ -34,6 +34,13 @@ services:
       # vCPUs blew through Podman's default 2048-task limit right after loading ("ThreadPoolBuildError ... Resource
       # temporarily unavailable"). Cap them; the deploy also raises Podman's pids_limit (containers.conf.d).
       RAYON_NUM_THREADS: "16"
+      # Persist the JIT/compile caches (vLLM torch.compile, FlashInfer, TileLang, Triton, CuTe-DSL) on the data disk so
+      # restarts skip recompilation; CuTe-DSL's default /tmp/<user> path could not even be created in the container.
+      XDG_CACHE_HOME: /cache
+      FLASHINFER_WORKSPACE_BASE: /cache
+      TILELANG_CACHE_DIR: /cache/tilelang
+      TRITON_CACHE_DIR: /cache/triton
+      CUTE_DSL_CACHE_DIR: /cache/cute-dsl
     command:
       - deepseek-ai/DeepSeek-V4.1-Flash # full unquantized checkpoint (no --quantization)
       - --served-model-name=deepseek-ai/DeepSeek-V4.1-Flash
@@ -53,6 +60,7 @@ services:
       - --trust-remote-code
     volumes:
       - ${HF_CACHE_DIR:-/mnt/data/huggingface}:/mnt/data/huggingface
+      - ${VLLM_CACHE_DIR:-/mnt/data/vllm-cache}:/cache
     ports:
       - "127.0.0.1:8000:8000"
     networks:

@@ -433,3 +433,19 @@ Both ports are closed while the GPU machine is stopped or preempted; autossh rec
 | `--stack-dir=<path>` | Destination stack directory on the GPU VM (default: `/mnt/data/stacks/gpu-dev-machine`). |
 | `--wait-timeout=<seconds>` | Max seconds to wait for SSH in `controller-ssh` mode (default: `600`). |
 | `--dry-run` | Print resolved target mode, synced env key names (never values), and compose commands without mutating state. |
+| `--no-wait-for-model` | Finish once the containers run (env `WAIT_FOR_MODEL=false`; workflow input `wait_for_model`). By default the deploy waits for `vllm-server` `/health`, fails fast with the root-cause log lines if it restarts or exits, and ends with one chat request through LiteLLM. |
+| `--model-timeout=<seconds>` | Max wait for the model (default `10800`, repo variable `MODEL_READY_TIMEOUT_SEC`): a first start downloads ~475 GiB and loads it. |
+
+#### What the deploy takes care of on the GPU host (found on a full-size replica, 2026-11-27)
+
+| Symptom | Cause | Handling |
+| :--- | :--- | :--- |
+| `unresolvable CDI devices nvidia.com/gpu=all` | Podman 4.9 reads CDI specs only up to 0.6.0; `nvidia-ctk` writes 0.7.0 | spec rewritten as 0.6.0 (drops the render-node `additionalGids`) |
+| tunnels log `connect_to litellm: unknown host`; LiteLLM cannot reach `vllm-server` | Podman 4.9's CNI fallback has no DNS | `netavark` + `aardvark-dns` (`containers.conf.d`) |
+| model load ~80 min, disk at its IOPS cap with ~20 KiB reads | mmap page faults with the default 128 KiB readahead | 16 MiB readahead on the data disk (4.7x faster) |
+| `ThreadPoolBuildError ... Resource temporarily unavailable` right after loading | 4 TP workers x 192 vCPUs over Podman's 2048-task limit | `pids_limit = 65536` + `RAYON_NUM_THREADS=16` |
+| `block_kv == 32 or block_kv == 64` assert during CUDA graph capture | vLLM 0.33 used 128-token blocks for the DeepSeek-V4.1 indexer on SM120 (RTX PRO 6000) | `vllm/vllm-openai:v0.34.0` |
+| `podman stop` takes minutes; old container revived after a recreate | a killed vLLM frees ~200 GiB of pinned memory slowly (28 min while the download saturated the disk) | wait out stops; converge from a clean teardown if compose config hashes differ |
+| every start recompiles kernels | JIT caches in the container (CuTe-DSL's could not be created) | caches persisted in `/mnt/data/vllm-cache` |
+
+The data disk default (3,060 IOPS / 200 MB/s) caps a cold model load at ~40 min even with readahead; 4,000 IOPS / 1,000 MB/s measured ~357 MB/s (~20 min) — raise `data_disk_iops` / `data_disk_throughput_mbps` if restarts after Spot preemptions are too slow.

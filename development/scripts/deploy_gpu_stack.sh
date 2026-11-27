@@ -23,6 +23,8 @@ SSH_HOST="${GPU_SSH_HOST:-}"
 REMOTE_STACK_DIR="${GPU_REMOTE_STACK_DIR:-/mnt/data/stacks/gpu-dev-machine}"
 DATA_ROOT="${GPU_DATA_ROOT:-/mnt/data}"
 WAIT_TIMEOUT_SEC="${GPU_WAIT_TIMEOUT_SEC:-600}"
+WAIT_FOR_MODEL="${WAIT_FOR_MODEL:-true}"
+MODEL_READY_TIMEOUT_SEC="${MODEL_READY_TIMEOUT_SEC:-10800}"
 DRY_RUN=false
 
 usage() {
@@ -37,6 +39,9 @@ Options:
   --ssh-host=USER@HOST    Target SSH host when --target-mode=ssh (or env GPU_SSH_HOST)
   --stack-dir=PATH        Destination stack directory on GPU host (default: /mnt/data/stacks/gpu-dev-machine)
   --wait-timeout=SECONDS  Max seconds to wait for GPU SSH in controller-ssh mode (default: 600)
+  --no-wait-for-model     Finish once the containers run instead of waiting for vLLM to serve (env WAIT_FOR_MODEL=false)
+  --model-timeout=SECONDS Max seconds to wait for vllm-server /health + a LiteLLM chat check (default: 10800;
+                          a first start downloads ~475 GiB and loads it, which takes well over an hour)
   --dry-run               Print resolved target, synced env key names (never values), and commands without executing
   -h, --help              Show this help message and exit
 
@@ -63,6 +68,9 @@ while [[ $# -gt 0 ]]; do
     --stack-dir) REMOTE_STACK_DIR="$2"; shift 2 ;;
     --wait-timeout=*) WAIT_TIMEOUT_SEC="${1#*=}"; shift ;;
     --wait-timeout) WAIT_TIMEOUT_SEC="$2"; shift 2 ;;
+    --no-wait-for-model) WAIT_FOR_MODEL=false; shift ;;
+    --model-timeout=*) MODEL_READY_TIMEOUT_SEC="${1#*=}"; shift ;;
+    --model-timeout) MODEL_READY_TIMEOUT_SEC="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[error] Unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -155,6 +163,7 @@ if $DRY_RUN; then
   echo "[dry-run] Step 2: Ensure Podman, podman-compose, NVIDIA driver + CDI (/etc/cdi/nvidia.yaml), and /mnt/data storage exist"
   echo "[dry-run] Step 3: Sync stack files to $REMOTE_STACK_DIR and write mode-0600 .env + tunnel key"
   echo "[dry-run] Step 4: sudo TMPDIR=$DATA_ROOT/containers/tmp podman-compose -f compose.yml up -d --build ${SERVICES_TO_START[*]}"
+  echo "[dry-run] Step 5: wait for model: ${WAIT_FOR_MODEL} (vllm-server /health + one LiteLLM chat, timeout ${MODEL_READY_TIMEOUT_SEC}s)"
   exit 0
 fi
 
@@ -208,6 +217,7 @@ sudo mkdir -p \
   "${DATA_ROOT}/containers/storage" \
   "${DATA_ROOT}/containers/tmp" \
   "${DATA_ROOT}/huggingface" \
+  "${DATA_ROOT}/vllm-cache" \
   "${DATA_ROOT}/deepseek-harness/dsh-home" \
   "${DATA_ROOT}/deepseek-harness/workspace" \
   "${DATA_ROOT}/reverse-tunnel/state/litellm" \
@@ -341,6 +351,7 @@ ENV_CONTENT="$(cat <<EOF
 LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
 HF_TOKEN=${HF_TOKEN:-}
 HF_CACHE_DIR=${DATA_ROOT}/huggingface
+VLLM_CACHE_DIR=${DATA_ROOT}/vllm-cache
 HARNESS_DATA_DIR=${DATA_ROOT}/deepseek-harness/dsh-home
 HARNESS_WORKSPACE_DIR=${DATA_ROOT}/deepseek-harness/workspace
 TUNNEL_STATE_DIR=${DATA_ROOT}/reverse-tunnel/state
@@ -375,6 +386,8 @@ fi
   printf 'DATA_ROOT=%q\n' "$DATA_ROOT"
   printf 'REMOTE_STACK_DIR=%q\n' "$REMOTE_STACK_DIR"
   printf 'ENABLE_TUNNELS=%q\n' "$ENABLE_TUNNELS"
+  printf 'WAIT_FOR_MODEL=%q\n' "$WAIT_FOR_MODEL"
+  printf 'MODEL_READY_TIMEOUT_SEC=%q\n' "$MODEL_READY_TIMEOUT_SEC"
   printf 'ENV_B64=%q\n' "$ENV_B64"
   printf 'TUNNEL_KEY_B64=%q\n' "$TUNNEL_KEY_B64"
   printf 'TUNNEL_KH_B64=%q\n' "$TUNNEL_KH_B64"
@@ -489,6 +502,53 @@ if [[ "$ENABLE_TUNNELS" == "true" ]]; then
     exit 1
   fi
   echo "[ok] Reverse tunnels are up and stable."
+fi
+
+# "Running" containers do not mean a serving model: vLLM loads ~475 GiB first, and failures after the load (CUDA graph
+# capture, thread limits) only surface minutes later as a restart loop. Wait for /health, fail fast with the root-cause
+# lines if vllm-server restarts or exits, then send one chat request through LiteLLM (what the tunnels expose).
+if [[ "${WAIT_FOR_MODEL,,}" =~ ^(1|true|yes|on)$ ]]; then
+  echo "[deploy] Waiting up to ${MODEL_READY_TIMEOUT_SEC}s for vllm-server to load the model and serve..."
+  restarts0="$(sudo podman inspect -f '{{.RestartCount}}' vllm-server 2>/dev/null || echo 0)"
+  started=$SECONDS; last_report=$SECONDS
+  while [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/health 2>/dev/null)" != "200" ]]; do
+    info="$(sudo podman inspect -f '{{.State.Status}} {{.RestartCount}}' vllm-server 2>/dev/null || echo "missing ?")"
+    if [[ "$info" != "running ${restarts0}" ]]; then
+      echo "[error] vllm-server stopped or restarted while starting (state/restarts: ${info}, was running ${restarts0})." >&2
+      echo "[error] Root-cause lines from its log:" >&2
+      sudo podman logs --tail 600 vllm-server 2>&1 | tr '\r' '\n' | grep -E 'Error|ERROR|Exception|Assertion|Traceback|Killed|out of memory' \
+        | grep -vE 'unauthenticated requests' | tail -25 | cut -c1-300 >&2
+      exit 1
+    fi
+    if (( SECONDS - started > MODEL_READY_TIMEOUT_SEC )); then
+      echo "[error] vllm-server did not become healthy within ${MODEL_READY_TIMEOUT_SEC}s; last log lines:" >&2
+      sudo podman logs --tail 10 vllm-server 2>&1 | tr '\r' '\n' | tail -10 | cut -c1-200 >&2
+      exit 1
+    fi
+    if (( SECONDS - last_report >= 300 )); then
+      echo "[deploy] ...still starting after $(( (SECONDS - started) / 60 )) min: $(sudo podman logs --tail 3 vllm-server 2>&1 | tr '\r' '\n' | grep -v '^\s*$' | tail -1 | cut -c1-140)"
+      last_report=$SECONDS
+    fi
+    sleep 20
+  done
+  echo "[ok] vllm-server is healthy after $(( (SECONDS - started) / 60 )) min."
+  master_key="$(sed -n 's/^LITELLM_MASTER_KEY=//p' .env | head -n1)"
+  reply="$(printf 'Authorization: Bearer %s\n' "$master_key" | curl -s --max-time 900 -H @- -H 'Content-Type: application/json' \
+    http://127.0.0.1:4000/v1/chat/completions \
+    -d '{"model": "deepseek-v4.1-flash", "messages": [{"role": "user", "content": "Reply with exactly: ok"}], "max_tokens": 32}' \
+    | python3 -c 'import json, sys
+try:
+    r = json.load(sys.stdin)
+except ValueError:
+    sys.exit("LiteLLM returned no JSON (not reachable?)")
+choices = r.get("choices") or []
+if not choices:
+    sys.exit("no completion: " + json.dumps(r)[:300])
+print((choices[0].get("message") or {}).get("content", "")[:120].replace("\n", " "))')" || {
+    echo "[error] LiteLLM -> vllm-server chat check failed: ${reply}" >&2
+    exit 1
+  }
+  echo "[ok] Chat completion through LiteLLM (deepseek-v4.1-flash): ${reply}"
 fi
 DEPLOY_EOF
 } | run_target_bash

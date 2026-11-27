@@ -24,6 +24,11 @@ on:
           - auto
           - "true"
           - "false"
+      wait_for_model:
+        description: "Wait for vllm-server to load the model and answer a LiteLLM chat request (first start: over an hour)"
+        required: false
+        default: true
+        type: boolean
   push:
     branches: [ "main" ]
     paths:
@@ -47,6 +52,8 @@ jobs:
       github.repository_owner == 'vitorecomp'
     runs-on: ${{ inputs.runner && fromJSON(format('["self-hosted","linux","x64","{0}"]', inputs.runner)) || (vars.GPU_RUNNER_LABELS && fromJSON(vars.GPU_RUNNER_LABELS)) || fromJSON(format('["self-hosted","linux","x64","{0}"]', vars.GPU_RUNNER || 'gcp-gpu')) }}
     environment: gpu
+    # A first start downloads ~475 GiB and loads it; the deploy waits for a served chat request (MODEL_READY_TIMEOUT_SEC).
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
 
@@ -61,6 +68,9 @@ jobs:
           # Core authentication & Hugging Face (model parameters live in development/gpu-dev-machine/compose.yml)
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Wait for a serving model (push events always wait; manual runs can opt out).
+          WAIT_FOR_MODEL: ${{ github.event_name != 'workflow_dispatch' || inputs.wait_for_model }}
+          MODEL_READY_TIMEOUT_SEC: ${{ vars.MODEL_READY_TIMEOUT_SEC || '10800' }}
 
           # Reverse SSH tunnels (litellm-tunnel & deepseek-harness-tunnel)
           ENABLE_REVERSE_TUNNELS: ${{ (inputs.enable_tunnels && inputs.enable_tunnels != 'auto' && inputs.enable_tunnels) || vars.ENABLE_REVERSE_TUNNELS || '' }}
