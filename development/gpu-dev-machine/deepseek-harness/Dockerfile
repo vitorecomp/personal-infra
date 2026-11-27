@@ -6,12 +6,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update -qq && \
     apt-get install -y -qq --no-install-recommends \
-      bash ca-certificates curl git python3 ripgrep socat && \
+      bash ca-certificates curl git python3 ripgrep && \
     rm -rf /var/lib/apt/lists/* && \
     npm install -g "@deepseek-ai/dsh@0.2.2-rc.1" "dsh-gateway-provider@1.1.5" && \
     npm cache clean --force && \
     install -d -m 0755 -o node -g node /dsh-home /workspace
 
+# Caddy fronts `dsh web` on :3080 (HTTP + WebSocket) and serves the password-protected /login (see entrypoint.sh).
+# Static Go binary from the official image; same version as the edge proxy in cloud/edge.
+COPY --from=docker.io/library/caddy:2.11.9-alpine /usr/bin/caddy /usr/local/bin/caddy
 COPY cordis.patch.yml.template /etc/deepseek-harness/cordis.patch.yml.template
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh

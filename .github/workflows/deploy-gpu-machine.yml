@@ -68,6 +68,9 @@ jobs:
           # Core authentication & Hugging Face (model parameters live in development/gpu-dev-machine/compose.yml)
           LITELLM_MASTER_KEY: ${{ secrets.LITELLM_MASTER_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Harness /login (basic auth) password; synced from development/.env by setup.sh.
+          HARNESS_USER: ${{ vars.HARNESS_USER || 'admin' }}
+          HARNESS_PASSWORD: ${{ secrets.HARNESS_PASSWORD }}
           # Wait for a serving model (push events always wait; manual runs can opt out).
           WAIT_FOR_MODEL: ${{ github.event_name != 'workflow_dispatch' || inputs.wait_for_model }}
           MODEL_READY_TIMEOUT_SEC: ${{ vars.MODEL_READY_TIMEOUT_SEC || '10800' }}

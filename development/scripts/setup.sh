@@ -365,6 +365,8 @@ PY
 
 # Resolve stack secrets & variables from environment / `development/.env`
 LITELLM_KEY_VAL="$(env_or_dotenv LITELLM_MASTER_KEY "__generate__")"
+HARNESS_PASSWORD_VAL="$(env_or_dotenv HARNESS_PASSWORD "__generate__")"
+HARNESS_USER_VAL="$(env_or_dotenv HARNESS_USER "admin")"
 HF_TOKEN_VAL="$(env_or_dotenv HF_TOKEN "")"
 ENABLE_TUNNELS_VAL="$(env_or_dotenv ENABLE_REVERSE_TUNNELS "false")"
 TUNNEL_HOST_VAL="$(env_or_dotenv TUNNEL_SSH_HOST "")"
@@ -506,6 +508,18 @@ sync_github_settings() {
     fi
   fi
 
+  # Auto-generate HARNESS_PASSWORD (DeepSeek Harness /login) once if set to `__generate__` or empty. URL-safe
+  # characters only: the value lands in a compose .env, where `$` and quotes would be interpreted.
+  if [[ -z "$HARNESS_PASSWORD_VAL" || "$HARNESS_PASSWORD_VAL" == "__generate__" ]]; then
+    HARNESS_PASSWORD_VAL="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
+    if [[ -f "$ENV_FILE" ]]; then
+      persist_key_in_dotenv "$ENV_FILE" "HARNESS_PASSWORD" "$HARNESS_PASSWORD_VAL"
+      echo "[gh-sync] Generated HARNESS_PASSWORD and saved to $ENV_FILE (mode 0600)."
+    else
+      echo "[gh-sync] Generated HARNESS_PASSWORD for GitHub Environment '$GITHUB_ENV_NAME'."
+    fi
+  fi
+
   # Persist default runner identity keys in `development/.env` if empty.
   if [[ -f "$ENV_FILE" ]]; then
     [[ -z "${DOTENV[RUNNER_NAME]:-}" ]] && persist_key_in_dotenv "$ENV_FILE" "RUNNER_NAME" "$RUNNER_NAME"
@@ -532,6 +546,9 @@ sync_github_settings() {
   # Sync Secrets to `gpu` Environment (never print secret values)
   echo "[gh-sync] Uploading secret LITELLM_MASTER_KEY to environment '${GITHUB_ENV_NAME}'..."
   printf '%s' "$LITELLM_KEY_VAL" | gh secret set LITELLM_MASTER_KEY --repo "$REPO_PATH" --env "$GITHUB_ENV_NAME"
+
+  echo "[gh-sync] Uploading secret HARNESS_PASSWORD to environment '${GITHUB_ENV_NAME}'..."
+  printf '%s' "$HARNESS_PASSWORD_VAL" | gh secret set HARNESS_PASSWORD --repo "$REPO_PATH" --env "$GITHUB_ENV_NAME"
 
   if [[ -n "$HF_TOKEN_VAL" ]]; then
     echo "[gh-sync] Uploading secret HF_TOKEN to environment '${GITHUB_ENV_NAME}'..."
@@ -569,6 +586,7 @@ sync_github_settings() {
     "REMOTE_LITELLM_PORT=${REMOTE_LITELLM_PORT_VAL}"
     "REMOTE_HARNESS_PORT=${REMOTE_HARNESS_PORT_VAL}"
     "GPU_TARGET_MODE=${GPU_TARGET_MODE_VAL}"
+    "HARNESS_USER=${HARNESS_USER_VAL}"
   )
   # Host names/IPs and host keys identify personal machines: store them as environment SECRETS so the
   # public repository's Actions logs mask them (plain variables are printed in each step's env block).
@@ -860,6 +878,7 @@ if $DRY_RUN; then
     echo "[dry-run]   gh variable set GPU_RUNNER --repo ${REPO_PATH:-<repo>} --body $GPU_RUNNER_VAL"
     [[ -n "$GPU_RUNNER_LABELS_VAL" ]] && echo "[dry-run]   gh variable set GPU_RUNNER_LABELS --repo ${REPO_PATH:-<repo>} --body '$GPU_RUNNER_LABELS_VAL'"
     echo "[dry-run]   gh secret set LITELLM_MASTER_KEY --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted / auto-generated if __generate__>)"
+    echo "[dry-run]   gh secret set HARNESS_PASSWORD --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted / auto-generated if __generate__>)"
     [[ -n "$HF_TOKEN_VAL" ]] && echo "[dry-run]   gh secret set HF_TOKEN --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"
     [[ -n "$TUNNEL_KEY_FILE_VAL" || -n "$TUNNEL_PRIV_KEY_INLINE" ]] && echo "[dry-run]   gh secret set TUNNEL_SSH_PRIVATE_KEY --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"
     [[ -n "$GPU_SSH_KEY_FILE_VAL" || -n "$GPU_SSH_PRIV_KEY_INLINE" ]] && echo "[dry-run]   gh secret set GPU_SSH_PRIVATE_KEY --repo ${REPO_PATH:-<repo>} --env $GITHUB_ENV_NAME (<redacted>)"

@@ -48,6 +48,7 @@ Options:
 Environment Secrets / Variables (supplied by `.github/workflows/deploy-gpu-machine.yml`):
   LITELLM_MASTER_KEY      Required Bearer token securing LiteLLM (:4000) and DeepSeek Harness
   HF_TOKEN                Optional Hugging Face read token for model weight downloads
+  HARNESS_PASSWORD        Password for the harness /login page (basic auth, user HARNESS_USER, default admin)
   ENABLE_REVERSE_TUNNELS  Set true to start litellm-tunnel and deepseek-harness-tunnel (default: false)
   TUNNEL_SSH_HOST/USER    Destination host & user when reverse SSH tunnels are enabled
   TUNNEL_SSH_PRIVATE_KEY  OpenSSH private key content for reverse SSH tunnels
@@ -137,7 +138,7 @@ fi
 
 ENV_KEYS_PRESENT=()
 for key in \
-  LITELLM_MASTER_KEY HF_TOKEN \
+  LITELLM_MASTER_KEY HF_TOKEN HARNESS_USER HARNESS_PASSWORD \
   TUNNEL_SSH_HOST TUNNEL_SSH_PORT TUNNEL_SSH_USER TUNNEL_BIND_ADDRESS \
   REMOTE_LITELLM_PORT REMOTE_HARNESS_PORT \
   LITELLM_TUNNEL_SSH_HOST LITELLM_TUNNEL_SSH_PORT LITELLM_TUNNEL_SSH_USER \
@@ -357,6 +358,8 @@ fi
 # Note: All model & vLLM parameters live directly in `compose.yml` (vllm-server command).
 ENV_CONTENT="$(cat <<EOF
 LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+HARNESS_USER=${HARNESS_USER:-admin}
+HARNESS_PASSWORD=${HARNESS_PASSWORD:-}
 HF_TOKEN=${HF_TOKEN:-}
 HF_CACHE_DIR=${DATA_ROOT}/huggingface
 VLLM_CACHE_DIR=${DATA_ROOT}/vllm-cache
@@ -588,6 +591,21 @@ if [[ "$harness_code2" == "000" || "$(sudo podman inspect -f '{{.State.Status}} 
   harness_diag
   exit 1
 fi
-echo "[ok] deepseek-harness answers on :3080 (HTTP ${harness_code}; log in with the 'dsh web:' URL from its container log)."
+# /login must ask for the password and, with it, redirect to the tokenized URL (never printed: it is a credential).
+harness_password="$(sed -n 's/^HARNESS_PASSWORD=//p' .env | head -n1)"
+if [[ -n "$harness_password" ]]; then
+  harness_user="$(sed -n 's/^HARNESS_USER=//p' .env | head -n1)"
+  no_auth="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://127.0.0.1:3080/login 2>/dev/null || true)"
+  with_auth="$(printf 'user = "%s:%s"\n' "${harness_user:-admin}" "$harness_password" \
+    | curl -s -K - -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 10 http://127.0.0.1:3080/login 2>/dev/null || true)"
+  if [[ "$no_auth" != "401" || "${with_auth%% *}" != "302" || "${with_auth#* }" != *"/?token="* ]]; then
+    echo "[error] harness /login check failed: without password HTTP ${no_auth} (want 401), with password HTTP ${with_auth%% *} (want 302 to /?token=...)." >&2
+    harness_diag
+    exit 1
+  fi
+  echo "[ok] deepseek-harness answers on :3080 (HTTP ${harness_code}); /login asks for the password and hands out the current launch token."
+else
+  echo "[ok] deepseek-harness answers on :3080 (HTTP ${harness_code}); set HARNESS_PASSWORD to enable /login, or use the 'dsh web:' URL from its log."
+fi
 DEPLOY_EOF
 } | run_target_bash

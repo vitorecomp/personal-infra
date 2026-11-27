@@ -15,7 +15,7 @@ development/
 │   ├── .env.example                  # Runtime .env template written on the GPU VM (mode 0600) by deploy_gpu_stack.sh
 │   ├── compose.yml → vllm-server     # vLLM OpenAI server (image only) serving full unquantized DeepSeek-V4.1-Flash
 │   ├── litellm/                      # LiteLLM OpenAI-compatible proxy (:4000) backed by vllm-server (:8000)
-│   ├── deepseek-harness/             # DeepSeek Harness web UI (:3080 via socat -> 127.0.0.1:3081) pointed at LiteLLM
+│   ├── deepseek-harness/             # DeepSeek Harness web UI (:3080 Caddy front with password /login -> 127.0.0.1:3081) pointed at LiteLLM
 │   └── reverse-tunnel/               # Optional autossh reverse-SSH tunnel containers for LiteLLM & DeepSeek Harness
 ├── infra/
 │   ├── gcp/                          # GCP Terraform: Stateful Zonal MIG (Spot/Standard, custom/default VPC) + Secret Manager runner bootstrap + 3 TB Hyperdisk
@@ -127,6 +127,7 @@ All supported keys in `development/.env`:
 | **`SSH_PROXY_CIDRS`** | `35.235.240.0/20` | GCP VPC firewall (`allow-iap-ssh`) | Proxy CIDR ranges allowed on TCP `22` for optional admin debugging (defaults to GCP IAP). |
 | **`LITELLM_MASTER_KEY`** | `__generate__` | **`gpu` Secret** `LITELLM_MASTER_KEY` | Master Bearer key for `litellm` and `deepseek-harness`. When `__generate__` (or empty), `setup.sh` generates a random `sk-...` key once, **saves it back into `development/.env` (`0600`)**, and uploads it to GitHub Secrets. |
 | **`HF_TOKEN`** | *(empty)* | **`gpu` Secret** `HF_TOKEN` *(if set)* | Optional Hugging Face read token to avoid rate limits pulling `deepseek-ai/DeepSeek-V4.1-Flash`. |
+| **`HARNESS_USER`** / **`HARNESS_PASSWORD`** | `admin` / `__generate__` | **`gpu` Variable** / **Secret** | Login for `http://127.0.0.1:3080/login` (see *Harness login*); the password is generated once, saved back to `development/.env` (`0600`) and uploaded. URL-safe characters only. |
 | **`ENABLE_REVERSE_TUNNELS`** | `false` | **`gpu` Variable** `ENABLE_REVERSE_TUNNELS` | `true` starts `litellm-tunnel` + `deepseek-harness-tunnel`; `false` starts only `vllm-server`, `litellm`, and `deepseek-harness`. |
 | **`TUNNEL_SSH_HOST`** | *(empty)* | **`gpu` Variable** `TUNNEL_SSH_HOST` | Bastion/workstation hostname or IP receiving the reverse SSH tunnels (required when `ENABLE_REVERSE_TUNNELS=true`). |
 | **`TUNNEL_SSH_PORT`** / **`TUNNEL_SSH_USER`** | `22` / *(empty)* | **`gpu` Variables** | SSH port and username on `TUNNEL_SSH_HOST`. |
@@ -226,7 +227,7 @@ Once `./development/scripts/setup.sh --provider=gcp --status` shows your self-ho
 | :--- | :--- | :--- | :--- |
 | **`vllm-server`** | `127.0.0.1:8000` (OpenAI API) | `/mnt/data/huggingface` | `vllm serve` serving full unquantized `deepseek-ai/DeepSeek-V4.1-Flash` (`--tensor-parallel-size=4`, `--cpu-offload-gb=48`, engram CPU offload, `--kv-cache-dtype=fp8`, `--max-model-len=65536`). **All model & offload parameters are version-controlled directly in [`compose.yml`](./gpu-dev-machine/compose.yml)**—not pipeline variables. |
 | **`litellm`** | `127.0.0.1:4000` | — | OpenAI-compatible gateway authenticated with `LITELLM_MASTER_KEY`, routing model aliases to `http://vllm-server:8000/v1`. |
-| **`deepseek-harness`** | `127.0.0.1:3080` | `/mnt/data/deepseek-harness/{dsh-home,workspace}` | Runs `@deepseek-ai/dsh` web UI (`127.0.0.1:3081` forwarded from container `0.0.0.0:3080` via `socat`), pre-wired to `http://litellm:4000/v1` with `LITELLM_MASTER_KEY`. |
+| **`deepseek-harness`** | `127.0.0.1:3080` | `/mnt/data/deepseek-harness/{dsh-home,workspace}` | Runs `@deepseek-ai/dsh` web UI (`127.0.0.1:3081` behind a Caddy front with the password-protected `/login`; forwarded from container `0.0.0.0:3080` via `socat`), pre-wired to `http://litellm:4000/v1` with `LITELLM_MASTER_KEY`. |
 | **`litellm-tunnel`** *(optional)* | Outbound SSH | `/mnt/data/reverse-tunnel` | Started only when `ENABLE_REVERSE_TUNNELS=true`; `autossh` reverse-forwards `TUNNEL_SSH_HOST:REMOTE_LITELLM_PORT` → `litellm:4000`. |
 | **`deepseek-harness-tunnel`** *(optional)* | Outbound SSH | `/mnt/data/reverse-tunnel` | Started only when `ENABLE_REVERSE_TUNNELS=true`; `autossh` reverse-forwards `TUNNEL_SSH_HOST:REMOTE_HARNESS_PORT` → `deepseek-harness:3080`. |
 
@@ -262,6 +263,7 @@ All items below are populated automatically from `development/.env` when you run
 | **`LITELLM_MASTER_KEY`** | **Yes** | Master Bearer key securing `litellm` and injected into `deepseek-harness` (auto-generated once by `setup.sh` when `LITELLM_MASTER_KEY=__generate__`). |
 | **`TUNNEL_SSH_PRIVATE_KEY`** | When tunnels enabled | OpenSSH private key uploaded from `TUNNEL_SSH_KEY_FILE` in `development/.env`, used by `litellm-tunnel` and `deepseek-harness-tunnel`. |
 | **`HF_TOKEN`** | Optional | Hugging Face read token to avoid rate limits when downloading `deepseek-ai/DeepSeek-V4.1-Flash`. |
+| **`HARNESS_PASSWORD`** | Recommended | Password for the harness `/login` page (basic auth, user `HARNESS_USER`, default `admin`); generated once by `setup.sh` when `__generate__`. |
 | **`GPU_SSH_PRIVATE_KEY`** | Optional (non-GCP) | SSH private key uploaded from `GPU_SSH_KEY_FILE` when `GPU_TARGET_MODE=ssh` targets an external `GPU_SSH_HOST`. |
 | **`TUNNEL_SSH_HOST`**, **`TUNNEL_KNOWN_HOSTS`** (+ `LITELLM_`/`HARNESS_TUNNEL_SSH_HOST`, `GPU_SSH_HOST`, `GPU_SSH_KNOWN_HOSTS`) | When set | Host names/IPs and host keys of personal machines. `setup.sh` stores them as secrets (masked in this public repo's logs) and deletes same-named variables; the workflow falls back to variables. |
 
@@ -340,17 +342,14 @@ python3 cloud/scripts/bootstrap_vm.py --host ubuntu@<vm-ip> --provider gce --dep
 
 Both ports are closed while the GPU machine is stopped or preempted; autossh reconnects when it is back.
 
-**Harness login.** `dsh web` authenticates with a fresh per-process token printed once in its container log
-(a `dsh web:` URL); without it the UI answers 401. The deploy never copies it into the (public) Actions log. Read it
-over IAP SSH and open it through the tunnel; it prints the internal port 3081 (behind socat), so use 3080:
-
-```bash
-gcloud compute ssh <dev-gpu-vm-name> --zone <zone> --project <project> --tunnel-through-iap \
-  -- sudo podman logs deepseek-harness 2>&1 | grep 'dsh web:' | tail -1     # http://127.0.0.1:3081/?token=...
-# then, on personal-host or through `ssh -L 3080:127.0.0.1:3080 ubuntu@<vm-ip>`: http://127.0.0.1:3080/?token=...
-```
-
-A new token is issued whenever the harness container restarts (redeploys, Spot preemptions).
+**Harness login.** Open `http://127.0.0.1:3080/login` (on personal-host, or through
+`ssh -L 3080:127.0.0.1:3080 ubuntu@<vm-ip>`), enter `HARNESS_USER` / `HARNESS_PASSWORD` from `development/.env`
+(HTTP basic auth), and you land in the UI. Behind it: dsh mints a random launch token per process that sets a signed
+session cookie (30 days; the signing secret persists in `dsh-home/.credentials.yaml`, so restarts keep you logged in).
+A Caddy front in the harness container (replacing socat on :3080) captures the token at startup and `/login` redirects
+to it only after the password; everything else is proxied to dsh, HTTP and WebSocket, still guarded by its cookie.
+`setup.sh` generates `HARNESS_PASSWORD` once (`__generate__`) and syncs it as a `gpu` secret. Without it, `/login` is
+disabled and the `dsh web:` URL in the container log (port 3081 there, use 3080) still works.
 
 ### Update Secrets / Tunnel Settings & Redeploy Stack
 ```bash
