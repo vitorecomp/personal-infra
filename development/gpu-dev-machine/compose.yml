@@ -11,8 +11,10 @@ services:
     # vLLM's own OpenAI-compatible server (the image's ENTRYPOINT is `vllm serve`). DeepSeek-V4.1-Flash needs
     # vLLM >= 0.30 (v0.30.0 release notes) and every released Ray Serve LLM (latest 2.60.1) pins vLLM 0.29,
     # so the stack does not use Ray. All model, tensor-parallel, CPU-offload and KV-cache settings are the
-    # arguments under `command:` (flags verified against vLLM v0.33.0's arg_utils.py and parser registries).
-    image: docker.io/vllm/vllm-openai:v0.33.0
+    # arguments under `command:` (flags verified against vLLM v0.34.0's arg_utils.py, cli_args.py and parser registries).
+    # v0.34.0 is required on these RTX PRO 6000 (SM120) GPUs: v0.33.0 used 128-token KV blocks for the DeepSeek-V4.1
+    # indexer, which trips DeepGEMM's `block_kv == 32 or block_kv == 64` assert during CUDA graph capture (#59203).
+    image: docker.io/vllm/vllm-openai:v0.34.0
     container_name: vllm-server
     restart: unless-stopped
     ipc: host
@@ -28,7 +30,6 @@ services:
       HF_TOKEN: ${HF_TOKEN:-}
       HF_HOME: /mnt/data/huggingface
       VLLM_ENGINE_READY_TIMEOUT_S: "7200" # loading the 475 GiB checkpoint takes long
-      VLLM_USE_V2_MODEL_RUNNER: "1"
       # Rust thread pools (HF tokenizers) default to one thread per CPU in every worker process: 4 TP workers x 192
       # vCPUs blew through Podman's default 2048-task limit right after loading ("ThreadPoolBuildError ... Resource
       # temporarily unavailable"). Cap them; the deploy also raises Podman's pids_limit (containers.conf.d).
