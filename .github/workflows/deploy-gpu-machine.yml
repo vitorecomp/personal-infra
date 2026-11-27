@@ -1,6 +1,6 @@
 name: Deploy GPU Dev Machine Stack
 # Deploys the Podman + `podman-compose` stack (`development/gpu-dev-machine`) onto
-# the GPU development machine (`ray-server` serving full unquantized DeepSeek-V4.1-Flash
+# the GPU development machine (`vllm-server` serving full unquantized DeepSeek-V4.1-Flash
 # with CPU offload, `litellm`, `deepseek-harness`, and reverse SSH tunnels).
 #
 # Which self-hosted runner executes this job is controlled by the Repository Variable

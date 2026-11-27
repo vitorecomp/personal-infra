@@ -403,7 +403,7 @@ if [ -f "$STACK_DIR/compose.yml" ] && [ -f "$STACK_DIR/.env" ]; then
     (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d) || \
       echo "[warn] Failed to auto-resume full podman-compose stack."
   else
-    (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d ray-server litellm deepseek-harness) || \
+    (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d vllm-server litellm deepseek-harness) || \
       echo "[warn] Failed to auto-resume core podman-compose stack."
   fi
 fi

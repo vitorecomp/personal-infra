@@ -13,14 +13,14 @@ flowchart LR
   HT --> H["deepseek-harness (:3080)"]
   LT --> L["litellm (:4000)"]
   H -- "OpenAI API (http://litellm:4000/v1)" --> L
-  L -- "OpenAI API (http://ray-server:8000/v1)" --> R["ray-server (:8000 / :8265)"]
+  L -- "OpenAI API (http://vllm-server:8000/v1)" --> R["vllm-server (:8000)"]
   R --- M[("/mnt/data/huggingface: DeepSeek-V4.1-Flash (475 GiB Full + CPU Offload)")]
 ```
 
 | Service | Directory | Base / Pinned Packages | Role |
 | :--- | :--- | :--- | :--- |
-| **`ray-server`** | [`ray-server/`](./ray-server) | `vllm/vllm-openai:v0.33.0` + `ray[serve,llm]==2.60.0` | Serves the **full unquantized** `deepseek-ai/DeepSeek-V4.1-Flash` (552B MoE, `475 GiB`) across 4 GPUs (`tensor_parallel_size=4`) with **CPU offload** (`cpu_offload_gb=48` per GPU + `engram_config.cpu_offload=true`). |
-| **`litellm`** | [`litellm/`](./litellm) | `python:3.12-slim-bookworm` + `litellm[proxy]==1.109.1` | OpenAI-compatible AI gateway routing `deepseek-v4.1-flash` to `http://ray-server:8000/v1`. |
+| **`vllm-server`** | *(no build: image only)* | `vllm/vllm-openai:v0.33.0` (`vllm serve`) | Serves the **full unquantized** `deepseek-ai/DeepSeek-V4.1-Flash` (552B MoE, `475 GiB`) across 4 GPUs (`--tensor-parallel-size=4`) with **CPU offload** (`--cpu-offload-gb=48` + `--engram-config` `cpu_offload`), `fp8` KV cache and the `deepseek_v41` tokenizer / tool / reasoning parsers. No Ray: DeepSeek-V4.1-Flash needs vLLM ≥ 0.30 and Ray Serve LLM (≤ 2.60.1) pins vLLM 0.29. |
+| **`litellm`** | [`litellm/`](./litellm) | `python:3.12-slim-bookworm` + `litellm[proxy]==1.109.1` | OpenAI-compatible AI gateway routing `deepseek-v4.1-flash` to `http://vllm-server:8000/v1`. |
 | **`deepseek-harness`** | [`deepseek-harness/`](./deepseek-harness) | `node:22-bookworm-slim` + `@deepseek-ai/dsh@0.2.2-rc.1` + `dsh-gateway-provider@1.1.5` | DeepSeek Harness (`dsh web`) pre-configured via `cordis.patch.yml` to talk to `http://litellm:4000/v1`. |
 | **`litellm-tunnel`** | [`reverse-tunnel/`](./reverse-tunnel) | `debian:bookworm-slim` + `autossh` + `openssh-client` | Persistent reverse SSH tunnel forwarding `REMOTE_LITELLM_PORT` (`4000`) on `TUNNEL_SSH_HOST` back to `litellm:4000`. |
 | **`deepseek-harness-tunnel`** | [`reverse-tunnel/`](./reverse-tunnel) | `debian:bookworm-slim` + `autossh` + `openssh-client` | Persistent reverse SSH tunnel forwarding `REMOTE_HARNESS_PORT` (`3080`) on `TUNNEL_SSH_HOST` back to `deepseek-harness:3080`. |
@@ -89,7 +89,7 @@ sed -i "s|changeme-litellm-master-key|sk-$(openssl rand -hex 24)|" .env
 sudo TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d --build
 
 # Follow logs (model load, Web UI login URL, and reverse tunnels)
-sudo podman logs -f ray-server
+sudo podman logs -f vllm-server
 sudo podman logs -f deepseek-harness
 sudo podman logs -f litellm-tunnel
 sudo podman logs -f deepseek-harness-tunnel
@@ -108,12 +108,12 @@ gcloud compute ssh dev-gpu-vm \
   --zone=europe-west4-b \
   --project=<gcp-project-id> \
   --tunnel-through-iap \
-  -- -L 3080:127.0.0.1:3080 -L 4000:127.0.0.1:4000 -L 8265:127.0.0.1:8265
+  -- -L 3080:127.0.0.1:3080 -L 4000:127.0.0.1:4000 -L 8000:127.0.0.1:8000
 ```
 
 - **DeepSeek Harness UI**: `http://127.0.0.1:3080`
 - **LiteLLM Proxy API**: `http://127.0.0.1:4000/v1`
-- **Ray Serve Dashboard**: `http://127.0.0.1:8265`
+- **vLLM OpenAI API (direct, no auth)**: `http://127.0.0.1:8000/v1`
 
 ### Quick Smoke Test Against LiteLLM
 

@@ -10,11 +10,11 @@ End-to-end automation and runbook for syncing GitHub Actions variables/secrets a
 development/
 ├── README.md                         # Complete step-by-step workflow & operations guide
 ├── .env.example                      # Template for gitignored `development/.env` (synced to GitHub via `gh` by setup.sh)
-├── gpu-dev-machine/                  # Podman + podman-compose stack (Ray Serve DeepSeek-V4.1-Flash, LiteLLM, DeepSeek Harness, reverse tunnels)
+├── gpu-dev-machine/                  # Podman + podman-compose stack (vLLM DeepSeek-V4.1-Flash, LiteLLM, DeepSeek Harness, reverse tunnels)
 │   ├── compose.yml                   # Stack definition; all model, TP, KV-cache & CPU-offload parameters live directly here
 │   ├── .env.example                  # Runtime .env template written on the GPU VM (mode 0600) by deploy_gpu_stack.sh
-│   ├── ray-server/                   # Ray Serve + vLLM engine serving full unquantized DeepSeek-V4.1-Flash
-│   ├── litellm/                      # LiteLLM OpenAI-compatible proxy (:4000) backed by ray-server (:8000)
+│   ├── compose.yml → vllm-server     # vLLM OpenAI server (image only) serving full unquantized DeepSeek-V4.1-Flash
+│   ├── litellm/                      # LiteLLM OpenAI-compatible proxy (:4000) backed by vllm-server (:8000)
 │   ├── deepseek-harness/             # DeepSeek Harness web UI (:3080 via socat -> 127.0.0.1:3081) pointed at LiteLLM
 │   └── reverse-tunnel/               # Optional autossh reverse-SSH tunnel containers for LiteLLM & DeepSeek Harness
 ├── infra/
@@ -127,7 +127,7 @@ All supported keys in `development/.env`:
 | **`SSH_PROXY_CIDRS`** | `35.235.240.0/20` | GCP VPC firewall (`allow-iap-ssh`) | Proxy CIDR ranges allowed on TCP `22` for optional admin debugging (defaults to GCP IAP). |
 | **`LITELLM_MASTER_KEY`** | `__generate__` | **`gpu` Secret** `LITELLM_MASTER_KEY` | Master Bearer key for `litellm` and `deepseek-harness`. When `__generate__` (or empty), `setup.sh` generates a random `sk-...` key once, **saves it back into `development/.env` (`0600`)**, and uploads it to GitHub Secrets. |
 | **`HF_TOKEN`** | *(empty)* | **`gpu` Secret** `HF_TOKEN` *(if set)* | Optional Hugging Face read token to avoid rate limits pulling `deepseek-ai/DeepSeek-V4.1-Flash`. |
-| **`ENABLE_REVERSE_TUNNELS`** | `false` | **`gpu` Variable** `ENABLE_REVERSE_TUNNELS` | `true` starts `litellm-tunnel` + `deepseek-harness-tunnel`; `false` starts only `ray-server`, `litellm`, and `deepseek-harness`. |
+| **`ENABLE_REVERSE_TUNNELS`** | `false` | **`gpu` Variable** `ENABLE_REVERSE_TUNNELS` | `true` starts `litellm-tunnel` + `deepseek-harness-tunnel`; `false` starts only `vllm-server`, `litellm`, and `deepseek-harness`. |
 | **`TUNNEL_SSH_HOST`** | *(empty)* | **`gpu` Variable** `TUNNEL_SSH_HOST` | Bastion/workstation hostname or IP receiving the reverse SSH tunnels (required when `ENABLE_REVERSE_TUNNELS=true`). |
 | **`TUNNEL_SSH_PORT`** / **`TUNNEL_SSH_USER`** | `22` / *(empty)* | **`gpu` Variables** | SSH port and username on `TUNNEL_SSH_HOST`. |
 | **`TUNNEL_SSH_KEY_FILE`** | `__generate__` | **`gpu` Secret** `TUNNEL_SSH_PRIVATE_KEY` | When `__generate__`, `setup.sh` creates `~/.ssh/gpu_tunnel_ed25519` (+ `.pub`), saves its path in `development/.env`, and uploads the private key as `TUNNEL_SSH_PRIVATE_KEY`. |
@@ -224,8 +224,8 @@ Once `./development/scripts/setup.sh --provider=gcp --status` shows your self-ho
 
 | Service in [`compose.yml`](./gpu-dev-machine/compose.yml) | GPU VM Port | Persistent Storage on `/mnt/data` | Role & Configuration |
 | :--- | :--- | :--- | :--- |
-| **`ray-server`** | `127.0.0.1:8000` (API), `127.0.0.1:8265` (Ray Dashboard) | `/mnt/data/huggingface` | Serves full unquantized `deepseek-ai/DeepSeek-V4.1-Flash` (`TENSOR_PARALLEL_SIZE=4`, `CPU_OFFLOAD_GB=48`, `ENGRAM_CPU_OFFLOAD=true`, `KV_CACHE_DTYPE=fp8`, `MAX_MODEL_LEN=65536`). **All model & offload parameters are version-controlled directly in [`compose.yml`](./gpu-dev-machine/compose.yml)**—not pipeline variables. |
-| **`litellm`** | `127.0.0.1:4000` | — | OpenAI-compatible gateway authenticated with `LITELLM_MASTER_KEY`, routing model aliases to `http://ray-server:8000/v1`. |
+| **`vllm-server`** | `127.0.0.1:8000` (OpenAI API) | `/mnt/data/huggingface` | `vllm serve` serving full unquantized `deepseek-ai/DeepSeek-V4.1-Flash` (`--tensor-parallel-size=4`, `--cpu-offload-gb=48`, engram CPU offload, `--kv-cache-dtype=fp8`, `--max-model-len=65536`). **All model & offload parameters are version-controlled directly in [`compose.yml`](./gpu-dev-machine/compose.yml)**—not pipeline variables. |
+| **`litellm`** | `127.0.0.1:4000` | — | OpenAI-compatible gateway authenticated with `LITELLM_MASTER_KEY`, routing model aliases to `http://vllm-server:8000/v1`. |
 | **`deepseek-harness`** | `127.0.0.1:3080` | `/mnt/data/deepseek-harness/{dsh-home,workspace}` | Runs `@deepseek-ai/dsh` web UI (`127.0.0.1:3081` forwarded from container `0.0.0.0:3080` via `socat`), pre-wired to `http://litellm:4000/v1` with `LITELLM_MASTER_KEY`. |
 | **`litellm-tunnel`** *(optional)* | Outbound SSH | `/mnt/data/reverse-tunnel` | Started only when `ENABLE_REVERSE_TUNNELS=true`; `autossh` reverse-forwards `TUNNEL_SSH_HOST:REMOTE_LITELLM_PORT` → `litellm:4000`. |
 | **`deepseek-harness-tunnel`** *(optional)* | Outbound SSH | `/mnt/data/reverse-tunnel` | Started only when `ENABLE_REVERSE_TUNNELS=true`; `autossh` reverse-forwards `TUNNEL_SSH_HOST:REMOTE_HARNESS_PORT` → `deepseek-harness:3080`. |
@@ -272,7 +272,7 @@ All items below are populated automatically from `development/.env` when you run
 | Variable | Required | Default | Description |
 | :--- | :--- | :--- | :--- |
 | **`GPU_TARGET_MODE`** | Optional | `local` *(in `.env.example`; `auto` workflow fallback)* | Execution mode for `deploy_gpu_stack.sh`: `local` (default for self-registering GCP MIG runner), `auto`, or `ssh`. |
-| **`ENABLE_REVERSE_TUNNELS`** | Optional | `false` *(or `true` if `TUNNEL_SSH_HOST` set)* | `true` starts `litellm-tunnel` + `deepseek-harness-tunnel`; `false` starts only `ray-server`, `litellm`, and `deepseek-harness`. |
+| **`ENABLE_REVERSE_TUNNELS`** | Optional | `false` *(or `true` if `TUNNEL_SSH_HOST` set)* | `true` starts `litellm-tunnel` + `deepseek-harness-tunnel`; `false` starts only `vllm-server`, `litellm`, and `deepseek-harness`. |
 | **`TUNNEL_SSH_HOST`** | When tunnels enabled | — | *(Now synced as a secret, see above.)* Remote host receiving the reverse-forwarded ports. |
 | **`TUNNEL_SSH_USER`** | When tunnels enabled | — | SSH username on `TUNNEL_SSH_HOST`. |
 | **`TUNNEL_SSH_PORT`** | Optional | `22` | SSH port on `TUNNEL_SSH_HOST`. |

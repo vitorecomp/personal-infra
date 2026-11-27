@@ -29,7 +29,7 @@ usage() {
   cat <<'EOF'
 Usage: ./development/scripts/deploy_gpu_stack.sh [options]
 
-Deploys `development/gpu-dev-machine` (Ray Serve DeepSeek-V4.1-Flash, LiteLLM,
+Deploys `development/gpu-dev-machine` (vLLM DeepSeek-V4.1-Flash, LiteLLM,
 DeepSeek Harness, and optional reverse SSH tunnels) via Podman + podman-compose.
 
 Options:
@@ -139,7 +139,7 @@ for key in \
   fi
 done
 
-SERVICES_TO_START=(ray-server litellm deepseek-harness)
+SERVICES_TO_START=(vllm-server litellm deepseek-harness)
 if [[ "$ENABLE_TUNNELS" == "true" ]]; then
   SERVICES_TO_START+=(litellm-tunnel deepseek-harness-tunnel)
 fi
@@ -277,7 +277,7 @@ else
 fi
 
 # 3. Write .env (0600), tunnel SSH key (0444 inside 0700 dir), and start containers via podman-compose.
-# Note: All model & Ray Serve / vLLM parameters live directly in `compose.yml`.
+# Note: All model & vLLM parameters live directly in `compose.yml` (vllm-server command).
 ENV_CONTENT="$(cat <<EOF
 LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
 HF_TOKEN=${HF_TOKEN:-}
@@ -339,16 +339,34 @@ if [[ -n "$TUNNEL_KH_B64" ]]; then
 fi
 
 cd "${REMOTE_STACK_DIR}"
+# The model server used to be the Ray Serve `ray-server` container; make sure a leftover one cannot hold
+# the GPUs or port 8000.
+sudo podman rm -f ray-server >/dev/null 2>&1 || true
 if [[ "$ENABLE_TUNNELS" == "true" ]]; then
   echo "[deploy] Building and starting all 5 services (including reverse SSH tunnels) with podman-compose..."
   sudo env TMPDIR="${DATA_ROOT}/containers/tmp" podman-compose -f compose.yml up -d --build
 else
-  echo "[deploy] Reverse tunnels disabled; starting ray-server, litellm, and deepseek-harness..."
+  echo "[deploy] Reverse tunnels disabled; starting vllm-server, litellm, and deepseek-harness..."
   sudo podman rm -f litellm-tunnel deepseek-harness-tunnel >/dev/null 2>&1 || true
-  sudo env TMPDIR="${DATA_ROOT}/containers/tmp" podman-compose -f compose.yml up -d --build ray-server litellm deepseek-harness
+  sudo env TMPDIR="${DATA_ROOT}/containers/tmp" podman-compose -f compose.yml up -d --build vllm-server litellm deepseek-harness
 fi
 
 echo "[deploy] Active Podman containers:"
 sudo podman ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+
+# podman-compose 1.0.x exits 0 even when a build or `podman run` fails, so verify the result explicitly.
+expected=(vllm-server litellm deepseek-harness)
+[[ "$ENABLE_TUNNELS" == "true" ]] && expected+=(litellm-tunnel deepseek-harness-tunnel)
+not_running=()
+for name in "${expected[@]}"; do
+  state="$(sudo podman inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
+  [[ "$state" == "running" ]] || not_running+=("${name}=${state}")
+done
+if (( ${#not_running[@]} )); then
+  echo "[error] podman-compose finished, but these containers are not running: ${not_running[*]}" >&2
+  echo "[error] See the build/start errors above." >&2
+  exit 1
+fi
+echo "[ok] All ${#expected[@]} containers are running (vllm-server may still be loading the model; see its healthcheck)."
 DEPLOY_EOF
 } | run_target_bash

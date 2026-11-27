@@ -7,12 +7,13 @@
 name: gpu-dev-machine
 
 services:
-  ray-server:
-    build:
-      context: ./ray-server
-      dockerfile: Dockerfile
-    image: localhost/gpu-dev-ray-server:0.33.0
-    container_name: ray-server
+  vllm-server:
+    # vLLM's own OpenAI-compatible server (the image's ENTRYPOINT is `vllm serve`). DeepSeek-V4.1-Flash needs
+    # vLLM >= 0.30 (v0.30.0 release notes) and every released Ray Serve LLM (latest 2.60.1) pins vLLM 0.29,
+    # so the stack does not use Ray. All model, tensor-parallel, CPU-offload and KV-cache settings are the
+    # arguments under `command:` (flags verified against vLLM v0.33.0's arg_utils.py and parser registries).
+    image: docker.io/vllm/vllm-openai:v0.33.0
+    container_name: vllm-server
     restart: unless-stopped
     ipc: host
     shm_size: "64gb"
@@ -26,27 +27,34 @@ services:
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
       HF_HOME: /mnt/data/huggingface
-      # All model & CPU-offload parameters are controlled directly here in compose.yml:
-      MODEL_ID: "deepseek-ai/DeepSeek-V4.1-Flash"
-      MODEL_SOURCE: "deepseek-ai/DeepSeek-V4.1-Flash"
-      TENSOR_PARALLEL_SIZE: "4"
-      CPU_OFFLOAD_GB: "48"
-      ENGRAM_CPU_OFFLOAD: "true"
-      GPU_MEMORY_UTILIZATION: "0.92"
-      MAX_MODEL_LEN: "65536"
-      KV_CACHE_DTYPE: "fp8"
-      MAX_NUM_SEQS: "8"
-      RAY_SERVE_HOST: "0.0.0.0"
-      RAY_SERVE_PORT: "8000"
+      VLLM_ENGINE_READY_TIMEOUT_S: "7200" # loading the 475 GiB checkpoint takes long
+      VLLM_USE_V2_MODEL_RUNNER: "1"
+    command:
+      - deepseek-ai/DeepSeek-V4.1-Flash # full unquantized checkpoint (no --quantization)
+      - --served-model-name=deepseek-ai/DeepSeek-V4.1-Flash
+      - --host=0.0.0.0
+      - --port=8000
+      - --tensor-parallel-size=4
+      - --cpu-offload-gb=48 # weights beyond VRAM live in host RAM
+      - '--engram-config={"cpu_offload": true, "use_thp": true}'
+      - --gpu-memory-utilization=0.92
+      - --max-model-len=65536
+      - --kv-cache-dtype=fp8
+      - --max-num-seqs=8
+      - --tokenizer-mode=deepseek_v41
+      - --tool-call-parser=deepseek_v41
+      - --enable-auto-tool-choice
+      - --reasoning-parser=deepseek_v41
+      - --trust-remote-code
     volumes:
       - ${HF_CACHE_DIR:-/mnt/data/huggingface}:/mnt/data/huggingface
     ports:
       - "127.0.0.1:8000:8000"
-      - "127.0.0.1:8265:8265"
     networks:
       - gpu-dev-net
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/v1/models"]
+      # No curl in the vLLM image; /health answers once the engine is ready.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 10
@@ -60,9 +68,9 @@ services:
     container_name: litellm
     restart: unless-stopped
     depends_on:
-      - ray-server
+      - vllm-server
     environment:
-      RAY_SERVER_API_BASE: http://ray-server:8000/v1
+      VLLM_API_BASE: http://vllm-server:8000/v1
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env}
     ports:
       - "127.0.0.1:4000:4000"

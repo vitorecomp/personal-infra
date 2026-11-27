@@ -77,7 +77,7 @@ personal-infra/
 │       └── configure_ai_spend_cap.py       # Idempotently configures GCP Cloud Billing Spend Cap budgets for AI services
 ├── development/                            # Cloud & on-prem GPU development machine provisioning & Podman stack
 │   ├── README.md, .env.example             # Full GPU workflow runbook & template for gitignored `development/.env`
-│   ├── gpu-dev-machine/                    # Podman + podman-compose stack (ray-server DeepSeek-V4.1-Flash, litellm, deepseek-harness)
+│   ├── gpu-dev-machine/                    # Podman + podman-compose stack (vllm-server DeepSeek-V4.1-Flash, litellm, deepseek-harness)
 │   ├── infra/
 │   │   ├── gcp/                            # GCP Terraform: Stateful MIG (Spot/Standard, custom/default VPC) + Secret Manager runner bootstrap + 3 TB Hyperdisk
 │   │   ├── azure/                          # (Planned) Azure GPU VM infrastructure
