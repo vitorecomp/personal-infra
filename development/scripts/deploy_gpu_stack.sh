@@ -224,7 +224,15 @@ sudo mkdir -p \
   "${DATA_ROOT}/reverse-tunnel/state/harness" \
   "${REMOTE_STACK_DIR}"
 sudo chmod 0700 "${DATA_ROOT}/reverse-tunnel"
-sudo chmod -R 1777 "${DATA_ROOT}/deepseek-harness" "${DATA_ROOT}/reverse-tunnel/state"
+# Directories only (like the VM startup-script): the containers' users must be able to create files in these bind
+# mounts. Never recursive: `chmod -R 1777` made dsh-home/.credentials.yaml world-readable and dsh refuses to start
+# with it ("credentials-local: ... readable beyond its owner (mode 777)"); live it crash-looped 1388 times.
+sudo chmod 1777 \
+  "${DATA_ROOT}/deepseek-harness" "${DATA_ROOT}/deepseek-harness/dsh-home" "${DATA_ROOT}/deepseek-harness/workspace" \
+  "${DATA_ROOT}/reverse-tunnel/state" "${DATA_ROOT}/reverse-tunnel/state/litellm" "${DATA_ROOT}/reverse-tunnel/state/harness"
+# Repair files the old recursive chmod opened up: the harness state (credentials, sessions) is owner-only.
+sudo find "${DATA_ROOT}/deepseek-harness/dsh-home" -type f -perm /1077 -exec chmod go-rwx,-t {} + 2>/dev/null || true
+[[ -f "${DATA_ROOT}/deepseek-harness/dsh-home/.credentials.yaml" ]] && sudo chmod 0600 "${DATA_ROOT}/deepseek-harness/dsh-home/.credentials.yaml"
 sudo touch "${DATA_ROOT}/reverse-tunnel/known_hosts"
 # Large readahead on the disk behind DATA_ROOT: vLLM loads the checkpoint through mmap page faults, which with the
 # default 128 KiB readahead become ~20 KiB reads and pin the disk at its IOPS cap (76 MB/s measured); 16 MiB gave
