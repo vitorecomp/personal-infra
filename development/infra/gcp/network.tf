@@ -109,6 +109,25 @@ resource "google_compute_firewall" "allow_external_ssh" {
   }
 }
 
+# Google's health checkers -> the gpu-health probe only (MIG autohealing). It answers "ok"/"booting"/a reason, nothing else.
+resource "google_compute_firewall" "allow_health_checks" {
+  count = local.autohealing_enabled ? 1 : 0
+
+  project   = var.project_id
+  name      = "${local.net_res_prefix}-allow-health-checks"
+  network   = local.vpc_id
+  direction = "INGRESS"
+  priority  = 1000
+
+  source_ranges = ["35.191.0.0/16", "130.211.0.0/22"]
+  target_tags   = ["${var.name_prefix}-vm"]
+
+  allow {
+    protocol = "tcp"
+    ports    = [tostring(var.health_check_port)]
+  }
+}
+
 # Explicitly deny all other ingress traffic to the GPU VM.
 resource "google_compute_firewall" "deny_other_ingress" {
   count = var.enable_ingress_firewalls ? 1 : 0

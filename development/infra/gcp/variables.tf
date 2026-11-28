@@ -151,6 +151,29 @@ variable "enable_ingress_firewalls" {
   default     = true
 }
 
+variable "enable_autohealing" {
+  description = "Recreate the GPU VM when its host probe (gpu-health) reports a stuck boot or an inactive runner, or stops answering. Needs enable_ingress_firewalls = true (the probe must be reachable from Google's health checkers)."
+  type        = bool
+  default     = true
+}
+
+variable "health_check_port" {
+  description = "TCP port of the gpu-health host probe, reachable only from Google's health-check ranges (35.191.0.0/16, 130.211.0.0/22)."
+  type        = number
+  default     = 8090
+}
+
+variable "autohealing_initial_delay_sec" {
+  description = "Seconds after a VM (re)starts before the MIG acts on its health (the probe itself also reports healthy for the first 30 min of every boot)."
+  type        = number
+  default     = 900
+
+  validation {
+    condition     = var.autohealing_initial_delay_sec >= 0 && var.autohealing_initial_delay_sec <= 3600
+    error_message = "autohealing_initial_delay_sec must be between 0 and 3600."
+  }
+}
+
 variable "enable_public_ingress" {
   description = "Allow direct public SSH ingress from allowed_ssh_cidrs when enable_external_ip = true. Disabled by default."
   type        = bool

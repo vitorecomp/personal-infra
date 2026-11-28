@@ -22,6 +22,14 @@ locals {
   )
 
   effective_runner_name = trimspace(var.runner_name) != "" ? trimspace(var.runner_name) : "${var.name_prefix}-runner"
+
+  # MIG autohealing needs the probe reachable from Google's health checkers, i.e. firewall rules managed here.
+  autohealing_enabled = var.enable_autohealing && var.enable_ingress_firewalls
+  # gpu-health: always healthy for the first 30 min of a boot (driver install + reboot, runner start); after that the
+  # runner service must be active, and the startup script must have finished within 120 min (GCS restore of the
+  # model, stack resume). deploy_gpu_stack.sh waits up to 90 min for the startup script.
+  health_boot_grace_sec = 1800
+  health_max_boot_sec   = 7200
   create_runner_secret_version = (
     trimspace(var.github_repo) != "" &&
     (trimspace(var.runner_token) != "" || trimspace(var.runner_pat) != "")
@@ -38,6 +46,98 @@ export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/
 export DEBIAN_FRONTEND=noninteractive
 
 echo "=== [gpu-mig-bootstrap] Starting at $(date -Is) ==="
+
+# 0. Host probe for MIG autohealing: gpu-health answers GET /health on 0.0.0.0:${var.health_check_port}, which the firewall
+#    opens only to Google's health checkers. Healthy for the first 30 min of a boot; then only while the runner service
+#    is active and this boot's startup script has finished (or is still within 120 min). vLLM is deliberately not part
+#    of it: a model that fails to start is a config problem, and recreating the VM for it would only loop.
+#    Installed first and enabled, so a later step that hangs (or a VM that stops answering) gets the VM recreated.
+if [ "${local.autohealing_enabled}" = "true" ]; then
+  cat <<'HEALTHEOF' > /usr/local/bin/gpu-health
+#!/usr/bin/env python3
+"""GCE MIG autohealing probe for the GPU VM (personal-infra, development/infra/gcp/main.tf)."""
+import http.server
+import os
+import pathlib
+import subprocess
+
+PORT = int(os.environ.get("GPU_HEALTH_PORT", "8090"))
+GRACE_S = int(os.environ.get("GPU_HEALTH_BOOT_GRACE_S", "1800"))
+MAX_BOOT_S = int(os.environ.get("GPU_HEALTH_MAX_BOOT_S", "7200"))
+DONE = pathlib.Path("/run/gpu-bootstrap-done")
+RUNNER_SERVICE_FILE = pathlib.Path("/mnt/data/actions-runner/.service")
+FALLBACK_SERVICE = "actions.runner.gpu.service"
+
+
+def uptime_s() -> float:
+    return float(pathlib.Path("/proc/uptime").read_text().split()[0])
+
+
+def runner_active() -> bool:
+    names = [FALLBACK_SERVICE]
+    try:
+        names.insert(0, RUNNER_SERVICE_FILE.read_text().strip())
+    except OSError:
+        pass
+    return any(n and subprocess.run(["systemctl", "is-active", "--quiet", n], timeout=5).returncode == 0 for n in names)
+
+
+def status() -> tuple:
+    up = uptime_s()
+    if up < GRACE_S:
+        return 200, "booting"
+    if not runner_active():
+        return 503, "runner service inactive"
+    if DONE.exists():
+        return 200, "ok"
+    if up < MAX_BOOT_S:
+        return 200, "bootstrap running"
+    return 503, "bootstrap did not finish"
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        try:
+            code, msg = status() if self.path.split("?")[0] == "/health" else (404, "not found")
+        except Exception as exc:  # a probe that cannot decide reports unhealthy
+            code, msg = 503, type(exc).__name__
+        body = (msg + "\n").encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+HEALTHEOF
+  chmod 0755 /usr/local/bin/gpu-health
+  cat <<HEALTHUNIT > /etc/systemd/system/gpu-health.service
+[Unit]
+Description=Host probe for GCE MIG autohealing (personal-infra)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/gpu-health
+Environment=GPU_HEALTH_PORT=${var.health_check_port}
+Environment=GPU_HEALTH_BOOT_GRACE_S=${local.health_boot_grace_sec}
+Environment=GPU_HEALTH_MAX_BOOT_S=${local.health_max_boot_sec}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+HEALTHUNIT
+  systemctl daemon-reload
+  systemctl enable gpu-health.service >/dev/null 2>&1 || true
+  systemctl restart gpu-health.service || echo "[warn] Failed to start gpu-health.service."
+else
+  systemctl disable --now gpu-health.service >/dev/null 2>&1 || true
+fi
 
 # 1. Wait for, format once (if unformatted), and mount the ephemeral Hyperdisk data volume at /mnt/data.
 DATA_DISK="/dev/disk/by-id/google-data"
@@ -737,6 +837,8 @@ if [ -f "$STACK_DIR/compose.yml" ] && [ -f "$STACK_DIR/.env" ]; then
   fi
 fi
 
+# gpu-health reports "ok" only once this boot got here (/run is cleared on every boot).
+touch /run/gpu-bootstrap-done
 echo "=== [gpu-mig-bootstrap] Finished at $(date -Is) (runner_started=$RUNNER_STARTED) ==="
 EOF
 
@@ -889,6 +991,25 @@ resource "google_compute_instance_template" "gpu" {
   }
 }
 
+# Autohealing probe (gpu-health in the startup script): a VM whose boot hangs, whose runner service dies, or that stops
+# answering is recreated by the MIG (in whichever zone has capacity) after 5 failed checks, i.e. ~5 min.
+resource "google_compute_health_check" "gpu" {
+  count = local.autohealing_enabled ? 1 : 0
+
+  project             = var.project_id
+  name                = "${var.name_prefix}-health"
+  description         = "gpu-health host probe of the GPU MIG VM (boot progress + runner service)"
+  check_interval_sec  = 60
+  timeout_sec         = 10
+  healthy_threshold   = 1
+  unhealthy_threshold = 5
+
+  http_health_check {
+    port         = var.health_check_port
+    request_path = "/health"
+  }
+}
+
 # Single-VM Stateless Multi-Zone Regional Managed Instance Group allowing automatic cross-zone Spot failover;
 # persistent model weights, stack config, harness workspace, and runner credentials live in google_storage_bucket.gpu_cache.
 resource "google_compute_region_instance_group_manager" "gpu" {
@@ -904,6 +1025,14 @@ resource "google_compute_region_instance_group_manager" "gpu" {
   version {
     name              = "primary"
     instance_template = google_compute_instance_template.gpu.self_link_unique
+  }
+
+  dynamic "auto_healing_policies" {
+    for_each = local.autohealing_enabled ? [1] : []
+    content {
+      health_check      = google_compute_health_check.gpu[0].id
+      initial_delay_sec = var.autohealing_initial_delay_sec
+    }
   }
 
   instance_lifecycle_policy {
@@ -925,6 +1054,7 @@ resource "google_compute_region_instance_group_manager" "gpu" {
   }
 
   depends_on = [
+    google_compute_firewall.allow_health_checks,
     google_compute_router_nat.nat,
     google_secret_manager_secret_iam_member.gpu_runner_bootstrap,
     google_secret_manager_secret_version.runner_bootstrap,

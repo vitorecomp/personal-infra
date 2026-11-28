@@ -31,6 +31,12 @@ use_default_vpc = false
 # enable_ingress_firewalls = true
 # enable_os_login          = true
 
+# MIG autohealing: recreate the VM when the gpu-health probe (boot progress + runner service) fails for ~5 min.
+# Needs enable_ingress_firewalls = true; the probe port is opened to Google's health checkers only.
+# enable_autohealing            = true
+# health_check_port             = 8090
+# autohealing_initial_delay_sec = 900
+
 # Self-registering GitHub Actions runner settings (stored in Secret Manager).
 # Pass runner_token / runner_pat via TF_VAR_runner_token / TF_VAR_runner_pat (managed by deploy.sh);
 # never commit tokens or PATs to terraform.tfvars.
