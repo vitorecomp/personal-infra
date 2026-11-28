@@ -37,11 +37,20 @@ locals {
 
   gpu_startup_script = <<EOF
 #!/usr/bin/env bash
-set -euo pipefail
+# Failsafe by design: best-effort, NOT `set -e`/`set -u`. A failing step is logged (ERR trap, with its line) and the
+# script carries on towards the runner, which is the only thing that matters here; every network call has a timeout.
+# Only a machine fault a fresh VM may not have (no data disk, format/mount failure) stops it: fatal() also makes
+# gpu-health report unhealthy at once, so autohealing replaces the VM without waiting out the boot grace.
+set -o pipefail
 
 mkdir -p /var/log
 exec > >(tee -a /var/log/gpu-mig-bootstrap.log) 2>&1
-trap 'echo "[error] startup script failed at line $LINENO: $BASH_COMMAND" >&2' ERR
+trap 'echo "[error] startup step failed (continuing) at line $LINENO: $BASH_COMMAND" >&2' ERR
+fatal() {
+  echo "[fatal] $*; gpu-health now reports unhealthy so the MIG replaces this VM." >&2
+  printf '%s\n' "$*" > /run/gpu-health-fatal
+  exit 1
+}
 export HOME="$${HOME:-/root}"
 export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export DEBIAN_FRONTEND=noninteractive
@@ -65,6 +74,7 @@ import subprocess
 
 PORT = int(os.environ.get("GPU_HEALTH_PORT", "8090"))
 GRACE_S = int(os.environ.get("GPU_HEALTH_BOOT_GRACE_S", "1800"))
+FATAL = pathlib.Path("/run/gpu-health-fatal")
 RUNNER_SERVICE_FILE = pathlib.Path("/mnt/data/actions-runner/.service")
 FALLBACK_SERVICE = "actions.runner.gpu.service"
 
@@ -83,6 +93,8 @@ def runner_active() -> bool:
 
 
 def status() -> tuple:
+    if FATAL.exists():
+        return 503, "fatal: " + FATAL.read_text().strip()[:200]
     if runner_active():
         return 200, "ok"
     if uptime_s() < GRACE_S:
@@ -144,18 +156,19 @@ for _ in $(seq 1 30); do
 done
 
 if [ ! -b "$DATA_DISK" ]; then
-  echo "[error] Ephemeral data disk $DATA_DISK not found; aborting bootstrap to avoid filling boot disk." >&2
-  exit 1
+  fatal "ephemeral data disk $DATA_DISK not found (not filling the boot disk instead)"
 fi
 
 mkdir -p "$MOUNT_POINT"
 if ! blkid "$DATA_DISK" >/dev/null 2>&1; then
   echo "[bootstrap] Formatting $DATA_DISK as ext4..."
-  mkfs.ext4 -F -m 0 -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$DATA_DISK"
+  mkfs.ext4 -F -m 0 -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$DATA_DISK" || fatal "mkfs.ext4 $DATA_DISK failed"
 fi
 if ! mountpoint -q "$MOUNT_POINT"; then
-  mount -o discard,defaults "$DATA_DISK" "$MOUNT_POINT"
+  mount -o discard,defaults "$DATA_DISK" "$MOUNT_POINT" || fatal "mount $DATA_DISK $MOUNT_POINT failed"
 fi
+mountpoint -q "$MOUNT_POINT" || fatal "$MOUNT_POINT is not a mountpoint"
+
 UUID="$(blkid -s UUID -o value "$DATA_DISK")"
 if [ -n "$UUID" ] && ! grep -q "$UUID" /etc/fstab; then
   echo "UUID=$UUID $MOUNT_POINT ext4 discard,defaults,nofail 0 2" >> /etc/fstab
@@ -202,6 +215,7 @@ HOST_PACKAGES=(
   zip
   zlib1g
 )
+dpkg --configure -a >/dev/null 2>&1 || true
 if ! dpkg -s "$${HOST_PACKAGES[@]}" >/dev/null 2>&1; then
   echo "[bootstrap] Installing OS and runner packages..."
   for _ in 1 2 3; do
@@ -263,11 +277,11 @@ chmod 0644 /etc/gpu-cache-bucket
 RUNNER_DIR="/mnt/data/actions-runner"
 if [ ! -x "$RUNNER_DIR/config.sh" ]; then
   echo "[bootstrap] Downloading latest actions-runner-linux-x64 into $RUNNER_DIR..."
-  RUNNER_LATEST_URL="$(curl -fsSLI --retry 3 --retry-delay 2 -o /dev/null -w '%%{url_effective}' https://github.com/actions/runner/releases/latest || true)"
+  RUNNER_LATEST_URL="$(curl -fsSLI --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 60 -o /dev/null -w '%%{url_effective}' https://github.com/actions/runner/releases/latest || true)"
   RUNNER_VER="$${RUNNER_LATEST_URL##*/v}"
   if [[ -n "$RUNNER_VER" && "$RUNNER_VER" != "$RUNNER_LATEST_URL" ]]; then
     TMP_TAR="$(mktemp /tmp/actions-runner.XXXXXX.tar.gz)"
-    if curl -fsSL --retry 3 --retry-delay 2 "https://github.com/actions/runner/releases/download/v$${RUNNER_VER}/actions-runner-linux-x64-$${RUNNER_VER}.tar.gz" -o "$TMP_TAR"; then
+    if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 600 "https://github.com/actions/runner/releases/download/v$${RUNNER_VER}/actions-runner-linux-x64-$${RUNNER_VER}.tar.gz" -o "$TMP_TAR"; then
       tar -xzf "$TMP_TAR" -C "$RUNNER_DIR"
       chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
     else
@@ -287,7 +301,7 @@ if command -v gcloud >/dev/null 2>&1 && [ -n "$CACHE_BUCKET" ]; then
   echo "[bootstrap] Checking gs://$CACHE_BUCKET/actions-runner-state/ for preserved runner credentials..."
   for rf in .runner .credentials .credentials_rsaparams .env .path svc.sh runsvc.sh; do
     if [ ! -f "$RUNNER_DIR/$rf" ]; then
-      if gcloud storage cp "gs://$CACHE_BUCKET/actions-runner-state/$rf" "$RUNNER_DIR/$rf" >/dev/null 2>&1; then
+      if timeout 120 gcloud storage cp "gs://$CACHE_BUCKET/actions-runner-state/$rf" "$RUNNER_DIR/$rf" >/dev/null 2>&1; then
         chown "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR/$rf"
         case "$rf" in
           *.sh) chmod 0755 "$RUNNER_DIR/$rf" || true ;;
@@ -305,7 +319,7 @@ LAST_SM_ERR=""
 for _ in 1 2 3 4 5; do
   if command -v gcloud >/dev/null 2>&1; then
     SM_ERR_FILE="$(mktemp /tmp/sm-err.XXXXXX)"
-    BOOTSTRAP_JSON="$(gcloud secrets versions access latest \
+    BOOTSTRAP_JSON="$(timeout 60 gcloud secrets versions access latest \
       --secret="$SECRET_ID" \
       --project="$PROJECT_ID" 2>"$SM_ERR_FILE" || true)"
     if [ -n "$BOOTSTRAP_JSON" ] && ! printf '%s' "$BOOTSTRAP_JSON" | jq -e 'type == "object"' >/dev/null 2>&1; then
@@ -317,13 +331,13 @@ for _ in 1 2 3 4 5; do
     rm -f "$SM_ERR_FILE"
   fi
   if [ -z "$BOOTSTRAP_JSON" ]; then
-    ACCESS_TOKEN="$(curl -fsSL -H "Metadata-Flavor: Google" \
+    ACCESS_TOKEN="$(curl -fsSL --max-time 15 -H "Metadata-Flavor: Google" \
       "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" 2>/dev/null \
       | jq -r '.access_token // empty' 2>/dev/null || true)"
     if [ -z "$ACCESS_TOKEN" ] && [ -f /run/google-mds-mtls/root.crt ] && [ -f /run/google-mds-mtls/client.key ]; then
       CERT_ARG="/run/google-mds-mtls/client.key"
       [ -f /run/google-mds-mtls/client.crt ] && CERT_ARG="/run/google-mds-mtls/client.crt"
-      ACCESS_TOKEN="$(curl -fsSL \
+      ACCESS_TOKEN="$(curl -fsSL --max-time 15 \
         --cacert /run/google-mds-mtls/root.crt \
         --cert "$CERT_ARG" \
         --key /run/google-mds-mtls/client.key \
@@ -333,13 +347,13 @@ for _ in 1 2 3 4 5; do
     fi
     if [ -n "$ACCESS_TOKEN" ]; then
       SM_HTTP_FILE="$(mktemp /tmp/sm-http.XXXXXX)"
-      SM_CODE="$(curl -sSL -o "$SM_HTTP_FILE" -w '%%{http_code}' \
+      SM_CODE="$(curl -sSL --max-time 30 -o "$SM_HTTP_FILE" -w '%%{http_code}' \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         "https://secretmanager.googleapis.com/v1/projects/$PROJECT_ID/secrets/$SECRET_ID/versions/latest:access" 2>/dev/null || true)"
       if [ "$SM_CODE" != "200" ] && [ -f /run/google-mds-mtls/client.key ]; then
         CERT_ARG="/run/google-mds-mtls/client.key"
         [ -f /run/google-mds-mtls/client.crt ] && CERT_ARG="/run/google-mds-mtls/client.crt"
-        SM_CODE="$(curl -sSL -o "$SM_HTTP_FILE" -w '%%{http_code}' \
+        SM_CODE="$(curl -sSL --max-time 30 -o "$SM_HTTP_FILE" -w '%%{http_code}' \
           --cert "$CERT_ARG" \
           --key /run/google-mds-mtls/client.key \
           -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -472,7 +486,7 @@ RUNSVCEOF
     EFFECTIVE_RUNNER_LABELS="$${RUNNER_LABELS:-${var.runner_labels}}"
     REG_TOK=""
     if [ -n "$RUNNER_PAT" ]; then
-      REG_TOK="$(curl -fsSL --retry 3 --retry-delay 2 -X POST \
+      REG_TOK="$(curl -fsSL --retry 3 --retry-delay 2 --max-time 30 -X POST \
         -H "Authorization: Bearer $RUNNER_PAT" \
         -H "Accept: application/vnd.github+json" \
         -H "X-GitHub-Api-Version: 2022-11-28" \
@@ -494,7 +508,7 @@ RUNSVCEOF
         fi
         rm -f "$RUNNER_DIR/.service" "$RUNNER_DIR/.runner" "$RUNNER_DIR/.credentials" "$RUNNER_DIR/.credentials_rsaparams"
         chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
-        sudo -H -u "$RUNNER_USER" "$RUNNER_DIR/config.sh" \
+        timeout 300 sudo -H -u "$RUNNER_USER" "$RUNNER_DIR/config.sh" \
           --unattended \
           --url "https://github.com/$GITHUB_REPO" \
           --token "$REG_TOK" \
@@ -510,7 +524,7 @@ RUNSVCEOF
           echo "[bootstrap] Persisting fresh runner credentials to gs://$CACHE_BUCKET/actions-runner-state/..."
           for rf in .runner .credentials .credentials_rsaparams .env .path svc.sh runsvc.sh; do
             if [ -f "$RUNNER_DIR/$rf" ]; then
-              gcloud storage cp "$RUNNER_DIR/$rf" "gs://$CACHE_BUCKET/actions-runner-state/$rf" >/dev/null 2>&1 || true
+              timeout 60 gcloud storage cp "$RUNNER_DIR/$rf" "gs://$CACHE_BUCKET/actions-runner-state/$rf" >/dev/null 2>&1 || true
             fi
           done
         fi
@@ -676,15 +690,16 @@ resource "google_compute_instance_template" "gpu" {
   }
 
   disk {
-    boot                   = false
-    auto_delete            = true
-    type                   = "PERSISTENT"
-    mode                   = "READ_WRITE"
-    device_name            = "data"
-    disk_type              = var.data_disk_type
-    disk_size_gb           = var.data_disk_size_gb
-    provisioned_iops       = var.data_disk_iops
-    provisioned_throughput = var.data_disk_throughput_mbps
+    boot         = false
+    auto_delete  = true
+    type         = "PERSISTENT"
+    mode         = "READ_WRITE"
+    device_name  = "data"
+    disk_type    = var.data_disk_type
+    disk_size_gb = var.data_disk_size_gb
+    # Provisioned performance exists only for Hyperdisk (pd-* types, e.g. on G2 test VMs, reject it).
+    provisioned_iops       = startswith(var.data_disk_type, "hyperdisk") ? var.data_disk_iops : null
+    provisioned_throughput = startswith(var.data_disk_type, "hyperdisk") ? var.data_disk_throughput_mbps : null
     labels                 = var.labels
   }
 
