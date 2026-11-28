@@ -546,18 +546,53 @@ if [[ "${WAIT_FOR_MODEL,,}" =~ ^(1|true|yes|on)$ ]]; then
   echo "[deploy] Waiting up to ${MODEL_READY_TIMEOUT_SEC}s for vllm-server to load the model and serve..."
   restarts0="$(sudo podman inspect -f '{{.RestartCount}}' vllm-server 2>/dev/null || echo 0)"
   started=$SECONDS; last_report=$SECONDS
+  # Exception messages from the vLLM log, deduplicated and without the "(Worker_TP0 pid=..) ERROR <ts> [file:line]"
+  # prefixes. The worker's own exception (the root cause) precedes a long EngineCore traceback, so a plain tail misses it.
+  read -r -d '' VLLM_EXC_FILTER <<'PY' || true
+import re, sys
+prefix = re.compile(r"^\((?P<src>[^) ]+)[^)]*\)\s+(?:ERROR|WARNING|INFO|DEBUG)\s+\S+\s+\S+\s+\[[^\]]*\]\s?")
+exc = re.compile(r"^(?:[A-Za-z_][\w.]*\.)?\w*(?:Error|Exception|Interrupt)\b(?::|$)")
+found = []
+for raw in sys.stdin.read().replace("\r", "\n").splitlines():
+    m = prefix.match(raw)
+    src = m.group("src") + ": " if m else ""
+    body = prefix.sub("", raw).strip()
+    if exc.match(body) or "out of memory" in body.lower() or body.startswith("Killed"):
+        found.append(src + body)
+uniq = []
+for f in found:
+    if f not in uniq:
+        uniq.append(f)
+for f in uniq[-15:]:
+    print("    " + f[:400])
+PY
+  # No SSH into the (stateless MIG) VM: everything needed to debug a failed start has to land in this log.
+  vllm_diag() {
+    local hub=/mnt/data/huggingface/hub
+    echo "[diag] GPUs: $(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null | sort | uniq -c | tr -s ' ' | paste -sd ';' || echo '?')"
+    echo "[diag] HF cache ${hub}: $(sudo du -sh "$hub" 2>/dev/null | cut -f1 || echo '?'); snapshot *.safetensors: $(sudo find "$hub" -path '*/snapshots/*' -name '*.safetensors' 2>/dev/null | wc -l)" \
+      "(symlinks: $(sudo find "$hub" -path '*/snapshots/*' -name '*.safetensors' -type l 2>/dev/null | wc -l)," \
+      "broken: $(sudo find "$hub" -path '*/snapshots/*' -xtype l 2>/dev/null | wc -l)); *.incomplete: $(sudo find "$hub" -name '*.incomplete' 2>/dev/null | wc -l)"
+    echo "[diag] vllm-cache: $(sudo du -sh "${VLLM_CACHE_DIR:-/mnt/data/vllm-cache}" 2>/dev/null | cut -f1 || echo '?')"
+    echo "[diag] VM startup script, this boot (bucket redacted):"
+    sudo journalctl -u google-startup-scripts.service -b --no-pager -o cat 2>/dev/null \
+      | grep -E '\[(bootstrap|warn)\]|Restored|ERROR|rror:' | sed -E 's#gs://[^/[:space:]]+#gs://<cache-bucket>#g' \
+      | tail -n 15 | cut -c1-250 | sed 's/^/    /' || true
+    echo "[diag] vllm-server exceptions (deduplicated, newest last):"
+    sudo podman logs --tail 4000 vllm-server 2>&1 | python3 -c "$VLLM_EXC_FILTER" \
+      | sed -E 's#gs://[^/[:space:]]+#gs://<cache-bucket>#g' || true
+  }
   while [[ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:8000/health 2>/dev/null)" != "200" ]]; do
     info="$(sudo podman inspect -f '{{.State.Status}} {{.RestartCount}}' vllm-server 2>/dev/null || echo "missing ?")"
     if [[ "$info" != "running ${restarts0}" ]]; then
       echo "[error] vllm-server stopped or restarted while starting (state/restarts: ${info}, was running ${restarts0})." >&2
-      echo "[error] Root-cause lines from its log:" >&2
-      sudo podman logs --tail 600 vllm-server 2>&1 | tr '\r' '\n' | grep -E 'Error|ERROR|Exception|Assertion|Traceback|Killed|out of memory' \
-        | grep -vE 'unauthenticated requests' | tail -25 | cut -c1-300 >&2 || true
+      vllm_diag >&2
       exit 1
     fi
     if (( SECONDS - started > MODEL_READY_TIMEOUT_SEC )); then
       echo "[error] vllm-server did not become healthy within ${MODEL_READY_TIMEOUT_SEC}s; last log lines:" >&2
       sudo podman logs --tail 10 vllm-server 2>&1 | tr '\r' '\n' | tail -10 | cut -c1-200 >&2 || true
+      vllm_diag >&2
       exit 1
     fi
     if (( SECONDS - last_report >= 300 )); then
