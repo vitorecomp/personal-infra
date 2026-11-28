@@ -41,6 +41,7 @@ set -euo pipefail
 
 mkdir -p /var/log
 exec > >(tee -a /var/log/gpu-mig-bootstrap.log) 2>&1
+trap 'echo "[error] startup script failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 export HOME="$${HOME:-/root}"
 export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export DEBIAN_FRONTEND=noninteractive
@@ -539,7 +540,7 @@ export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/
 HOOK_URL="gs://$CACHE_BUCKET/boot-hook"
 WORK=/mnt/data/boot-hook
 mkdir -p "$WORK"
-if ! gcloud storage cp "$HOOK_URL/running.sh" "$WORK/hook.sh" >/dev/null 2>&1; then
+if ! timeout 300 gcloud storage cp "$HOOK_URL/running.sh" "$WORK/hook.sh" >/dev/null 2>&1; then
   echo "[boot-hook] Could not fetch the disarmed hook; it stays disarmed until the next pipeline."
   exit 1
 fi
@@ -547,20 +548,24 @@ echo "[boot-hook] Running the hook published by the last successful pipeline (ti
 timeout "$${GPU_BOOT_HOOK_TIMEOUT}" bash "$WORK/hook.sh"
 rc=$?
 if [ "$rc" -eq 0 ]; then
-  gcloud storage mv "$HOOK_URL/running.sh" "$HOOK_URL/hook.sh" >/dev/null 2>&1 \
+  timeout 300 gcloud storage mv "$HOOK_URL/running.sh" "$HOOK_URL/hook.sh" >/dev/null 2>&1 \
     && echo "[boot-hook] Succeeded; re-armed for the next boot." \
     || echo "[boot-hook] Succeeded, but could not re-arm it (the next pipeline will)."
 else
-  gcloud storage mv "$HOOK_URL/running.sh" "$HOOK_URL/failed.sh" >/dev/null 2>&1 || true
+  timeout 300 gcloud storage mv "$HOOK_URL/running.sh" "$HOOK_URL/failed.sh" >/dev/null 2>&1 || true
   echo "[boot-hook] Failed (exit $rc); disarmed until the next successful pipeline."
 fi
 exit "$rc"
 HOOKEOF
 chmod 0755 /usr/local/bin/gpu-boot-hook
-if gcloud storage mv "gs://$CACHE_BUCKET/boot-hook/hook.sh" "gs://$CACHE_BUCKET/boot-hook/running.sh" >/dev/null 2>&1; then
-  systemd-run --unit=gpu-boot-hook --collect --setenv=GPU_BOOT_HOOK_TIMEOUT=${local.boot_hook_timeout_sec} \
-    /usr/local/bin/gpu-boot-hook >/dev/null
-  echo "[bootstrap] Boot hook disarmed and started (gpu-boot-hook.service); it re-arms itself only if it succeeds."
+# Never fatal and never blocking: the runner is already up, so whatever happens here only affects the stack resume.
+if timeout 120 gcloud storage mv "gs://$CACHE_BUCKET/boot-hook/hook.sh" "gs://$CACHE_BUCKET/boot-hook/running.sh" >/dev/null 2>&1; then
+  if systemd-run --unit=gpu-boot-hook --collect --setenv=GPU_BOOT_HOOK_TIMEOUT=${local.boot_hook_timeout_sec} \
+       /usr/local/bin/gpu-boot-hook >/dev/null 2>&1; then
+    echo "[bootstrap] Boot hook disarmed and started (gpu-boot-hook.service); it re-arms itself only if it succeeds."
+  else
+    echo "[warn] Could not start gpu-boot-hook.service; the hook stays disarmed until the next pipeline."
+  fi
 else
   echo "[bootstrap] No armed boot hook (never published, or the last one failed): the stack waits for the pipeline."
 fi

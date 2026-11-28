@@ -887,6 +887,7 @@ DEPLOY_EOF
 if ! $RESUME; then
   {
     printf 'HOOK_REV=%q\n' "${GITHUB_SHA:-manual}"
+    printf 'REMOTE_STACK_DIR=%q\n' "$REMOTE_STACK_DIR"
     cat <<'PUBLISH_EOF'
 set -euo pipefail
 if [[ ! -r /etc/gpu-cache-bucket ]]; then
@@ -894,28 +895,42 @@ if [[ ! -r /etc/gpu-cache-bucket ]]; then
   exit 0
 fi
 . /etc/gpu-cache-bucket
+HOOKS="gs://${CACHE_BUCKET}/boot-hook"
+# Immutable snapshot of exactly what was just deployed and verified (compose files, .env, this script). The hook
+# restores only this snapshot, so a later pipeline that fails (its files already synced to stacks/) can never be
+# resumed: the previous hook keeps pointing at the previous good snapshot.
+SNAP="stack-$(date -u +%Y%m%dT%H%M%SZ)-${HOOK_REV:0:7}"
+if ! sudo gcloud storage rsync -r "${REMOTE_STACK_DIR}" "${HOOKS}/${SNAP}" >/dev/null 2>&1; then
+  echo "[warn] Could not snapshot the stack to the GCS cache; boot hook not updated (the previous one stays)."
+  exit 0
+fi
 hook="$(mktemp)"
 {
   printf '#!/usr/bin/env bash\n'
   printf '# Boot hook published by development/scripts/deploy_gpu_stack.sh after the successful deploy of %s (%s).\n' \
     "${HOOK_REV}" "$(date -u +%FT%TZ)"
+  printf 'SNAP=%q\n' "${SNAP}"
   cat <<'HOOK'
-# Run once per boot by the VM startup script (gpu-boot-hook.service), re-armed only when it exits 0: restore the stack
-# files + .env + deploy script this deploy saved to the GCS cache, then redeploy them with --resume.
+# Run once per boot by the VM startup script (gpu-boot-hook.service), re-armed only when it exits 0: restore the
+# snapshot of the stack (files + .env + deploy script) that deploy saved to the GCS cache, then redeploy it with --resume.
 set -euo pipefail
 . /etc/gpu-cache-bucket
 STACK_DIR=/mnt/data/stacks/gpu-dev-machine
 mkdir -p "$STACK_DIR"
-gcloud storage rsync -r "gs://${CACHE_BUCKET}/stacks/gpu-dev-machine" "$STACK_DIR" >/dev/null 2>&1
+timeout 600 gcloud storage rsync -r --delete-unmatched-destination-objects \
+  "gs://${CACHE_BUCKET}/boot-hook/${SNAP}" "$STACK_DIR" >/dev/null 2>&1
 chmod 0600 "$STACK_DIR/.env"
 exec bash "$STACK_DIR/.deploy/deploy_gpu_stack.sh" --resume
 HOOK
 } > "$hook"
-if sudo gcloud storage cp "$hook" "gs://${CACHE_BUCKET}/boot-hook/hook.sh" >/dev/null 2>&1; then
-  sudo gcloud storage rm "gs://${CACHE_BUCKET}/boot-hook/running.sh" "gs://${CACHE_BUCKET}/boot-hook/failed.sh" >/dev/null 2>&1 || true
+if sudo gcloud storage cp "$hook" "${HOOKS}/hook.sh" >/dev/null 2>&1; then
+  sudo gcloud storage rm "${HOOKS}/running.sh" "${HOOKS}/failed.sh" >/dev/null 2>&1 || true
+  # Older snapshots are unreachable now (running.sh / failed.sh were their only users).
+  { sudo gcloud storage ls "${HOOKS}/" 2>/dev/null | grep -E '/stack-[^/]+/$' | grep -vF "/${SNAP}/" \
+    | while read -r old; do sudo gcloud storage rm -r "$old" >/dev/null 2>&1 || true; done; } || true
   echo "[ok] Boot hook published: the next VM boot resumes ${HOOK_REV:0:7} (disarmed if that fails, until the next pipeline)."
 else
-  echo "[warn] Could not publish the boot hook; the next VM boot will wait for the pipeline."
+  echo "[warn] Could not publish the boot hook; the previous one (if any) stays."
 fi
 rm -f "$hook"
 PUBLISH_EOF
