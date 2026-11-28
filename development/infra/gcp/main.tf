@@ -685,8 +685,8 @@ resource "google_compute_instance_template" "gpu" {
     source_image           = var.boot_image
     disk_type              = var.boot_disk_type
     disk_size_gb           = var.boot_disk_size_gb
-    provisioned_iops       = var.boot_disk_iops
-    provisioned_throughput = var.boot_disk_throughput_mbps
+    provisioned_iops       = startswith(var.boot_disk_type, "hyperdisk") ? var.boot_disk_iops : null
+    provisioned_throughput = startswith(var.boot_disk_type, "hyperdisk") ? var.boot_disk_throughput_mbps : null
   }
 
   disk {
