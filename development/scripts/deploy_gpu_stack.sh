@@ -278,6 +278,7 @@ gcs_restore() {
     echo "[bootstrap] Restored ${prefix}/ ($(sudo du -sh "$dst" 2>/dev/null | cut -f1))."
   else
     echo "[bootstrap] Nothing restored for ${prefix}/ (not in the GCS cache yet)."
+    return 1
   fi
 }
 if [[ -n "$CACHE_BUCKET" ]] && command -v gcloud >/dev/null 2>&1; then
@@ -569,6 +570,10 @@ fi
 
 # 3. Write .env (0600), tunnel SSH key (0444 inside 0700 dir), and start containers via podman-compose.
 # Note: All model & vLLM parameters live directly in `compose.yml` (vllm-server command).
+# Resume keeps the .env (and tunnel key) restored from the GCS cache: they hold what the last pipeline wrote, and the
+# GitHub secrets read below do not exist at boot (set -u aborted on LITELLM_MASTER_KEY in the first bench resume).
+ENV_B64=""
+if ! $RESUME; then
 ENV_CONTENT="$(cat <<EOF
 LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
 HARNESS_USER=${HARNESS_USER:-admin}
@@ -600,9 +605,8 @@ LOG_STREAM=${LOG_STREAM:-gpu-vm}
 EOF
 )"
 
-# Resume keeps the .env (and tunnel key) restored from the GCS cache: they hold what the last pipeline wrote.
-ENV_B64=""
-$RESUME || ENV_B64="$(printf '%s\n' "$ENV_CONTENT" | base64 -w0)"
+ENV_B64="$(printf '%s\n' "$ENV_CONTENT" | base64 -w0)"
+fi
 TUNNEL_KEY_B64=""
 if [[ -n "${TUNNEL_SSH_PRIVATE_KEY:-}" ]]; then
   TUNNEL_KEY_B64="$(printf '%s\n' "$TUNNEL_SSH_PRIVATE_KEY" | base64 -w0)"

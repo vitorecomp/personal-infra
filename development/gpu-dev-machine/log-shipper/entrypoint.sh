@@ -53,6 +53,7 @@ drop_noise() {
     -e 'kauditd_printk_skb: [0-9]+ callbacks suppressed'
 }
 
+# --lines=all: --follow alone starts with only the last 10 entries (the whole boot was never shipped).
 # journalctl saves its cursor when it exits cleanly (SIGTERM), so stop it that way: on container stop (bash as PID 1
 # ignores SIGTERM unless trapped) and as soon as ssh drops (otherwise it only notices at its next write).
 stop_journalctl() { pkill -TERM -x journalctl 2>/dev/null || true; wait 2>/dev/null || true; }
@@ -66,7 +67,7 @@ while true; do
   fi
   echo "[log-shipper] Streaming the journal to ${LOG_SSH_USER}@${LOG_SSH_HOST}:${LOG_SSH_PORT} as '${LOG_STREAM}'..."
   set +e
-  journalctl -D "${JOURNAL_DIR}" "${start[@]}" --follow --output=short-iso --no-pager --quiet \
+  journalctl -D "${JOURNAL_DIR}" "${start[@]}" --follow --lines=all --output=short-iso --no-pager --quiet \
     | drop_noise \
     | redact \
     | ssh -p "${LOG_SSH_PORT}" -i "${SSH_DIR}/id_key" \
