@@ -949,7 +949,7 @@ exec bash "$STACK_DIR/.deploy/deploy_gpu_stack.sh" --resume
 HOOK
 } > "$hook"
 if sudo gcloud storage cp "$hook" "${HOOKS}/hook.sh" >/dev/null 2>&1; then
-  sudo gcloud storage rm "${HOOKS}/running.sh" "${HOOKS}/failed.sh" >/dev/null 2>&1 || true
+  sudo gcloud storage rm "${HOOKS}/running.sh" "${HOOKS}/failed.sh" "${HOOKS}/attempts" >/dev/null 2>&1 || true
   # Older snapshots are unreachable now (running.sh / failed.sh were their only users).
   { sudo gcloud storage ls "${HOOKS}/" 2>/dev/null | grep -E '/stack-[^/]+/$' | grep -vF "/${SNAP}/" \
     | while read -r old; do sudo gcloud storage rm -r "$old" >/dev/null 2>&1 || true; done; } || true

@@ -30,6 +30,8 @@ locals {
   health_boot_grace_sec = 1800
   # Boot hook (step 9): GCS restore of the model (~20 min) + image builds + vLLM load (deploy waits up to 90 min).
   boot_hook_timeout_sec = 10800
+  # Boot-hook runs whose VM was lost (preemption etc.) are retried, at most this many attempts in a row.
+  boot_hook_max_attempts = 4
   create_runner_secret_version = (
     trimspace(var.github_repo) != "" &&
     (trimspace(var.runner_token) != "" || trimspace(var.runner_pat) != "")
@@ -541,10 +543,13 @@ fi
 unset BOOTSTRAP_JSON RUNNER_TOKEN RUNNER_PAT REG_TOK
 
 # 9. Boot hook, controlled by the runner: after every successful pipeline, deploy_gpu_stack.sh publishes
-#    gs://$CACHE_BUCKET/boot-hook/hook.sh (restore the stack files that deploy saved to GCS and re-run it with --resume).
-#    Failsafe: the hook is disarmed (moved to running.sh) BEFORE it runs and re-armed only when it exits 0. A failure, a
-#    timeout or a VM lost mid-run leaves it disarmed (failed.sh / running.sh), so later boots skip it until the next
-#    successful pipeline publishes it again. It runs detached (gpu-boot-hook.service), after the runner is up.
+#    gs://$CACHE_BUCKET/boot-hook/hook.sh (restore the stack snapshot that deploy saved to GCS, re-run it with --resume).
+#    Failsafe: the hook is moved to running.sh BEFORE it runs; only a clean exit puts it back (hook.sh). A failure or a
+#    timeout disarms it at once (failed.sh) until the next successful pipeline. A run whose VM was lost (Spot
+#    preemption, autohealing, crash: running.sh left behind) is not a hook failure, so the next boot retries it, but at
+#    most ${local.boot_hook_max_attempts} attempts in a row (counter in boot-hook/attempts); then it is disarmed too. No shutdown-script
+#    dependency: GCE does not run shutdown scripts on Spot preemption (verified on compute-bench). Runs detached
+#    (gpu-boot-hook.service), after the runner is up; never fatal, never blocking.
 cat <<'HOOKEOF' > /usr/local/bin/gpu-boot-hook
 #!/usr/bin/env bash
 set -uo pipefail
@@ -555,7 +560,7 @@ HOOK_URL="gs://$CACHE_BUCKET/boot-hook"
 WORK=/mnt/data/boot-hook
 mkdir -p "$WORK"
 if ! timeout 300 gcloud storage cp "$HOOK_URL/running.sh" "$WORK/hook.sh" >/dev/null 2>&1; then
-  echo "[boot-hook] Could not fetch the disarmed hook; it stays disarmed until the next pipeline."
+  echo "[boot-hook] Could not fetch the hook; the next boot counts this as an interrupted attempt."
   exit 1
 fi
 echo "[boot-hook] Running the hook published by the last successful pipeline (timeout $${GPU_BOOT_HOOK_TIMEOUT}s)..."
@@ -569,19 +574,36 @@ else
   timeout 300 gcloud storage mv "$HOOK_URL/running.sh" "$HOOK_URL/failed.sh" >/dev/null 2>&1 || true
   echo "[boot-hook] Failed (exit $rc); disarmed until the next successful pipeline."
 fi
+timeout 60 gcloud storage rm "$HOOK_URL/attempts" >/dev/null 2>&1 || true
 exit "$rc"
 HOOKEOF
 chmod 0755 /usr/local/bin/gpu-boot-hook
-# Never fatal and never blocking: the runner is already up, so whatever happens here only affects the stack resume.
-if timeout 120 gcloud storage mv "gs://$CACHE_BUCKET/boot-hook/hook.sh" "gs://$CACHE_BUCKET/boot-hook/running.sh" >/dev/null 2>&1; then
+HOOKS="gs://$CACHE_BUCKET/boot-hook"
+attempt=0
+if timeout 120 gcloud storage mv "$HOOKS/hook.sh" "$HOOKS/running.sh" >/dev/null 2>&1; then
+  attempt=1
+elif timeout 60 gcloud storage ls "$HOOKS/running.sh" >/dev/null 2>&1; then
+  prev="$(timeout 60 gcloud storage cat "$HOOKS/attempts" 2>/dev/null | tr -cd '0-9')"
+  attempt=$(( $${prev:-1} + 1 ))
+  if [ "$attempt" -gt ${local.boot_hook_max_attempts} ]; then
+    timeout 120 gcloud storage mv "$HOOKS/running.sh" "$HOOKS/failed.sh" >/dev/null 2>&1 || true
+    timeout 60 gcloud storage rm "$HOOKS/attempts" >/dev/null 2>&1 || true
+    echo "[warn] Boot hook lost its VM $((attempt - 1)) times in a row; disarmed until the next successful pipeline."
+    attempt=0
+  else
+    echo "[bootstrap] The previous VM was lost while the boot hook ran (preemption/autohealing): retrying it."
+  fi
+fi
+if [ "$attempt" -gt 0 ]; then
+  echo "$attempt" | timeout 60 gcloud storage cp - "$HOOKS/attempts" >/dev/null 2>&1 || true
   if systemd-run --unit=gpu-boot-hook --collect --setenv=GPU_BOOT_HOOK_TIMEOUT=${local.boot_hook_timeout_sec} \
        /usr/local/bin/gpu-boot-hook >/dev/null 2>&1; then
-    echo "[bootstrap] Boot hook disarmed and started (gpu-boot-hook.service); it re-arms itself only if it succeeds."
+    echo "[bootstrap] Boot hook started, attempt $attempt/${local.boot_hook_max_attempts} (gpu-boot-hook.service); re-armed only if it succeeds."
   else
-    echo "[warn] Could not start gpu-boot-hook.service; the hook stays disarmed until the next pipeline."
+    echo "[warn] Could not start gpu-boot-hook.service; the next boot counts this as an interrupted attempt."
   fi
 else
-  echo "[bootstrap] No armed boot hook (never published, or the last one failed): the stack waits for the pipeline."
+  echo "[bootstrap] No armed boot hook (never published, or disarmed after a failure): the stack waits for the pipeline."
 fi
 
 echo "=== [gpu-mig-bootstrap] Finished at $(date -Is) (runner_started=$RUNNER_STARTED) ==="
@@ -592,15 +614,6 @@ EOF
 set -u
 export HOME="/root"
 export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-# A boot hook interrupted by a Spot preemption did not fail: re-arm it (running.sh -> hook.sh) so the next VM resumes the
-# stack. First, because a preempted VM gets ~30 s. Every other shutdown (MIG delete / autohealing, stop, a hook that
-# brought the VM down) leaves it disarmed, as the failsafe in the startup script intends.
-if systemctl is-active --quiet gpu-boot-hook.service 2>/dev/null && [ -r /etc/gpu-cache-bucket ] && \
-   [ "$(curl -s -m 2 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/preempted)" = "TRUE" ]; then
-  . /etc/gpu-cache-bucket
-  timeout 15 gcloud storage mv "gs://$CACHE_BUCKET/boot-hook/running.sh" "gs://$CACHE_BUCKET/boot-hook/hook.sh" >/dev/null 2>&1 \
-    && echo "[shutdown] Preempted while the boot hook was running; re-armed it for the next VM."
-fi
 if command -v podman >/dev/null 2>&1; then
   podman stop -t 10 --all >/dev/null 2>&1 || true
 fi

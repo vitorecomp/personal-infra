@@ -37,10 +37,12 @@ fi
 # Launch tokens (harness URLs), bearer tokens, LiteLLM/OpenAI-style keys and Hugging Face tokens never leave the VM.
 redact() {
   sed -u -E \
+    -e 's/-*BEGIN [A-Z ]*PRIVATE KEY.*/<private key redacted>/' \
     -e 's/([?&]token=)[^&[:space:]"]+/\1<redacted>/g' \
     -e 's/(Bearer )[A-Za-z0-9._~+\/=-]+/\1<redacted>/g' \
     -e 's/sk-[A-Za-z0-9_-]{16,}/sk-<redacted>/g' \
-    -e 's/hf_[A-Za-z0-9]{20,}/hf_<redacted>/g'
+    -e 's/hf_[A-Za-z0-9]{20,}/hf_<redacted>/g' \
+    -e 's/([A-Z_]*(PASSWORD|SECRET|TOKEN|_KEY)[A-Z_]*=["'"'"']?)[^[:space:]"'"'"']+/\1<redacted>/g'
 }
 
 # Healthcheck chatter, ~70% of the raw journal: podman's "healthy" results, the health-probe GETs, and the AppArmor
