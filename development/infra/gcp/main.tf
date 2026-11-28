@@ -28,6 +28,8 @@ locals {
   # gpu-health: always healthy for the first 30 min of a boot (driver install + reboot happen before the runner starts);
   # after that, healthy only while the GitHub Actions runner service is active.
   health_boot_grace_sec = 1800
+  # Boot hook (step 9): GCS restore of the model (~20 min) + image builds + vLLM load (deploy waits up to 90 min).
+  boot_hook_timeout_sec = 10800
   create_runner_secret_version = (
     trimspace(var.github_repo) != "" &&
     (trimspace(var.runner_token) != "" || trimspace(var.runner_pat) != "")
@@ -158,47 +160,16 @@ if [ -n "$UUID" ] && ! grep -q "$UUID" /etc/fstab; then
   echo "UUID=$UUID $MOUNT_POINT ext4 discard,defaults,nofail 0 2" >> /etc/fstab
 fi
 chmod 1777 "$MOUNT_POINT"
-# Large readahead: vLLM loads the safetensors checkpoint through mmap page faults, which with the default 128 KiB
-# readahead become ~20 KiB reads and pin the disk at its IOPS cap (76 MB/s on a 4,000-IOPS replica). 16 MiB gave
-# ~92 KiB reads and 4.7x faster loading. Same setting as development/scripts/deploy_gpu_stack.sh.
-DATA_BLK="$(lsblk -ndo PKNAME "$DATA_DISK" 2>/dev/null)"
-[ -n "$DATA_BLK" ] || DATA_BLK="$(basename "$(readlink -f "$DATA_DISK")")"
-echo 16384 > "/sys/block/$DATA_BLK/queue/read_ahead_kb" 2>/dev/null || echo "[warn] Could not set readahead on $DATA_BLK."
 
-# 2. Create working directories on /mnt/data (persistent state is synced to the regional GCS cache bucket).
-mkdir -p \
-  /mnt/data/containers/storage \
-  /mnt/data/containers/tmp \
-  /mnt/data/huggingface \
-  /mnt/data/vllm-cache \
-  /mnt/data/deepseek-harness/dsh-home \
-  /mnt/data/deepseek-harness/workspace \
-  /mnt/data/reverse-tunnel/state/litellm \
-  /mnt/data/reverse-tunnel/state/harness \
-  /mnt/data/stacks/gpu-dev-machine \
-  /mnt/data/actions-runner
+# Scope: this script only brings the machine up and makes the GitHub Actions runner operational (probe, data disk,
+# runner user + packages, GPU driver, runner). Everything else (Podman, NVIDIA container toolkit / CDI, GCS restores
+# and sync, the stack itself, log shipping) belongs to the runner: development/scripts/deploy_gpu_stack.sh, run by the
+# pipeline and, at boot, by the failsafe boot hook in step 9. So changing the stack never needs deploy.sh.
 
-chmod 0700 /mnt/data/reverse-tunnel
-chmod 1777 \
-  /mnt/data/deepseek-harness \
-  /mnt/data/deepseek-harness/dsh-home \
-  /mnt/data/deepseek-harness/workspace \
-  /mnt/data/reverse-tunnel/state \
-  /mnt/data/reverse-tunnel/state/litellm \
-  /mnt/data/reverse-tunnel/state/harness
-touch /mnt/data/reverse-tunnel/known_hosts
-chmod 0644 /mnt/data/reverse-tunnel/known_hosts
+# 2. Runner directory on /mnt/data.
+mkdir -p /mnt/data/actions-runner
 
-# 3. Point Podman storage at /mnt/data so large container layers never fill the boot disk.
-mkdir -p /etc/containers
-cat <<'STORAGEEOF' > /etc/containers/storage.conf
-[storage]
-driver = "overlay"
-graphroot = "/mnt/data/containers/storage"
-runroot = "/run/containers/storage"
-STORAGEEOF
-
-# 4. Provision local runner user with passwordless sudo and symlink /opt/actions-runner -> /mnt/data/actions-runner.
+# 3. Provision local runner user with passwordless sudo and symlink /opt/actions-runner -> /mnt/data/actions-runner.
 RUNNER_USER="${var.runner_username}"
 if ! id -u "$RUNNER_USER" >/dev/null 2>&1; then
   useradd -m -s /bin/bash "$RUNNER_USER"
@@ -206,17 +177,16 @@ fi
 usermod -aG sudo "$RUNNER_USER" || true
 echo "$RUNNER_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-$RUNNER_USER"
 chmod 0440 "/etc/sudoers.d/90-$RUNNER_USER"
-chown -R "$RUNNER_USER:$RUNNER_USER" /mnt/data/actions-runner /mnt/data/stacks
+chown -R "$RUNNER_USER:$RUNNER_USER" /mnt/data/actions-runner
 if [ -d /opt/actions-runner ] && [ ! -L /opt/actions-runner ]; then
   rm -rf /opt/actions-runner
 fi
 ln -sfn /mnt/data/actions-runner /opt/actions-runner
 
-# 5. Install required OS, GitHub runner, and Podman packages.
+# 4. Install the OS packages the GitHub Actions runner needs (Podman & co. are installed by the deploy).
 HOST_PACKAGES=(
   ca-certificates
   curl
-  fuse-overlayfs
   git
   git-lfs
   gpg
@@ -224,21 +194,15 @@ HOST_PACKAGES=(
   libicu-dev
   libkrb5-3
   libssl-dev
-  podman
-  podman-compose
-  netavark
-  aardvark-dns
   rsync
-  slirp4netns
   tar
-  uidmap
   unzip
   xz-utils
   zip
   zlib1g
 )
 if ! dpkg -s "$${HOST_PACKAGES[@]}" >/dev/null 2>&1; then
-  echo "[bootstrap] Installing OS, runner, and Podman packages..."
+  echo "[bootstrap] Installing OS and runner packages..."
   for _ in 1 2 3; do
     if apt-get -o DPkg::Lock::Timeout=180 update -qq && \
        apt-get -o DPkg::Lock::Timeout=180 install -y -qq --no-install-recommends "$${HOST_PACKAGES[@]}"; then
@@ -249,7 +213,8 @@ if ! dpkg -s "$${HOST_PACKAGES[@]}" >/dev/null 2>&1; then
 fi
 git lfs install --system >/dev/null 2>&1 || true
 
-# 6. Install Canonical Secure-Boot-signed NVIDIA Open Kernel GPU driver + NVIDIA Container Toolkit + Podman CDI.
+# 5. Install Canonical's Secure-Boot-signed NVIDIA open kernel GPU driver (here, not in the deploy: it can need a
+# reboot, which would kill a runner job). The container toolkit and CDI spec are the deploy's job.
 # Note: GCE Ubuntu 24.04 uses HWE linux-gcp (e.g. 7.0.x-gcp), where Canonical provides prebuilt,
 # Secure-Boot-signed open kernel modules (`linux-modules-nvidia-*-open-$(uname -r)`) that load via
 # modprobe immediately without DKMS build failures.
@@ -274,21 +239,6 @@ if ! nvidia-smi >/dev/null 2>&1; then
   modprobe nvidia nvidia-uvm nvidia-modeset || true
 fi
 
-if ! command -v nvidia-ctk >/dev/null 2>&1; then
-  echo "[bootstrap] Installing NVIDIA Container Toolkit for Podman CDI..."
-  if curl -fsSL --retry 3 --retry-delay 2 https://nvidia.github.io/libnvidia-container/gpgkey \
-       | gpg --dearmor --yes -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg && \
-     curl -fsSL --retry 3 --retry-delay 2 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-       | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-       > /etc/apt/sources.list.d/nvidia-container-toolkit.list && \
-     apt-get -o DPkg::Lock::Timeout=180 update -qq && \
-     apt-get -o DPkg::Lock::Timeout=180 install -y -qq nvidia-container-toolkit; then
-    echo "[bootstrap] Installed nvidia-container-toolkit."
-  else
-    echo "[warn] Failed to install nvidia-container-toolkit; continuing bootstrap."
-  fi
-fi
-
 # Reboot once if NVIDIA kernel modules require booting into the newly installed kernel/driver
 # before starting the GitHub Actions runner (guarded by /var/lib/gpu-driver-reboot-attempted).
 if ! nvidia-smi >/dev/null 2>&1 && [ ! -f /var/lib/gpu-driver-reboot-attempted ]; then
@@ -300,172 +250,15 @@ if ! nvidia-smi >/dev/null 2>&1 && [ ! -f /var/lib/gpu-driver-reboot-attempted ]
   exit 0
 fi
 
-if command -v nvidia-ctk >/dev/null 2>&1; then
-  mkdir -p /etc/cdi
-  # Podman < 5 (Ubuntu 24.04 ships 4.9.3) bundles CDI library v0.6.x, which only accepts specs up to
-  # cdiVersion 0.6.0 and silently skips newer ones ("unresolvable CDI devices nvidia.com/gpu=all"). nvidia-ctk
-  # emits 0.7.0 only for the v0.7.0 fields additionalGids/intelRdt (render-node groups, not needed by CUDA),
-  # so drop those and declare 0.6.0. Same conversion as development/scripts/deploy_gpu_stack.sh.
-  PODMAN_MAJOR="$(podman --version 2>/dev/null | grep -oE '[0-9]+' | head -n1)"
-  python3 - /etc/cdi/nvidia.yaml "$${PODMAN_MAJOR:-4}" <<'PY' || echo "[warn] Failed to write /etc/cdi/nvidia.yaml."
-import json, os, subprocess, sys
-dst, podman_major = sys.argv[1], int(sys.argv[2] or 4)
-out = subprocess.run(["nvidia-ctk", "cdi", "generate", "--format=json"], check=True, capture_output=True, text=True).stdout
-spec = json.loads(out)
-if podman_major < 5:
-    for edits in [spec.get("containerEdits") or {}] + [d.get("containerEdits") or {} for d in spec.get("devices", [])]:
-        edits.pop("additionalGids", None)
-        edits.pop("intelRdt", None)
-    spec["cdiVersion"] = "0.6.0"
-with open(dst + ".tmp", "w") as fh:
-    json.dump(spec, fh, indent=2)
-os.replace(dst + ".tmp", dst)
-print("[bootstrap] CDI spec " + dst + ": cdiVersion " + spec["cdiVersion"] + ", devices: " + ",".join(d.get("name", "?") for d in spec.get("devices", [])))
-PY
-fi
-
-# 7. Configure regional GCS cache bucket metadata, sync helper (/usr/local/bin/gpu-gcs-sync), and systemd timer.
+# 6. Tell the runner (and the boot hook) which regional GCS cache bucket belongs to this VM. Never print the name in
+#    CI logs: it embeds the GCP project ID.
 CACHE_BUCKET="${google_storage_bucket.gpu_cache.name}"
 cat <<'CACHEEOF' > /etc/gpu-cache-bucket
 CACHE_BUCKET="${google_storage_bucket.gpu_cache.name}"
 CACHEEOF
 chmod 0644 /etc/gpu-cache-bucket
 
-cat <<'SYNCEOF' > /usr/local/bin/gpu-gcs-sync
-#!/usr/bin/env bash
-set -uo pipefail
-
-export HOME="/root"
-export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-FAST_MODE=false
-for arg in "$@"; do
-  case "$arg" in
-    --fast) FAST_MODE=true ;;
-  esac
-done
-
-if [ -f /etc/gpu-cache-bucket ]; then
-  # shellcheck disable=SC1091
-  . /etc/gpu-cache-bucket
-fi
-
-if [ -z "$${CACHE_BUCKET:-}" ]; then
-  echo "[gpu-gcs-sync] CACHE_BUCKET is not configured; skipping."
-  exit 0
-fi
-
-if ! command -v gcloud >/dev/null 2>&1; then
-  echo "[gpu-gcs-sync] gcloud not found; skipping."
-  exit 0
-fi
-
-if ! mountpoint -q /mnt/data; then
-  echo "[gpu-gcs-sync] /mnt/data is not mounted; skipping."
-  exit 0
-fi
-
-# Phase 1 (--fast and full): sync small stack configs, reverse-tunnel keys, harness state, and runner credentials.
-(
-  flock -n 9 || {
-    echo "[gpu-gcs-sync] Small-state sync already running; skipping."
-    exit 0
-  }
-
-  if [ -d /mnt/data/stacks/gpu-dev-machine ] && [ -n "$(ls -A /mnt/data/stacks/gpu-dev-machine 2>/dev/null)" ]; then
-    gcloud storage rsync -r -c /mnt/data/stacks/gpu-dev-machine "gs://$${CACHE_BUCKET}/stacks/gpu-dev-machine" || true
-  fi
-
-  if [ -d /mnt/data/reverse-tunnel ] && [ -n "$(ls -A /mnt/data/reverse-tunnel 2>/dev/null)" ]; then
-    gcloud storage rsync -r -c /mnt/data/reverse-tunnel "gs://$${CACHE_BUCKET}/reverse-tunnel" || true
-  fi
-
-  if [ -d /mnt/data/deepseek-harness ] && [ -n "$(ls -A /mnt/data/deepseek-harness 2>/dev/null)" ]; then
-    gcloud storage rsync -r -c /mnt/data/deepseek-harness "gs://$${CACHE_BUCKET}/deepseek-harness" || true
-  fi
-
-  for rf in .runner .credentials .credentials_rsaparams .env .path svc.sh runsvc.sh; do
-    if [ -f "/mnt/data/actions-runner/$rf" ]; then
-      gcloud storage cp "/mnt/data/actions-runner/$rf" "gs://$${CACHE_BUCKET}/actions-runner-state/$rf" || true
-    fi
-  done
-) 9>/run/gpu-gcs-sync.lock
-
-if [ "$FAST_MODE" = "true" ]; then
-  exit 0
-fi
-
-# Phase 2 (full sync): sync Hugging Face model cache (blobs + symlink manifest, skipping .locks and .incomplete files).
-(
-  flock -n 8 || {
-    echo "[gpu-gcs-sync] Hugging Face sync already running; skipping."
-    exit 0
-  }
-
-  if [ -d /mnt/data/huggingface ] && [ -n "$(ls -A /mnt/data/huggingface 2>/dev/null)" ]; then
-    python3 - /mnt/data/huggingface <<'PY' || true
-import os, sys
-root = sys.argv[1]
-entries = []
-for dirpath, dirnames, filenames in os.walk(root):
-    dirnames[:] = [d for d in dirnames if d != ".locks"]
-    for name in filenames + dirnames:
-        full = os.path.join(dirpath, name)
-        if os.path.islink(full):
-            rel = os.path.relpath(full, root)
-            entries.append((rel, os.readlink(full)))
-if entries:
-    entries.sort()
-    tmp = os.path.join(root, ".gcs-symlinks.tsv.tmp")
-    dst = os.path.join(root, ".gcs-symlinks.tsv")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        for rel, target in entries:
-            fh.write(f"{rel}\t{target}\n")
-    os.replace(tmp, dst)
-PY
-    # No -c here: checksum mode hashes every local file on every run, i.e. re-reads the ~475 GiB checkpoint (~11 min
-    # of saturated disk every 15 min). HF blobs are content-addressed and immutable, so size + mtime (stored by
-    # gcloud in object metadata) is enough and later runs are just listings.
-    gcloud storage rsync -r \
-      --exclude='(^|.*/)\.locks/.*|.*\.incomplete$|.*\.gcs-symlinks\.tsv\.tmp$' \
-      /mnt/data/huggingface "gs://$${CACHE_BUCKET}/huggingface" || true
-  fi
-
-  # Compile/JIT caches (vLLM torch.compile, FlashInfer, TileLang, Triton, CuTe-DSL): restoring them saves ~10 min of
-  # kernel compilation/autotuning on every Spot recreation.
-  if [ -d /mnt/data/vllm-cache ] && [ -n "$(ls -A /mnt/data/vllm-cache 2>/dev/null)" ]; then
-    gcloud storage rsync -r /mnt/data/vllm-cache "gs://$${CACHE_BUCKET}/vllm-cache" || true
-  fi
-) 8>/run/gpu-gcs-sync-hf.lock
-SYNCEOF
-chmod 0755 /usr/local/bin/gpu-gcs-sync
-
-cat <<'SVCEOF' > /etc/systemd/system/gpu-gcs-sync.service
-[Unit]
-Description=Sync GPU VM state and Hugging Face cache to regional GCS cache bucket
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/gpu-gcs-sync
-SVCEOF
-
-cat <<'TMREOF' > /etc/systemd/system/gpu-gcs-sync.timer
-[Unit]
-Description=Periodically sync GPU VM state and Hugging Face cache to GCS (every 15 minutes)
-
-[Timer]
-OnBootSec=15min
-OnUnitActiveSec=15min
-RandomizedDelaySec=60
-Persistent=false
-
-[Install]
-WantedBy=timers.target
-TMREOF
-
-# 8. Unpack latest GitHub Actions runner binary into /mnt/data/actions-runner if not already present.
+# 7. Unpack latest GitHub Actions runner binary into /mnt/data/actions-runner if not already present.
 RUNNER_DIR="/mnt/data/actions-runner"
 if [ ! -x "$RUNNER_DIR/config.sh" ]; then
   echo "[bootstrap] Downloading latest actions-runner-linux-x64 into $RUNNER_DIR..."
@@ -488,7 +281,7 @@ if [ -x "$RUNNER_DIR/bin/installdependencies.sh" ]; then
   "$RUNNER_DIR/bin/installdependencies.sh" >/dev/null 2>&1 || true
 fi
 
-# 9. Restore persisted runner state from GCS (if present), then start or self-register the GitHub Actions runner.
+# 8. Restore persisted runner state from GCS (if present), then start or self-register the GitHub Actions runner.
 if command -v gcloud >/dev/null 2>&1 && [ -n "$CACHE_BUCKET" ]; then
   echo "[bootstrap] Checking gs://$CACHE_BUCKET/actions-runner-state/ for preserved runner credentials..."
   for rf in .runner .credentials .credentials_rsaparams .env .path svc.sh runsvc.sh; do
@@ -732,100 +525,44 @@ else
 fi
 unset BOOTSTRAP_JSON RUNNER_TOKEN RUNNER_PAT REG_TOK
 
-# 10. Restore persisted stack configs, tunnel keys, harness workspace, and Hugging Face weights from regional GCS cache.
-STACK_DIR="/mnt/data/stacks/gpu-dev-machine"
-if command -v gcloud >/dev/null 2>&1 && [ -n "$CACHE_BUCKET" ]; then
-  echo "[bootstrap] Restoring stack config and runtime state from gs://$CACHE_BUCKET/..."
-  gcloud storage rsync -r -c "gs://$CACHE_BUCKET/stacks/gpu-dev-machine" "$STACK_DIR" || true
-  if [ -f "$STACK_DIR/.env" ]; then
-    chmod 0600 "$STACK_DIR/.env"
-  fi
-  chown -R "$RUNNER_USER:$RUNNER_USER" /mnt/data/stacks
-
-  gcloud storage rsync -r -c "gs://$CACHE_BUCKET/reverse-tunnel" /mnt/data/reverse-tunnel || true
-  chmod 0700 /mnt/data/reverse-tunnel
-  chmod 1777 \
-    /mnt/data/reverse-tunnel/state \
-    /mnt/data/reverse-tunnel/state/litellm \
-    /mnt/data/reverse-tunnel/state/harness
-  [ -f /mnt/data/reverse-tunnel/id_ed25519 ] && chmod 0644 /mnt/data/reverse-tunnel/id_ed25519
-  [ -f /mnt/data/reverse-tunnel/known_hosts ] && chmod 0644 /mnt/data/reverse-tunnel/known_hosts
-
-  gcloud storage rsync -r -c "gs://$CACHE_BUCKET/deepseek-harness" /mnt/data/deepseek-harness || true
-  mkdir -p /mnt/data/deepseek-harness/dsh-home /mnt/data/deepseek-harness/workspace
-  chown -R 1000:1000 /mnt/data/deepseek-harness/dsh-home /mnt/data/deepseek-harness/workspace || true
-  chmod 1777 \
-    /mnt/data/deepseek-harness \
-    /mnt/data/deepseek-harness/dsh-home \
-    /mnt/data/deepseek-harness/workspace
-  find /mnt/data/deepseek-harness/dsh-home -type f -perm /1077 -exec chmod go-rwx,-t {} + 2>/dev/null || true
-  [ -f /mnt/data/deepseek-harness/dsh-home/.credentials.yaml ] && chmod 0600 /mnt/data/deepseek-harness/dsh-home/.credentials.yaml
-
-  echo "[bootstrap] Restoring Hugging Face model cache from gs://$CACHE_BUCKET/huggingface/..."
-  (
-    flock -n 8 || true
-    gcloud storage rsync -r "gs://$CACHE_BUCKET/huggingface" /mnt/data/huggingface || true
-    python3 - /mnt/data/huggingface <<'PY' || true
-import os, sys
-root = sys.argv[1]
-manifest = os.path.join(root, ".gcs-symlinks.tsv")
-if os.path.isfile(manifest):
-    restored = 0
-    norm_root = os.path.normpath(root)
-    with open(manifest, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.rstrip("\n")
-            if "\t" not in line:
-                continue
-            rel, target = line.split("\t", 1)
-            link_path = os.path.normpath(os.path.join(norm_root, rel))
-            if not link_path.startswith(norm_root + os.sep):
-                continue
-            resolved = os.path.normpath(os.path.join(os.path.dirname(link_path), target))
-            if not os.path.exists(resolved):
-                continue
-            os.makedirs(os.path.dirname(link_path), exist_ok=True)
-            if os.path.islink(link_path) or os.path.exists(link_path):
-                if os.path.islink(link_path) and os.readlink(link_path) == target:
-                    continue
-                if os.path.isdir(link_path) and not os.path.islink(link_path):
-                    continue
-                os.unlink(link_path)
-            os.symlink(target, link_path)
-            restored += 1
-    print(f"[bootstrap] Restored {restored} Hugging Face cache symlinks from manifest.")
-PY
-  ) 8>/run/gpu-gcs-sync-hf.lock
-
-  echo "[bootstrap] Restoring compile/JIT caches from gs://$CACHE_BUCKET/vllm-cache/ (absent on first boot)..."
-  mkdir -p /mnt/data/vllm-cache
-  gcloud storage rsync -r "gs://$CACHE_BUCKET/vllm-cache" /mnt/data/vllm-cache >/dev/null 2>&1 || true
+# 9. Boot hook, controlled by the runner: after every successful pipeline, deploy_gpu_stack.sh publishes
+#    gs://$CACHE_BUCKET/boot-hook/hook.sh (restore the stack files that deploy saved to GCS and re-run it with --resume).
+#    Failsafe: the hook is disarmed (moved to running.sh) BEFORE it runs and re-armed only when it exits 0. A failure, a
+#    timeout or a VM lost mid-run leaves it disarmed (failed.sh / running.sh), so later boots skip it until the next
+#    successful pipeline publishes it again. It runs detached (gpu-boot-hook.service), after the runner is up.
+cat <<'HOOKEOF' > /usr/local/bin/gpu-boot-hook
+#!/usr/bin/env bash
+set -uo pipefail
+export HOME=/root
+export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+. /etc/gpu-cache-bucket
+HOOK_URL="gs://$CACHE_BUCKET/boot-hook"
+WORK=/mnt/data/boot-hook
+mkdir -p "$WORK"
+if ! gcloud storage cp "$HOOK_URL/running.sh" "$WORK/hook.sh" >/dev/null 2>&1; then
+  echo "[boot-hook] Could not fetch the disarmed hook; it stays disarmed until the next pipeline."
+  exit 1
 fi
-
-# Enable and start the periodic 15-minute GCS sync timer after initial restore completes.
-systemctl daemon-reload || true
-systemctl enable --now gpu-gcs-sync.timer || echo "[warn] Failed to enable/start gpu-gcs-sync.timer."
-
-# 11. Auto-resume previously deployed Podman stack after Spot recreation or cross-zone failover.
-if [ -f "$STACK_DIR/compose.yml" ] && [ -f "$STACK_DIR/.env" ]; then
-  echo "[bootstrap] Detected previously deployed Podman stack in $STACK_DIR; resuming..."
-  # Container DNS needs netavark + aardvark-dns (Podman 4.9's CNI fallback has no DNS plugin); same setting as
-  # development/scripts/deploy_gpu_stack.sh. Written before any podman command so it applies to this boot.
-  mkdir -p /etc/containers/containers.conf.d
-  printf '# Managed by personal-infra (development/infra/gcp/main.tf)\n[network]\nnetwork_backend = "netavark"\n' \
-    > /etc/containers/containers.conf.d/50-personal-infra-netavark.conf
-  # Default 2048-task limit per container is too low for vLLM's 4 TP workers on 192 vCPUs (EAGAIN after loading).
-  printf '# Managed by personal-infra (development/infra/gcp/main.tf)\n[containers]\npids_limit = 65536\n' \
-    > /etc/containers/containers.conf.d/51-personal-infra-pids.conf
-  podman system migrate >/dev/null 2>&1 || true
-  TUNNEL_HOST_SET="$(grep -E '^(TUNNEL_SSH_HOST|LITELLM_TUNNEL_SSH_HOST|HARNESS_TUNNEL_SSH_HOST)=' "$STACK_DIR/.env" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]"'\''' || true)"
-  if [ -n "$TUNNEL_HOST_SET" ] && [ -s /mnt/data/reverse-tunnel/id_ed25519 ]; then
-    (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d --build) || \
-      echo "[warn] Failed to auto-resume full podman-compose stack."
-  else
-    (cd "$STACK_DIR" && TMPDIR=/mnt/data/containers/tmp podman-compose -f compose.yml up -d --build vllm-server litellm deepseek-harness) || \
-      echo "[warn] Failed to auto-resume core podman-compose stack."
-  fi
+echo "[boot-hook] Running the hook published by the last successful pipeline (timeout $${GPU_BOOT_HOOK_TIMEOUT}s)..."
+timeout "$${GPU_BOOT_HOOK_TIMEOUT}" bash "$WORK/hook.sh"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  gcloud storage mv "$HOOK_URL/running.sh" "$HOOK_URL/hook.sh" >/dev/null 2>&1 \
+    && echo "[boot-hook] Succeeded; re-armed for the next boot." \
+    || echo "[boot-hook] Succeeded, but could not re-arm it (the next pipeline will)."
+else
+  gcloud storage mv "$HOOK_URL/running.sh" "$HOOK_URL/failed.sh" >/dev/null 2>&1 || true
+  echo "[boot-hook] Failed (exit $rc); disarmed until the next successful pipeline."
+fi
+exit "$rc"
+HOOKEOF
+chmod 0755 /usr/local/bin/gpu-boot-hook
+if gcloud storage mv "gs://$CACHE_BUCKET/boot-hook/hook.sh" "gs://$CACHE_BUCKET/boot-hook/running.sh" >/dev/null 2>&1; then
+  systemd-run --unit=gpu-boot-hook --collect --setenv=GPU_BOOT_HOOK_TIMEOUT=${local.boot_hook_timeout_sec} \
+    /usr/local/bin/gpu-boot-hook >/dev/null
+  echo "[bootstrap] Boot hook disarmed and started (gpu-boot-hook.service); it re-arms itself only if it succeeds."
+else
+  echo "[bootstrap] No armed boot hook (never published, or the last one failed): the stack waits for the pipeline."
 fi
 
 echo "=== [gpu-mig-bootstrap] Finished at $(date -Is) (runner_started=$RUNNER_STARTED) ==="

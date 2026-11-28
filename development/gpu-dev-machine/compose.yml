@@ -202,6 +202,43 @@ services:
       retries: 3
       start_period: 15s
 
+  # Streams this VM's journal (startup script, boot hook, runner, all containers, kernel) to the log host, which
+  # appends it to /var/log/gpu-dev/<LOG_STREAM>.log (rotated there). Same SSH key and host as the tunnels; the log
+  # host's gpulog user may only append (bootstrap_vm.py --tunnel-pubkey-file). Started together with the tunnels.
+  log-shipper:
+    build:
+      context: ./log-shipper
+      dockerfile: Dockerfile
+    image: localhost/gpu-dev-log-shipper:1.0.0
+    container_name: log-shipper
+    restart: unless-stopped
+    # Root only to read the host journal (root-owned, 0640) through read-only mounts; no capabilities at all.
+    user: "0:0"
+    cap_drop:
+      - ALL
+    security_opt:
+      - label=disable
+      - no-new-privileges
+    environment:
+      LOG_SSH_HOST: ${LOG_SSH_HOST:-}
+      LOG_SSH_PORT: ${LOG_SSH_PORT:-22}
+      LOG_SSH_USER: ${LOG_SSH_USER:-gpulog}
+      LOG_STREAM: ${LOG_STREAM:-gpu-vm}
+    volumes:
+      - /var/log/journal:/host/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+      - ${TUNNEL_SSH_KEY_FILE:-/mnt/data/reverse-tunnel/id_ed25519}:/run/ship/ssh_key:ro
+      - ${TUNNEL_KNOWN_HOSTS_FILE:-/mnt/data/reverse-tunnel/known_hosts}:/run/ship/known_hosts:ro
+      - ${TUNNEL_STATE_DIR:-/mnt/data/reverse-tunnel/state}/logs:/data
+    networks:
+      - gpu-dev-net
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x journalctl >/dev/null && pgrep -x ssh >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
 networks:
   gpu-dev-net:
     name: gpu-dev-net

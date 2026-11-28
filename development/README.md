@@ -16,7 +16,8 @@ development/
 │   ├── compose.yml → vllm-server     # vLLM OpenAI server (image only) serving full unquantized DeepSeek-V4.1-Flash
 │   ├── litellm/                      # LiteLLM OpenAI-compatible proxy (:4000) backed by vllm-server (:8000)
 │   ├── deepseek-harness/             # DeepSeek Harness web UI (:3080 Caddy front with password /login -> 127.0.0.1:3081) pointed at LiteLLM
-│   └── reverse-tunnel/               # Optional autossh reverse-SSH tunnel containers for LiteLLM & DeepSeek Harness
+│   ├── reverse-tunnel/               # Optional autossh reverse-SSH tunnel containers for LiteLLM & DeepSeek Harness
+│   └── log-shipper/                  # Streams the VM journal to personal-host:/var/log/gpu-dev (append-only user, rotated there)
 ├── infra/
 │   ├── gcp/                          # GCP Terraform: Stateless Multi-Zone Regional MIG (Spot/Standard, custom/default VPC) + Same-Region GCS Cache Bucket + Secret Manager runner bootstrap + ephemeral 3 TB Hyperdisk
 │   ├── azure/                        # (Planned) Azure GPU VM Terraform
@@ -24,7 +25,7 @@ development/
 └── scripts/
     ├── setup.sh                      # Syncs `development/.env` to GitHub via `gh` (zero-SSH on GCP incl. Regional MIG `--status`; SSH runner setup for azure/on-prem)
     ├── deploy.sh                     # Creates/manages the GPU machine infrastructure (--provider=<gcp|azure|on-prem>, region-level capacity cycling)
-    └── deploy_gpu_stack.sh           # Syncs & deploys development/gpu-dev-machine via podman-compose + triggers `gpu-gcs-sync --fast` (CI or local)
+    └── deploy_gpu_stack.sh           # Runner-side deploy: host prep, GCS restore, gpu-gcs-sync, podman-compose, boot hook (CI, local, or --resume at boot)
 ```
 
 ---
@@ -201,14 +202,11 @@ Always run `--dry-run` first to verify your resolved `gcloud` account, credentia
 2. **API Enablement & Per-Project Workspace:** Enables `compute.googleapis.com`, `secretmanager.googleapis.com`, `storage.googleapis.com`, `iap.googleapis.com`, `oslogin.googleapis.com`, and `iam.googleapis.com`, initializes Terraform, and selects/creates workspace `development/infra/gcp/terraform.tfstate.d/<project_id>/`.
 3. **Zero-Leak Runner Bootstrap Auth:** Uses `RUNNER_PAT` if set in `development/.env`, or auto-mints a 1-hour GitHub runner registration token via `gh api`, passing it exclusively via `TF_VAR_runner_pat` / `TF_VAR_runner_token` into GCP Secret Manager (`dev-gpu-runner-bootstrap`).
 4. **Regional MIG Provisioning & Region Cycling:** Queries `gcloud compute machine-types list` once to discover all GPU-capable zones per region, applies the Stateless Multi-Zone Regional MIG (`dev-gpu-mig`, `target_size = 1`, `distribution_policy_target_shape = "ANY"`, `allow_changing_zone = "YES"`) + same-region GCS cache bucket (`google_storage_bucket.gpu_cache`), and polls `gcloud compute instance-groups managed list-instances --region=<region>` for up to 90s (`18 * 5s`) to verify `RUNNING` status (showing whichever zone GCE selected). On `QUOTA_EXCEEDED` or region exhaustion it cleans up the probe MIG/template (and empty probe bucket) and tries the next region (or leaves the MIG active on the final candidate when `--stage-terminated` is enabled / `--loop` is not set).
-5. **Zero-SSH Self-Registration, GCS Cache Restore & Sync on Boot (`startup-script`):** Logged to `/var/log/gpu-mig-bootstrap.log` on the GPU VM:
-   - Formats `/dev/disk/by-id/google-data` (`ext4`, `auto_delete = true`) and mounts it at `/mnt/data` (`nofail`) with 16 MiB readahead.
-   - Points Podman `graphroot` at `/mnt/data/containers/storage` so container images never fill the 50 GB boot disk.
-   - Creates `github-runner` with passwordless sudo and symlinks `/opt/actions-runner -> /mnt/data/actions-runner`.
-   - Installs OS packages, Canonical's prebuilt Secure-Boot-signed NVIDIA open driver (`nvidia-driver-*-open` + `linux-modules-nvidia-*-open-$(uname -r)`), `nvidia-container-toolkit` (`/etc/cdi/nvidia.yaml` at CDI `0.6.0`), `netavark` + `aardvark-dns`, Podman, `podman-compose`, and `actions-runner-linux-x64`.
-   - Writes `/etc/gpu-cache-bucket` and installs `/usr/local/bin/gpu-gcs-sync` + `gpu-gcs-sync.service` + 15-minute `gpu-gcs-sync.timer` (plus shutdown flush via `gpu-gcs-sync --fast`).
-   - Restores `actions-runner-state/` (`.runner`, `.credentials`, `.credentials_rsaparams`) from `gs://$CACHE_BUCKET` before registering; if absent or invalid, fetches `dev-gpu-runner-bootstrap` from Secret Manager, registers fresh with `--replace`, and uploads the new credentials to `gs://$CACHE_BUCKET/actions-runner-state/`.
-   - Restores `stacks/gpu-dev-machine/`, `reverse-tunnel/`, `deepseek-harness/`, and `huggingface/` model cache from `gs://$CACHE_BUCKET` (`$0` same-region GCS → GCE transfer), and auto-resumes any previously deployed Podman stack in `/mnt/data/stacks/gpu-dev-machine`.
+5. **Lean, rarely-changing `startup-script` (machine + runner only):** Logged to `/var/log/gpu-mig-bootstrap.log` (and the journal, shipped to `personal-host`). Its only job is to bring the machine up and make the runner operational, so **changing the stack, the model, the logging or the restore logic never needs `deploy.sh`**; those live in [`deploy_gpu_stack.sh`](./scripts/deploy_gpu_stack.sh) and reach the VM through the pipeline:
+   - Installs the `gpu-health` autohealing probe (runner service only), formats/mounts `/dev/disk/by-id/google-data` at `/mnt/data`.
+   - Creates `github-runner` (passwordless sudo, `/opt/actions-runner -> /mnt/data/actions-runner`), installs the runner's OS packages and Canonical's prebuilt Secure-Boot-signed NVIDIA open driver (kept here because it can need a reboot, which would kill a runner job).
+   - Writes `/etc/gpu-cache-bucket`, restores `actions-runner-state/` from `gs://$CACHE_BUCKET` (or registers fresh from Secret Manager `dev-gpu-runner-bootstrap` and saves the new credentials), and starts `gcp-gpu-runner`.
+   - **Boot hook (failsafe auto-resume):** if the last successful pipeline published `gs://$CACHE_BUCKET/boot-hook/hook.sh`, it is *disarmed first* (renamed `running.sh`) and run detached as `gpu-boot-hook.service` (3 h timeout). The hook restores the stack files + `.env` that deploy saved to GCS and runs the same `deploy_gpu_stack.sh --resume`. Only a clean exit re-arms it (`hook.sh`); a failure or timeout leaves `failed.sh`, a VM lost mid-run leaves `running.sh`, and later boots skip it until the next successful pipeline publishes it again.
 
 Verify the GPU VM and GitHub runner are online (zero SSH):
 
@@ -227,13 +225,14 @@ Once `./development/scripts/setup.sh --provider=gcp --status` shows your self-ho
    ./development/scripts/setup.sh --provider=gcp --sync-github-only --trigger-deploy
    ```
 2. **Direct Local Execution (`GPU_TARGET_MODE=local`):** Because the runner runs directly on the GPU VM in `dev-gpu-mig`, [`deploy_gpu_stack.sh`](./scripts/deploy_gpu_stack.sh) executes locally:
-   - Ensures `/mnt/data` directories, Podman storage config (`netavark` + `pids_limit = 65536`), NVIDIA driver, and `/etc/cdi/nvidia.yaml` exist.
-   - Syncs `development/gpu-dev-machine/` to `/mnt/data/stacks/gpu-dev-machine`, writes mode-`0600` `.env` (plus optional tunnel SSH key), and runs `podman-compose -f compose.yml up -d --build`.
-   - Immediately runs `sudo /usr/local/bin/gpu-gcs-sync --fast` (when present) so newly deployed `.env`, `compose.yml`, and reverse-tunnel keys are persisted to the regional GCS cache bucket right away.
+   - Waits for the startup script and for a running boot hook (never two deploys at once), then restores `reverse-tunnel/`, `deepseek-harness/`, `vllm-cache/` and `huggingface/` (relinking the HF snapshot symlinks from the saved manifest) from the GCS cache **into empty targets only** (a fresh VM; newer local state is never overwritten).
+   - Ensures Podman + `podman-compose`, storage on `/mnt/data`, `netavark` + `pids_limit = 65536`, the journald log driver + a persistent journal (for `log-shipper`), the NVIDIA container toolkit + `/etc/cdi/nvidia.yaml`, and installs `gpu-gcs-sync` + its 15-minute timer.
+   - Syncs `development/gpu-dev-machine/` (plus a copy of itself under `.deploy/`) to `/mnt/data/stacks/gpu-dev-machine`, writes mode-`0600` `.env` (plus the tunnel SSH key), and runs `podman-compose -f compose.yml up -d --build`.
+   - Runs `gpu-gcs-sync --fast` (output redacted: the bucket name embeds the project ID) so the stack files, `.env` and the deploy script are in the GCS cache, waits for the model, checks the harness, and finally **publishes the boot hook** so the next VM boot resumes this revision.
 3. **Automatic Spot Preemption & Cross-Zone Failover Recovery:**
    - When a Spot VM is preempted or repaired, `shutdown-script` stops Podman containers gracefully (`podman stop -t 10 --all`), flushes small state (`stacks/gpu-dev-machine/`, `reverse-tunnel/`, `deepseek-harness/`, `actions-runner-state/`) via `/usr/local/bin/gpu-gcs-sync --fast`, and unmounts `/mnt/data` (`auto_delete = true` deletes the ephemeral Hyperdisk cleanly with zero orphaned disks). Meanwhile, the 15-minute `gpu-gcs-sync.timer` keeps `huggingface/` model weights synced to GCS while the VM is running.
    - `dev-gpu-mig` (`distribution_policy_target_shape = "ANY"`, `on_repair { allow_changing_zone = "YES" }`, `replacement_method = "SUBSTITUTE"`) schedules a replacement VM in any available GPU zone within the region—even if the original zone is out of capacity.
-   - On boot in the new zone, `startup-script` restores `actions-runner-state/` from `gs://$CACHE_BUCKET` (reusing preserved `.credentials` even after the 1-hour registration token expires, or falling back to Secret Manager), starts `gcp-gpu-runner`, pulls `stacks/gpu-dev-machine/`, `reverse-tunnel/`, `deepseek-harness/`, and `huggingface/` from the same-region GCS bucket at `$0` transfer cost, enables `gpu-gcs-sync.timer`, and **automatically runs `podman-compose up -d`** without requiring a new CI workflow run.
+   - On boot in the new zone, `startup-script` restores the runner state from `gs://$CACHE_BUCKET`, starts `gcp-gpu-runner`, and runs the armed boot hook, which redeploys the last successful revision from the same-region GCS cache (`$0` transfer) **without a new CI run**. If that resume fails, the stack waits for the next pipeline run (the hook stays disarmed until then).
 
 | Service in [`compose.yml`](./gpu-dev-machine/compose.yml) | GPU VM Port | Local Storage on `/mnt/data` & Regional GCS Cache | Role & Configuration |
 | :--- | :--- | :--- | :--- |
@@ -242,6 +241,7 @@ Once `./development/scripts/setup.sh --provider=gcp --status` shows your self-ho
 | **`deepseek-harness`** | `127.0.0.1:3080` | `/mnt/data/deepseek-harness/{dsh-home,workspace}` *(synced ↔ `gs://$CACHE_BUCKET/deepseek-harness/`)* | Runs `@deepseek-ai/dsh` web UI (`127.0.0.1:3081` behind a Caddy front with the password-protected `/login`; served on container `0.0.0.0:3080` by Caddy), pre-wired to `http://litellm:4000/v1` with `LITELLM_MASTER_KEY`. |
 | **`litellm-tunnel`** *(optional)* | Outbound SSH | `/mnt/data/reverse-tunnel` *(synced ↔ `gs://$CACHE_BUCKET/reverse-tunnel/`)* | Started only when `ENABLE_REVERSE_TUNNELS=true`; `autossh` reverse-forwards `TUNNEL_SSH_HOST:REMOTE_LITELLM_PORT` → `litellm:4000`. |
 | **`deepseek-harness-tunnel`** *(optional)* | Outbound SSH | `/mnt/data/reverse-tunnel` *(synced ↔ `gs://$CACHE_BUCKET/reverse-tunnel/`)* | Started only when `ENABLE_REVERSE_TUNNELS=true`; `autossh` reverse-forwards `TUNNEL_SSH_HOST:REMOTE_HARNESS_PORT` → `deepseek-harness:3080`. |
+| **`log-shipper`** *(with the tunnels)* | Outbound SSH | `/mnt/data/reverse-tunnel/state/logs` (journal cursor) | Streams the VM's journal (startup script, boot hook, runner, every container, kernel) with tokens/keys redacted to `LOG_SSH_USER@LOG_SSH_HOST` (default `gpulog@TUNNEL_SSH_HOST`, same key as the tunnels). On `personal-host` the append-only `gpulog` user writes `/var/log/gpu-dev/gpu-vm.log` (readable by the `adm` group), rotated hourly with a 50 MiB cap and 14 rotations (`bootstrap_vm.py --tunnel-pubkey-file`). Read it with `ssh ubuntu@personal-host tail -f /var/log/gpu-dev/gpu-vm.log`. |
 
 > **Optional Admin Debugging / Local Port-Forward via IAP:** If you disable reverse tunnels (`ENABLE_REVERSE_TUNNELS=false`) and want temporary local access or log inspection (`/var/log/gpu-mig-bootstrap.log`), inspect the active Regional MIG instance (and whichever zone GCE placed it in) and tunnel over IAP:
 > ```bash

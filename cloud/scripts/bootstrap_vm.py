@@ -14,6 +14,8 @@ Converged state:
   * Oracle only: host iptables ACCEPT for tcp/80,443 inserted before Canonical's REJECT rule
     (live + /etc/iptables/rules.v4). Never flushes rules or runs `netfilter-persistent save`.
   * stack-backup@.service/.timer units (run /opt/stacks/.ops/backup_stack.py daily)
+  * with --tunnel-pubkey-file (GPU dev machine): the reverse-tunnel user (loopback listeners only) and the
+    append-only `gpulog` user writing /var/log/gpu-dev/*.log, rotated hourly with a size cap
 
 Modes:
   --dry-run   print the SSH command and the step list, no connection
@@ -72,6 +74,66 @@ TUNNEL_SSHD_DROPIN = (
     "\tForceCommand /usr/sbin/nologin\n"
     "Match all\n"
 )
+# Logs from the GPU dev machine (its log-shipper container, same key as the tunnels): a user whose only possible
+# command appends stdin to /var/log/gpu-dev/<stream>.log. logrotate runs hourly with a size cap so the disk never
+# fills: at most ~50 MiB live + 1 uncompressed + 13 compressed rotations per stream.
+DEFAULT_GPU_LOG_USER = "gpulog"
+GPU_LOG_DIR = "/var/log/gpu-dev"
+GPU_LOG_RECEIVER_PATH = "/usr/local/bin/gpu-log-receive"
+GPU_LOG_RECEIVER = """#!/bin/sh
+# Managed by personal-infra cloud/scripts/bootstrap_vm.py: ForceCommand of the GPU log user. Appends stdin to
+# /var/log/gpu-dev/<stream>.log; <stream> is the client's command reduced to [a-z0-9-] (max 32 chars).
+umask 027
+stream=$(printf '%s' "${SSH_ORIGINAL_COMMAND:-gpu-vm}" | tr -cd 'a-z0-9-' | cut -c1-32)
+[ -n "$stream" ] || stream=gpu-vm
+exec cat >> "/var/log/gpu-dev/$stream.log"
+"""
+GPU_LOG_SSHD_DROPIN_PATH = "/etc/ssh/sshd_config.d/99-personal-infra-gpulog.conf"
+GPU_LOG_SSHD_DROPIN = (
+    "# Managed by personal-infra cloud/scripts/bootstrap_vm.py: log stream from the GPU machine (append only)\n"
+    "Match User {user}\n"
+    "\tAllowTcpForwarding no\n"
+    "\tAllowStreamLocalForwarding no\n"
+    "\tPermitTTY no\n"
+    "\tX11Forwarding no\n"
+    "\tAllowAgentForwarding no\n"
+    "\tPermitTunnel no\n"
+    f"\tForceCommand {GPU_LOG_RECEIVER_PATH}\n"
+    "Match all\n"
+)
+GPU_LOGROTATE_PATH = "/etc/personal-infra/gpu-dev-logrotate.conf"
+GPU_LOGROTATE = """# Managed by personal-infra cloud/scripts/bootstrap_vm.py (run hourly by gpu-dev-logrotate.timer)
+/var/log/gpu-dev/*.log {{
+    su {user} adm
+    daily
+    maxsize 50M
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}}
+"""
+GPU_LOGROTATE_SERVICE = f"""# Managed by personal-infra cloud/scripts/bootstrap_vm.py
+[Unit]
+Description=Rotate the GPU machine logs in {GPU_LOG_DIR}
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate --state /var/lib/logrotate/gpu-dev.status {GPU_LOGROTATE_PATH}
+"""
+GPU_LOGROTATE_TIMER = """# Managed by personal-infra cloud/scripts/bootstrap_vm.py
+[Unit]
+Description=Hourly rotation of the GPU machine logs (size-capped)
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
 AUTO_UPGRADES = 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n'
 BACKUP_SERVICE = """# Managed by personal-infra cloud/scripts/bootstrap_vm.py
 [Unit]
@@ -334,6 +396,41 @@ class Converger:
                 raise RuntimeError(f"sshd -t rejected the tunnel drop-in (removed it): {test.stderr.strip()}")
             self.sh("systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true")
 
+    def gpu_log_user(self, user: str, pubkey: str) -> None:
+        """Append-only log sink for the GPU machine's log-shipper; rotated hourly with a size cap."""
+        if self.sh(f"id -u {user}", check=False).returncode == 0:
+            self.ok(f"user {user} exists")
+        elif self.change(f"create GPU log user {user}"):
+            # A real shell is required for sshd to run the ForceCommand; the Match block allows nothing else.
+            self.sh(f"useradd --system --create-home --home-dir /var/lib/{user} --shell /bin/sh {user}")
+            self.sh(f"usermod -p '*' {user}")  # no password, not locked: pubkey auth still works
+        if self.sh(f"id -u {user}", check=False).returncode == 0:
+            home = self.sh(f"getent passwd {user} | cut -d: -f6").stdout.strip()
+            ssh_dir = f"{home}/.ssh"
+            if self.ensure_file(f"{ssh_dir}/authorized_keys", f"restrict {pubkey.strip()}\n", mode=0o600):
+                self.sh(f"chown -R {user}:{user} {shlex.quote(ssh_dir)} && chmod 700 {shlex.quote(ssh_dir)}")
+            log_dir = self.sh(f"stat -c '%U:%G %a' {GPU_LOG_DIR}", check=False).stdout.strip()
+            if log_dir == f"{user}:adm 2750":
+                self.ok(f"{GPU_LOG_DIR} owned by {user}:adm (2750)")
+            elif self.change(f"create {GPU_LOG_DIR} ({user}:adm, 2750; readable by the adm group)"):
+                self.sh(f"install -d -o {user} -g adm -m 2750 {GPU_LOG_DIR}")
+        self.ensure_file(GPU_LOG_RECEIVER_PATH, GPU_LOG_RECEIVER, mode=0o755)
+        changed = self.ensure_file(GPU_LOGROTATE_PATH, GPU_LOGROTATE.format(user=user))
+        changed |= self.ensure_file("/etc/systemd/system/gpu-dev-logrotate.service", GPU_LOGROTATE_SERVICE)
+        changed |= self.ensure_file("/etc/systemd/system/gpu-dev-logrotate.timer", GPU_LOGROTATE_TIMER)
+        if changed:
+            self.sh("systemctl daemon-reload")
+        if self.sh("systemctl is-enabled gpu-dev-logrotate.timer && systemctl is-active gpu-dev-logrotate.timer", check=False).returncode == 0:
+            self.ok("gpu-dev-logrotate.timer enabled")
+        elif self.change("enable gpu-dev-logrotate.timer"):
+            self.sh("systemctl enable --now gpu-dev-logrotate.timer")
+        if self.ensure_file(GPU_LOG_SSHD_DROPIN_PATH, GPU_LOG_SSHD_DROPIN.format(user=user)):
+            test = self.sh("sshd -t", check=False)
+            if test.returncode != 0:
+                os.remove(GPU_LOG_SSHD_DROPIN_PATH)
+                raise RuntimeError(f"sshd -t rejected the GPU log drop-in (removed it): {test.stderr.strip()}")
+            self.sh("systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true")
+
     def host_key(self) -> None:
         r = self.sh("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub", check=False)
         if r.returncode == 0:
@@ -358,6 +455,8 @@ def remote_main(args: argparse.Namespace) -> int:
         ("sshd", conv.sshd),
         ("tunnel", (lambda: conv.tunnel_user(args.tunnel_user, tunnel_pubkey, tunnel_listens)) if tunnel_pubkey
                    else (lambda: conv.ok("no tunnel user requested (--tunnel-pubkey-file)"))),
+        ("gpu-logs", (lambda: conv.gpu_log_user(args.gpu_log_user, tunnel_pubkey)) if tunnel_pubkey
+                     else (lambda: conv.ok("no GPU log sink requested (--tunnel-pubkey-file)"))),
         ("firewall", conv.oracle_iptables if args.provider == "oracle" else lambda: conv.ok("GCE: VPC firewall is the perimeter (no host rules)")),
         ("upgrades", lambda: conv.unattended_upgrades(args.reboot_time)),
         ("backups", lambda: conv.backup_units(args.deploy_user, args.backup_stack)),
@@ -415,8 +514,11 @@ def local_main(args: argparse.Namespace) -> int:
     ]
     for stack in args.backup_stack:
         remote_args += ["--backup-stack", stack]
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", args.gpu_log_user):
+        print(f"[error] --gpu-log-user must be a valid user name (got {args.gpu_log_user!r})", file=sys.stderr)
+        return 1
     if tunnel_pubkey:
-        remote_args += ["--tunnel-user", args.tunnel_user,
+        remote_args += ["--tunnel-user", args.tunnel_user, "--gpu-log-user", args.gpu_log_user,
                         "--tunnel-pubkey-b64", base64.b64encode(tunnel_pubkey.encode()).decode()]
         for listen in tunnel_listens:
             remote_args += ["--tunnel-listen", listen]
@@ -432,7 +534,8 @@ def local_main(args: argparse.Namespace) -> int:
               f"daemon.json + journald cap, {args.swap_gb}G swap, user '{args.deploy_user}' + deploy key, /opt/stacks, "
               f"sshd hardening, {'iptables 80/443 (live + rules.v4)' if args.provider == 'oracle' else 'no host firewall'}, "
               f"unattended-upgrades (reboot {args.reboot_time}), backup timers: {', '.join(args.backup_stack) or 'none'}, "
-              f"tunnel user: {f'{args.tunnel_user} (listen {chr(44).join(tunnel_listens)})' if tunnel_pubkey else 'none'}")
+              f"tunnel user: {f'{args.tunnel_user} (listen {chr(44).join(tunnel_listens)})' if tunnel_pubkey else 'none'}, "
+              f"GPU log sink: {f'{args.gpu_log_user} -> {GPU_LOG_DIR} (hourly logrotate, 50M cap)' if tunnel_pubkey else 'none'}")
         return 0
 
     print(f"[bootstrap] {'Checking' if args.check else 'Converging'} {args.host} ({args.provider}) ...")
@@ -461,6 +564,7 @@ def main() -> None:
     parser.add_argument("--tunnel-pubkey-file", help="Public key for the restricted reverse-tunnel user (GPU machine -> this VM)")
     parser.add_argument("--tunnel-user", default=DEFAULT_TUNNEL_USER, help=f"Reverse-tunnel user (default: {DEFAULT_TUNNEL_USER})")
     parser.add_argument("--tunnel-listen", action="append", default=[], help=f"Remote listener the tunnel key may open, HOST:PORT (repeatable; default: {' '.join(DEFAULT_TUNNEL_LISTENS)})")
+    parser.add_argument("--gpu-log-user", default=DEFAULT_GPU_LOG_USER, help=f"Append-only user receiving the GPU machine's log stream with the tunnel key (default: {DEFAULT_GPU_LOG_USER}; set up with --tunnel-pubkey-file)")
     parser.add_argument("--identity-file", help="Admin SSH private key")
     parser.add_argument("--host-key-checking", choices=("yes", "accept-new"), default="accept-new", help="StrictHostKeyChecking for the admin connection (default: accept-new)")
     parser.add_argument("--check", action="store_true", help="Report drift without changing anything (exit 2 on drift)")

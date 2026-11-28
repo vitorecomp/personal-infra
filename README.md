@@ -17,7 +17,7 @@ personal-infra/
 │   ├── taiga/                # Taiga image + Cloud Run deploy script (built/deployed from GitHub Actions)
 │   └── scripts/              # bootstrap / deploy / backup / OCI retry scripts, Ghost & Taiga seeders
 ├── development/              # Cloud & on-prem GPU development machine infrastructure, runner & Podman stack
-│   ├── gpu-dev-machine/      # Podman + podman-compose stack (vLLM DeepSeek-V4.1-Flash, LiteLLM, DeepSeek Harness)
+│   ├── gpu-dev-machine/      # Podman + podman-compose stack (vLLM DeepSeek-V4.1-Flash, LiteLLM, DeepSeek Harness, tunnels, log-shipper)
 │   ├── infra/                # Provider-specific GPU machine configs (gcp, azure, on-prem)
 │   └── scripts/              # deploy.sh (Regional MIG/machine provisioning), setup.sh (GitHub env sync/runner) & deploy_gpu_stack.sh
 ├── home-server/              # Home server / self-hosted services and maintenance (TBD)

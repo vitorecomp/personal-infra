@@ -68,7 +68,7 @@ personal-infra/
 │   │   └── compose.local.yml               # Local dev compose stack (127.0.0.1:8080)
 │   └── scripts/
 │       ├── sync_github_secrets.py          # Syncs private domains, emails & GCP IDs from root `.env` to GitHub Secrets via `gh`
-│       ├── bootstrap_vm.py                 # Idempotent host setup over SSH (Docker, deploy user, swap, sshd, firewall, backup timers, optional GPU reverse-tunnel user)
+│       ├── bootstrap_vm.py                 # Idempotent host setup over SSH (Docker, deploy user, swap, sshd, firewall, backup timers, optional GPU reverse-tunnel user + append-only `gpulog` sink in /var/log/gpu-dev with hourly logrotate)
 │       ├── deploy_stack.py                 # rsync + remote .env preflight + compose pull/up --wait (never builds) + HTTPS check (CI & local)
 │       ├── backup_stack.py                 # Runs on the VM: DB dump + volumes -> restic in gs://$BACKUP_BUCKET
 │       ├── tf_apply_retry.sh               # Retries plan+apply on OCI 'Out of host capacity' (refuses destructive plans)
@@ -77,7 +77,7 @@ personal-infra/
 │       └── configure_ai_spend_cap.py       # Idempotently configures GCP Cloud Billing Spend Cap budgets for AI services
 ├── development/                            # Cloud & on-prem GPU development machine provisioning & Podman stack
 │   ├── README.md, .env.example             # Full GPU workflow runbook & template for gitignored `development/.env`
-│   ├── gpu-dev-machine/                    # Podman + podman-compose stack (vllm-server DeepSeek-V4.1-Flash, litellm, deepseek-harness)
+│   ├── gpu-dev-machine/                    # Podman + podman-compose stack (vllm-server DeepSeek-V4.1-Flash, litellm, deepseek-harness, tunnels, log-shipper)
 │   ├── infra/
 │   │   ├── gcp/                            # GCP Terraform: Stateless Multi-Zone Regional MIG (Spot/Standard, custom/default VPC) + Same-Region GCS Cache Bucket + Secret Manager runner bootstrap + ephemeral 3 TB Hyperdisk
 │   │   ├── azure/                          # (Planned) Azure GPU VM infrastructure
@@ -85,7 +85,7 @@ personal-infra/
 │   └── scripts/
 │       ├── deploy.sh                       # Unified machine provisioning entrypoint across GCP, Azure, and on-prem (--spot/--no-spot, --use-default-vpc, --zones, --cache-bucket, --loop, --cycle-regions)
 │       ├── setup.sh                        # Syncs `development/.env` to GitHub via `gh` (zero-SSH on GCP incl. Regional MIG `--status`; SSH runner setup for azure/on-prem)
-│       └── deploy_gpu_stack.sh             # Syncs & deploys development/gpu-dev-machine via podman-compose + triggers `gpu-gcs-sync --fast` (CI & local)
+│       └── deploy_gpu_stack.sh             # Runner-side deploy: host prep, GCS restore, gpu-gcs-sync, podman-compose, publishes the failsafe boot hook (CI, local, `--resume` at boot)
 ├── home-server/                            # (Planned) Home server setup and maintenance
 ├── linux/                                  # (Planned) Linux workstation/system configuration
 └── workspace/                              # Local repository management
@@ -125,6 +125,7 @@ personal-infra/
 - Compose stacks: only Caddy publishes ports; every volume has an explicit `name:`; never `docker compose down -v`; pin image tags.
 - VM app secrets live only in `/opt/stacks/<stack>/.env` (mode 0600). CI writes only the keys it passes with `deploy_stack.py --sync-env` (`GHOST_IMAGE`, Taiga's `TAIGA_DB_*`); the preflight prints key names, never values. Add new keys to `.env.example` (`__generate__` / `__required__` placeholders).
 - New or renamed scripts in `cloud/scripts/` need a matching `--dry-run` line in `.github/workflows/ci.yml`.
+- GPU VM (`development/infra/gcp/main.tf` startup script): it only brings the machine up and makes the runner operational (health probe, data disk, runner user/packages, NVIDIA driver, runner, and the generic failsafe boot hook). Everything else (Podman/CDI setup, GCS restore + sync, the stack, `log-shipper`) belongs in `development/scripts/deploy_gpu_stack.sh`, so stack or model changes ship through the pipeline and never need `deploy.sh` (a template change replaces the VM).
 
 ### 5. Code Style & Dependencies
 - **Python**: Target Python 3.10+ using standard library modules (`pathlib`, `argparse`, `csv`, `json`, `subprocess`, `urllib.request`, `concurrent.futures`) whenever possible to keep bootstrap scripts zero-dependency. Use type annotations on all function signatures.

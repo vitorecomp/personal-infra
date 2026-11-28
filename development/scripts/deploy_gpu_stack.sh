@@ -11,6 +11,12 @@
 #
 # Secret hygiene: secret values are streamed over stdin with mode 0600 and never
 # printed to stdout/stderr (preflight logs only variable names).
+#
+# Everything the stack needs on the GPU host is done here, by the runner (the VM startup script only brings the
+# machine and the runner up): Podman + NVIDIA CDI setup, restoring the GCS cache onto a fresh disk, the gpu-gcs-sync
+# timer, the containers (incl. log-shipper), and finally publishing the boot hook. The hook re-runs this script with
+# --resume on the next VM boot, from the copy saved in the GCS cache; it is disarmed if it fails, until the next
+# successful pipeline publishes it again.
 
 set -euo pipefail
 
@@ -26,6 +32,7 @@ WAIT_TIMEOUT_SEC="${GPU_WAIT_TIMEOUT_SEC:-600}"
 WAIT_FOR_MODEL="${WAIT_FOR_MODEL:-true}"
 MODEL_READY_TIMEOUT_SEC="${MODEL_READY_TIMEOUT_SEC:-10800}"
 DRY_RUN=false
+RESUME=false
 
 usage() {
   cat <<'EOF'
@@ -42,6 +49,9 @@ Options:
   --no-wait-for-model     Finish once the containers run instead of waiting for vLLM to serve (env WAIT_FOR_MODEL=false)
   --model-timeout=SECONDS Max seconds to wait for vllm-server /health + a LiteLLM chat check (default: 10800;
                           a first start downloads ~475 GiB and loads it, which takes well over an hour)
+  --resume                Boot-hook mode (run on the GPU host by the VM startup script): redeploy the stack files and
+                          .env the last successful deploy saved to the GCS cache (already restored into --stack-dir),
+                          without GitHub secrets; never publishes the hook (the startup re-arms it on success)
   --dry-run               Print resolved target, synced env key names (never values), and commands without executing
   -h, --help              Show this help message and exit
 
@@ -72,11 +82,30 @@ while [[ $# -gt 0 ]]; do
     --no-wait-for-model) WAIT_FOR_MODEL=false; shift ;;
     --model-timeout=*) MODEL_READY_TIMEOUT_SEC="${1#*=}"; shift ;;
     --model-timeout) MODEL_READY_TIMEOUT_SEC="$2"; shift 2 ;;
+    --resume) RESUME=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[error] Unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
+
+# Boot-hook resume: the stack dir (compose files + .env + this script under .deploy/) was restored from the GCS cache
+# by the hook; deploy it in place with the settings the last successful pipeline wrote into .env.
+if $RESUME; then
+  TARGET_MODE="local"
+  STACK_SRC_DIR="$REMOTE_STACK_DIR"
+  if [[ ! -f "$REMOTE_STACK_DIR/.env" ]]; then
+    echo "[error] --resume needs $REMOTE_STACK_DIR/.env (restored from the GCS cache by the boot hook)." >&2
+    exit 1
+  fi
+  if [[ -n "$(sed -n 's/^TUNNEL_SSH_HOST=//p' "$REMOTE_STACK_DIR/.env" | head -n1)" ]]; then
+    ENABLE_REVERSE_TUNNELS=true
+  else
+    ENABLE_REVERSE_TUNNELS=false
+  fi
+  # The hook has its own 3 h timeout; a resumed start has no download, only the GCS restore and the load.
+  MODEL_READY_TIMEOUT_SEC="${GPU_RESUME_MODEL_TIMEOUT_SEC:-5400}"
+fi
 
 if [[ ! -f "$STACK_SRC_DIR/compose.yml" ]]; then
   echo "[error] Stack compose.yml not found at $STACK_SRC_DIR/compose.yml" >&2
@@ -123,7 +152,7 @@ else
   esac
 fi
 
-if ! $DRY_RUN; then
+if ! $DRY_RUN && ! $RESUME; then
   if [[ -z "${LITELLM_MASTER_KEY:-}" ]]; then
     echo "[error] LITELLM_MASTER_KEY environment secret is required." >&2
     exit 1
@@ -150,22 +179,25 @@ done
 
 SERVICES_TO_START=(vllm-server litellm deepseek-harness)
 if [[ "$ENABLE_TUNNELS" == "true" ]]; then
-  SERVICES_TO_START+=(litellm-tunnel deepseek-harness-tunnel)
+  SERVICES_TO_START+=(litellm-tunnel deepseek-harness-tunnel log-shipper)
 fi
 
 if $DRY_RUN; then
   echo "[dry-run] Source stack dir:    $STACK_SRC_DIR"
   echo "[dry-run] Target mode:         $TARGET_MODE${SSH_HOST:+ ($SSH_HOST)}"
   echo "[dry-run] Remote stack dir:    $REMOTE_STACK_DIR"
+  echo "[dry-run] Mode:                $($RESUME && echo 'resume (boot hook)' || echo 'pipeline deploy')"
   echo "[dry-run] Reverse tunnels:     $ENABLE_TUNNELS"
   echo "[dry-run] Services:            ${SERVICES_TO_START[*]}"
   echo "[dry-run] Env keys provided:   ${ENV_KEYS_PRESENT[*]:-(none)}"
   [[ "$TARGET_MODE" == "controller-ssh" ]] && echo "[dry-run] Step 1: gpu-wait-ssh $WAIT_TIMEOUT_SEC"
-  echo "[dry-run] Step 2: Ensure Podman, podman-compose, NVIDIA driver + CDI (/etc/cdi/nvidia.yaml), and /mnt/data storage exist"
-  echo "[dry-run] Step 3: Sync stack files to $REMOTE_STACK_DIR and write mode-0600 .env + tunnel key"
-  echo "[dry-run] Step 4: sudo TMPDIR=$DATA_ROOT/containers/tmp podman-compose -f compose.yml up -d --build ${SERVICES_TO_START[*]}"
-  echo "[dry-run] Step 5: If /usr/local/bin/gpu-gcs-sync is executable, run 'sudo /usr/local/bin/gpu-gcs-sync --fast || true' to persist stack config to GCS"
-  echo "[dry-run] Step 6: wait for model: ${WAIT_FOR_MODEL} (vllm-server /health + one LiteLLM chat, timeout ${MODEL_READY_TIMEOUT_SEC}s)"
+  echo "[dry-run] Step 2: Wait for the VM startup script$($RESUME || echo ' and a running boot hook'); restore reverse-tunnel/, deepseek-harness/, vllm-cache/, huggingface/ from the GCS cache into empty targets"
+  echo "[dry-run] Step 3: Ensure Podman, podman-compose, NVIDIA driver + CDI (/etc/cdi/nvidia.yaml), persistent journal, gpu-gcs-sync timer, /mnt/data storage"
+  $RESUME || echo "[dry-run] Step 4: Sync stack files (+ this script under .deploy/) to $REMOTE_STACK_DIR and write mode-0600 .env + tunnel key"
+  echo "[dry-run] Step 5: sudo TMPDIR=$DATA_ROOT/containers/tmp podman-compose -f compose.yml up -d --build ${SERVICES_TO_START[*]}"
+  echo "[dry-run] Step 6: sudo /usr/local/bin/gpu-gcs-sync --fast (persist stack files + .env to the GCS cache; output redacted)"
+  echo "[dry-run] Step 7: wait for model: ${WAIT_FOR_MODEL} (vllm-server /health + one LiteLLM chat, timeout ${MODEL_READY_TIMEOUT_SEC}s)"
+  $RESUME || echo "[dry-run] Step 8: publish the boot hook (gs://<cache-bucket>/boot-hook/hook.sh) so the next VM boot resumes this revision"
   exit 0
 fi
 
@@ -212,18 +244,79 @@ run_target_bash() {
 {
   printf 'DATA_ROOT=%q\n' "$DATA_ROOT"
   printf 'REMOTE_STACK_DIR=%q\n' "$REMOTE_STACK_DIR"
+  printf 'RESUME=%q\n' "$RESUME"
   cat <<'BOOTSTRAP_EOF'
 set -euo pipefail
 
-# On a freshly (re)created GCE VM the startup-script registers this runner first and only then installs the CDI /
-# netavark settings and auto-resumes the stack with podman-compose, so a queued deploy started in the middle of it
-# (seen after a Spot preemption: vllm-server vanished mid-load). Wait for the startup-script to finish; on the regional
-# MIG it also restores the ~475 GiB Hugging Face cache from GCS onto the fresh ephemeral disk, hence up to 90 min.
-for _ in $(seq 1 540); do
+# On a freshly (re)created GCE VM the startup script starts this runner before it finishes (and before it starts the
+# boot hook), so a queued deploy can begin in the middle of it. Wait for it, then for a running boot hook (which runs
+# this same script with --resume): two deploys must never drive Podman at the same time.
+for _ in $(seq 1 180); do
   pgrep -f google_metadata_script_runner >/dev/null 2>&1 || break
-  echo "[bootstrap] Waiting for the VM startup-script to finish before touching Podman..."
+  echo "[bootstrap] Waiting for the VM startup script to finish before touching Podman..."
   sleep 10
 done
+if [[ "$RESUME" != "true" ]]; then
+  waited=0
+  while systemctl is-active --quiet gpu-boot-hook.service 2>/dev/null; do
+    (( waited % 300 == 0 )) && echo "[bootstrap] Waiting for the boot hook (resume of the last deploy) to finish ($(( waited / 60 )) min)..."
+    sleep 10; waited=$(( waited + 10 ))
+  done
+fi
+
+# Fresh VM (stateless MIG): restore what the gpu-gcs-sync timer saved to the regional GCS cache, before anything uses
+# it. Only into empty targets (no non-empty file yet), so newer local state is never overwritten. gcloud output is
+# dropped: it prints gs://<bucket> paths and the bucket name embeds the GCP project ID (public Actions log).
+CACHE_BUCKET=""
+[[ -r /etc/gpu-cache-bucket ]] && . /etc/gpu-cache-bucket
+gcs_restore() {
+  local prefix="$1" dst="$2"
+  [[ -n "$(sudo find "$dst" -type f ! -empty -print -quit 2>/dev/null)" ]] && return 1
+  echo "[bootstrap] Restoring ${prefix}/ from the GCS cache bucket onto the fresh disk..."
+  sudo mkdir -p "$dst"
+  if sudo gcloud storage rsync -r "gs://${CACHE_BUCKET}/${prefix}" "$dst" >/dev/null 2>&1; then
+    echo "[bootstrap] Restored ${prefix}/ ($(sudo du -sh "$dst" 2>/dev/null | cut -f1))."
+  else
+    echo "[bootstrap] Nothing restored for ${prefix}/ (not in the GCS cache yet)."
+  fi
+}
+if [[ -n "$CACHE_BUCKET" ]] && command -v gcloud >/dev/null 2>&1; then
+  gcs_restore reverse-tunnel "${DATA_ROOT}/reverse-tunnel" || true
+  if gcs_restore deepseek-harness "${DATA_ROOT}/deepseek-harness"; then
+    sudo chown -R 1000:1000 "${DATA_ROOT}/deepseek-harness/dsh-home" "${DATA_ROOT}/deepseek-harness/workspace" 2>/dev/null || true
+  fi
+  gcs_restore vllm-cache "${DATA_ROOT}/vllm-cache" || true
+  if gcs_restore huggingface "${DATA_ROOT}/huggingface"; then
+    # gcloud stores the HF cache's snapshot symlinks as plain copies; gpu-gcs-sync saves a manifest to relink them.
+    sudo python3 - "${DATA_ROOT}/huggingface" <<'PY' || true
+import os, sys
+root = os.path.normpath(sys.argv[1])
+manifest = os.path.join(root, ".gcs-symlinks.tsv")
+restored = 0
+if os.path.isfile(manifest):
+    with open(manifest, encoding="utf-8") as fh:
+        for line in fh:
+            rel, sep, target = line.rstrip("\n").partition("\t")
+            if not sep:
+                continue
+            link = os.path.normpath(os.path.join(root, rel))
+            if not link.startswith(root + os.sep):
+                continue
+            if not os.path.exists(os.path.normpath(os.path.join(os.path.dirname(link), target))):
+                continue
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            if os.path.islink(link) and os.readlink(link) == target:
+                continue
+            if os.path.isdir(link) and not os.path.islink(link):
+                continue
+            if os.path.lexists(link):
+                os.unlink(link)
+            os.symlink(target, link)
+            restored += 1
+print(f"[bootstrap] Relinked {restored} Hugging Face cache symlinks from the manifest.")
+PY
+  fi
+fi
 
 sudo mkdir -p \
   "${DATA_ROOT}/containers/storage" \
@@ -234,14 +327,16 @@ sudo mkdir -p \
   "${DATA_ROOT}/deepseek-harness/workspace" \
   "${DATA_ROOT}/reverse-tunnel/state/litellm" \
   "${DATA_ROOT}/reverse-tunnel/state/harness" \
-  "${REMOTE_STACK_DIR}"
+  "${DATA_ROOT}/reverse-tunnel/state/logs" \
+  "${REMOTE_STACK_DIR}/.deploy"
 sudo chmod 0700 "${DATA_ROOT}/reverse-tunnel"
 # Directories only (like the VM startup-script): the containers' users must be able to create files in these bind
 # mounts. Never recursive: `chmod -R 1777` made dsh-home/.credentials.yaml world-readable and dsh refuses to start
 # with it ("credentials-local: ... readable beyond its owner (mode 777)"); live it crash-looped 1388 times.
 sudo chmod 1777 \
   "${DATA_ROOT}/deepseek-harness" "${DATA_ROOT}/deepseek-harness/dsh-home" "${DATA_ROOT}/deepseek-harness/workspace" \
-  "${DATA_ROOT}/reverse-tunnel/state" "${DATA_ROOT}/reverse-tunnel/state/litellm" "${DATA_ROOT}/reverse-tunnel/state/harness"
+  "${DATA_ROOT}/reverse-tunnel/state" "${DATA_ROOT}/reverse-tunnel/state/litellm" "${DATA_ROOT}/reverse-tunnel/state/harness" \
+  "${DATA_ROOT}/reverse-tunnel/state/logs"
 # Repair files the old recursive chmod opened up: the harness state (credentials, sessions) is owner-only.
 sudo find "${DATA_ROOT}/deepseek-harness/dsh-home" -type f -perm /1077 -exec chmod go-rwx,-t {} + 2>/dev/null || true
 [[ -f "${DATA_ROOT}/deepseek-harness/dsh-home/.credentials.yaml" ]] && sudo chmod 0600 "${DATA_ROOT}/deepseek-harness/dsh-home/.credentials.yaml"
@@ -305,6 +400,87 @@ if [[ "$(sudo cat "$PIDS_CONF" 2>/dev/null)"$'\n' != "$PIDS_WANT" ]]; then
   printf '%s' "$PIDS_WANT" | sudo tee "$PIDS_CONF" >/dev/null
 fi
 
+# log-shipper streams this host's journal to the log host: keep the journal persistent and have container output go
+# to it (Podman's default when the journal is available; pinned so vLLM's log is always shipped). New containers only.
+if [[ ! -d /var/log/journal ]]; then
+  sudo mkdir -p /var/log/journal
+  sudo systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+  sudo systemctl restart systemd-journald || true
+fi
+LOGDRV_CONF=/etc/containers/containers.conf.d/52-personal-infra-logs.conf
+LOGDRV_WANT=$'# Managed by personal-infra (development/scripts/deploy_gpu_stack.sh)\n[containers]\nlog_driver = "journald"\n'
+if [[ "$(sudo cat "$LOGDRV_CONF" 2>/dev/null)"$'\n' != "$LOGDRV_WANT" ]]; then
+  printf '%s' "$LOGDRV_WANT" | sudo tee "$LOGDRV_CONF" >/dev/null
+fi
+
+# gpu-gcs-sync: saves what a recreated VM needs to the regional GCS cache (restored above on a fresh disk): stack
+# files + .env + this script (phase 1, --fast: after every deploy, on shutdown) and the HF + JIT caches (phase 2,
+# every 15 min). Runner credentials are the startup script's job.
+if [[ -n "$CACHE_BUCKET" ]]; then
+  sudo tee /usr/local/bin/gpu-gcs-sync >/dev/null <<'SYNCEOF'
+#!/usr/bin/env bash
+# Managed by personal-infra (development/scripts/deploy_gpu_stack.sh).
+set -uo pipefail
+export HOME="/root"
+export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+FAST_MODE=false
+[[ "${1:-}" == "--fast" ]] && FAST_MODE=true
+[[ -f /etc/gpu-cache-bucket ]] && . /etc/gpu-cache-bucket
+[[ -n "${CACHE_BUCKET:-}" ]] || { echo "[gpu-gcs-sync] CACHE_BUCKET is not configured; skipping."; exit 0; }
+command -v gcloud >/dev/null 2>&1 || { echo "[gpu-gcs-sync] gcloud not found; skipping."; exit 0; }
+mountpoint -q /mnt/data || { echo "[gpu-gcs-sync] /mnt/data is not mounted; skipping."; exit 0; }
+
+# Phase 1: stack files + .env, reverse-tunnel key, harness state (small).
+(
+  flock -n 9 || { echo "[gpu-gcs-sync] Small-state sync already running; skipping."; exit 0; }
+  for d in stacks/gpu-dev-machine reverse-tunnel deepseek-harness; do
+    if [[ -n "$(ls -A "/mnt/data/$d" 2>/dev/null)" ]]; then
+      gcloud storage rsync -r -c "/mnt/data/$d" "gs://${CACHE_BUCKET}/$d" || true
+    fi
+  done
+) 9>/run/gpu-gcs-sync.lock
+[[ "$FAST_MODE" == "true" ]] && exit 0
+
+# Phase 2: Hugging Face cache (blobs + a manifest of its snapshot symlinks) and the compile/JIT caches.
+(
+  flock -n 8 || { echo "[gpu-gcs-sync] Cache sync already running; skipping."; exit 0; }
+  if [[ -n "$(ls -A /mnt/data/huggingface 2>/dev/null)" ]]; then
+    python3 - /mnt/data/huggingface <<'PY' || true
+import os, sys
+root = sys.argv[1]
+entries = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d != ".locks"]
+    for name in filenames + dirnames:
+        full = os.path.join(dirpath, name)
+        if os.path.islink(full):
+            entries.append((os.path.relpath(full, root), os.readlink(full)))
+if entries:
+    tmp, dst = os.path.join(root, ".gcs-symlinks.tsv.tmp"), os.path.join(root, ".gcs-symlinks.tsv")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.writelines(f"{rel}\t{target}\n" for rel, target in sorted(entries))
+    os.replace(tmp, dst)
+PY
+    # No -c: checksum mode re-reads the ~475 GiB checkpoint on every run; HF blobs are immutable, size + mtime suffice.
+    gcloud storage rsync -r --exclude='(^|.*/)\.locks/.*|.*\.incomplete$|.*\.gcs-symlinks\.tsv\.tmp$' \
+      /mnt/data/huggingface "gs://${CACHE_BUCKET}/huggingface" || true
+  fi
+  if [[ -n "$(ls -A /mnt/data/vllm-cache 2>/dev/null)" ]]; then
+    gcloud storage rsync -r /mnt/data/vllm-cache "gs://${CACHE_BUCKET}/vllm-cache" || true
+  fi
+) 8>/run/gpu-gcs-sync-hf.lock
+SYNCEOF
+  sudo chmod 0755 /usr/local/bin/gpu-gcs-sync
+  printf '%s\n' '[Unit]' 'Description=Sync GPU VM stack state and model caches to the regional GCS cache bucket' \
+    'After=network-online.target' 'Wants=network-online.target' '' '[Service]' 'Type=oneshot' \
+    'ExecStart=/usr/local/bin/gpu-gcs-sync' | sudo tee /etc/systemd/system/gpu-gcs-sync.service >/dev/null
+  printf '%s\n' '[Unit]' 'Description=Sync GPU VM state to the GCS cache every 15 minutes' '' '[Timer]' \
+    'OnBootSec=15min' 'OnUnitActiveSec=15min' 'RandomizedDelaySec=60' '' '[Install]' 'WantedBy=timers.target' \
+    | sudo tee /etc/systemd/system/gpu-gcs-sync.timer >/dev/null
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now gpu-gcs-sync.timer >/dev/null 2>&1 || echo "[warn] Could not enable gpu-gcs-sync.timer."
+fi
+
 if ! nvidia-smi >/dev/null 2>&1; then
   echo "[bootstrap] Installing Ubuntu prebuilt NVIDIA Open Kernel GPU driver..."
   sudo env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 update -qq
@@ -358,11 +534,16 @@ PY
 BOOTSTRAP_EOF
 } | run_target_bash
 
-# 2. Sync stack definitions (Dockerfiles, compose.yml, configs) to the GPU machine.
-if [[ "$TARGET_MODE" == "local" ]]; then
-  rsync -az --delete --exclude='.env' "$STACK_SRC_DIR/" "$REMOTE_STACK_DIR/"
-else
-  rsync -az --delete --exclude='.env' -e "$RSYNC_RSH" "$STACK_SRC_DIR/" "${SSH_HOST}:${REMOTE_STACK_DIR}/"
+# 2. Sync stack definitions (Dockerfiles, compose.yml, configs) to the GPU machine, plus this script under .deploy/
+# (saved to the GCS cache with the stack, so the boot hook can --resume this exact revision). Resume deploys in place.
+if ! $RESUME; then
+  if [[ "$TARGET_MODE" == "local" ]]; then
+    rsync -az --delete --exclude='.env' --exclude='.deploy/' "$STACK_SRC_DIR/" "$REMOTE_STACK_DIR/"
+    install -m 0755 "$SCRIPT_DIR/deploy_gpu_stack.sh" "$REMOTE_STACK_DIR/.deploy/deploy_gpu_stack.sh"
+  else
+    rsync -az --delete --exclude='.env' --exclude='.deploy/' -e "$RSYNC_RSH" "$STACK_SRC_DIR/" "${SSH_HOST}:${REMOTE_STACK_DIR}/"
+    rsync -az -e "$RSYNC_RSH" "$SCRIPT_DIR/deploy_gpu_stack.sh" "${SSH_HOST}:${REMOTE_STACK_DIR}/.deploy/deploy_gpu_stack.sh"
+  fi
 fi
 
 # 3. Write .env (0600), tunnel SSH key (0444 inside 0700 dir), and start containers via podman-compose.
@@ -391,10 +572,16 @@ LITELLM_TUNNEL_SSH_USER=${LITELLM_TUNNEL_SSH_USER:-${TUNNEL_SSH_USER:-}}
 HARNESS_TUNNEL_SSH_HOST=${HARNESS_TUNNEL_SSH_HOST:-${TUNNEL_SSH_HOST:-}}
 HARNESS_TUNNEL_SSH_PORT=${HARNESS_TUNNEL_SSH_PORT:-${TUNNEL_SSH_PORT:-22}}
 HARNESS_TUNNEL_SSH_USER=${HARNESS_TUNNEL_SSH_USER:-${TUNNEL_SSH_USER:-}}
+LOG_SSH_HOST=${LOG_SSH_HOST:-${TUNNEL_SSH_HOST:-}}
+LOG_SSH_PORT=${LOG_SSH_PORT:-${TUNNEL_SSH_PORT:-22}}
+LOG_SSH_USER=${LOG_SSH_USER:-gpulog}
+LOG_STREAM=${LOG_STREAM:-gpu-vm}
 EOF
 )"
 
-ENV_B64="$(printf '%s\n' "$ENV_CONTENT" | base64 -w0)"
+# Resume keeps the .env (and tunnel key) restored from the GCS cache: they hold what the last pipeline wrote.
+ENV_B64=""
+$RESUME || ENV_B64="$(printf '%s\n' "$ENV_CONTENT" | base64 -w0)"
 TUNNEL_KEY_B64=""
 if [[ -n "${TUNNEL_SSH_PRIVATE_KEY:-}" ]]; then
   TUNNEL_KEY_B64="$(printf '%s\n' "$TUNNEL_SSH_PRIVATE_KEY" | base64 -w0)"
@@ -417,7 +604,9 @@ fi
 set -euo pipefail
 
 umask 077
-printf '%s' "$ENV_B64" | base64 -d > "${REMOTE_STACK_DIR}/.env"
+if [[ -n "$ENV_B64" ]]; then
+  printf '%s' "$ENV_B64" | base64 -d > "${REMOTE_STACK_DIR}/.env"
+fi
 chmod 0600 "${REMOTE_STACK_DIR}/.env"
 
 if [[ -n "$TUNNEL_KEY_B64" ]]; then
@@ -425,6 +614,7 @@ if [[ -n "$TUNNEL_KEY_B64" ]]; then
   sudo chmod 0644 "${DATA_ROOT}/reverse-tunnel/id_ed25519"
 else
   sudo touch "${DATA_ROOT}/reverse-tunnel/id_ed25519"
+  sudo chmod 0644 "${DATA_ROOT}/reverse-tunnel/id_ed25519"
 fi
 
 if [[ -n "$TUNNEL_KH_B64" ]]; then
@@ -439,11 +629,11 @@ sudo podman rm -f ray-server >/dev/null 2>&1 || true
 expected=(vllm-server litellm deepseek-harness)
 compose_services=()   # empty = every service in compose.yml
 if [[ "$ENABLE_TUNNELS" == "true" ]]; then
-  expected+=(litellm-tunnel deepseek-harness-tunnel)
-  echo "[deploy] Building and starting all 5 services (including reverse SSH tunnels) with podman-compose..."
+  expected+=(litellm-tunnel deepseek-harness-tunnel log-shipper)
+  echo "[deploy] Building and starting all 6 services (reverse SSH tunnels + log-shipper included) with podman-compose..."
 else
   echo "[deploy] Reverse tunnels disabled; starting vllm-server, litellm, and deepseek-harness..."
-  sudo podman rm -f litellm-tunnel deepseek-harness-tunnel >/dev/null 2>&1 || true
+  sudo podman rm -f litellm-tunnel deepseek-harness-tunnel log-shipper >/dev/null 2>&1 || true
   compose_services=(vllm-server litellm deepseek-harness)
 fi
 compose_up() { sudo env TMPDIR="${DATA_ROOT}/containers/tmp" podman-compose -f compose.yml up -d --build "${compose_services[@]}"; }
@@ -466,7 +656,7 @@ config_hashes() {
 # memory (28 min while the disk was saturated by the download), longer than podman waits.
 teardown_stack() {
   local name state
-  for name in "${expected[@]}" litellm-tunnel deepseek-harness-tunnel; do
+  for name in "${expected[@]}" litellm-tunnel deepseek-harness-tunnel log-shipper; do
     sudo timeout 120 podman stop -t 30 "$name" >/dev/null 2>&1 || true
   done
   for _ in $(seq 1 120); do
@@ -475,7 +665,7 @@ teardown_stack() {
     echo "[deploy] Waiting for containers to stop: ${state}"
     sleep 15
   done
-  for name in "${expected[@]}" litellm-tunnel deepseek-harness-tunnel; do
+  for name in "${expected[@]}" litellm-tunnel deepseek-harness-tunnel log-shipper; do
     sudo podman rm -f "$name" >/dev/null 2>&1 || true
   done
 }
@@ -537,6 +727,13 @@ if [[ "$ENABLE_TUNNELS" == "true" ]]; then
     exit 1
   fi
   echo "[ok] Reverse tunnels are up and stable."
+  # Logs are auxiliary: a log host that refuses the stream (e.g. its gpulog user is not set up yet) only warns.
+  if sudo podman logs log-shipper 2>&1 | grep -q 'connection to the log host ended'; then
+    echo "[warn] log-shipper cannot stream to the log host (set it up with cloud/scripts/bootstrap_vm.py --tunnel-pubkey-file); last lines:"
+    sudo podman logs --tail 4 log-shipper 2>&1 | sed 's/^/    /' || true
+  else
+    echo "[ok] log-shipper is streaming this VM's journal to the log host (/var/log/gpu-dev/ there)."
+  fi
 fi
 
 # "Running" containers do not mean a serving model: vLLM loads ~475 GiB first, and failures after the load (CUDA graph
@@ -684,3 +881,43 @@ else
 fi
 DEPLOY_EOF
 } | run_target_bash
+
+# 4. Publish the boot hook (pipeline deploys only, after every check above passed): the next VM boot re-deploys this
+# revision from the GCS cache. The startup script disarms it before running it and re-arms it only on success.
+if ! $RESUME; then
+  {
+    printf 'HOOK_REV=%q\n' "${GITHUB_SHA:-manual}"
+    cat <<'PUBLISH_EOF'
+set -euo pipefail
+if [[ ! -r /etc/gpu-cache-bucket ]]; then
+  echo "[deploy] No GCS cache bucket on this host (not the GCP MIG); no boot hook published."
+  exit 0
+fi
+. /etc/gpu-cache-bucket
+hook="$(mktemp)"
+{
+  printf '#!/usr/bin/env bash\n'
+  printf '# Boot hook published by development/scripts/deploy_gpu_stack.sh after the successful deploy of %s (%s).\n' \
+    "${HOOK_REV}" "$(date -u +%FT%TZ)"
+  cat <<'HOOK'
+# Run once per boot by the VM startup script (gpu-boot-hook.service), re-armed only when it exits 0: restore the stack
+# files + .env + deploy script this deploy saved to the GCS cache, then redeploy them with --resume.
+set -euo pipefail
+. /etc/gpu-cache-bucket
+STACK_DIR=/mnt/data/stacks/gpu-dev-machine
+mkdir -p "$STACK_DIR"
+gcloud storage rsync -r "gs://${CACHE_BUCKET}/stacks/gpu-dev-machine" "$STACK_DIR" >/dev/null 2>&1
+chmod 0600 "$STACK_DIR/.env"
+exec bash "$STACK_DIR/.deploy/deploy_gpu_stack.sh" --resume
+HOOK
+} > "$hook"
+if sudo gcloud storage cp "$hook" "gs://${CACHE_BUCKET}/boot-hook/hook.sh" >/dev/null 2>&1; then
+  sudo gcloud storage rm "gs://${CACHE_BUCKET}/boot-hook/running.sh" "gs://${CACHE_BUCKET}/boot-hook/failed.sh" >/dev/null 2>&1 || true
+  echo "[ok] Boot hook published: the next VM boot resumes ${HOOK_REV:0:7} (disarmed if that fails, until the next pipeline)."
+else
+  echo "[warn] Could not publish the boot hook; the next VM boot will wait for the pipeline."
+fi
+rm -f "$hook"
+PUBLISH_EOF
+  } | run_target_bash
+fi
