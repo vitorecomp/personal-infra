@@ -25,11 +25,9 @@ locals {
 
   # MIG autohealing needs the probe reachable from Google's health checkers, i.e. firewall rules managed here.
   autohealing_enabled = var.enable_autohealing && var.enable_ingress_firewalls
-  # gpu-health: always healthy for the first 30 min of a boot (driver install + reboot, runner start); after that the
-  # runner service must be active, and the startup script must have finished within 120 min (GCS restore of the
-  # model, stack resume). deploy_gpu_stack.sh waits up to 90 min for the startup script.
+  # gpu-health: always healthy for the first 30 min of a boot (driver install + reboot happen before the runner starts);
+  # after that, healthy only while the GitHub Actions runner service is active.
   health_boot_grace_sec = 1800
-  health_max_boot_sec   = 7200
   create_runner_secret_version = (
     trimspace(var.github_repo) != "" &&
     (trimspace(var.runner_token) != "" || trimspace(var.runner_pat) != "")
@@ -48,10 +46,11 @@ export DEBIAN_FRONTEND=noninteractive
 echo "=== [gpu-mig-bootstrap] Starting at $(date -Is) ==="
 
 # 0. Host probe for MIG autohealing: gpu-health answers GET /health on 0.0.0.0:${var.health_check_port}, which the firewall
-#    opens only to Google's health checkers. Healthy for the first 30 min of a boot; then only while the runner service
-#    is active and this boot's startup script has finished (or is still within 120 min). vLLM is deliberately not part
-#    of it: a model that fails to start is a config problem, and recreating the VM for it would only loop.
-#    Installed first and enabled, so a later step that hangs (or a VM that stops answering) gets the VM recreated.
+#    opens only to Google's health checkers. Healthy for the first 30 min of a boot; then only while the GitHub Actions
+#    runner service is active. It checks the runner only, never the containers: a stack/model that fails to start is a
+#    config problem (deploy_gpu_stack.sh reports it), and recreating the VM for it would only loop.
+#    Installed first and enabled, so a boot that hangs before the runner starts (or a VM that stops answering, or a
+#    runner that dies) gets the VM recreated.
 if [ "${local.autohealing_enabled}" = "true" ]; then
   cat <<'HEALTHEOF' > /usr/local/bin/gpu-health
 #!/usr/bin/env python3
@@ -63,8 +62,6 @@ import subprocess
 
 PORT = int(os.environ.get("GPU_HEALTH_PORT", "8090"))
 GRACE_S = int(os.environ.get("GPU_HEALTH_BOOT_GRACE_S", "1800"))
-MAX_BOOT_S = int(os.environ.get("GPU_HEALTH_MAX_BOOT_S", "7200"))
-DONE = pathlib.Path("/run/gpu-bootstrap-done")
 RUNNER_SERVICE_FILE = pathlib.Path("/mnt/data/actions-runner/.service")
 FALLBACK_SERVICE = "actions.runner.gpu.service"
 
@@ -83,16 +80,11 @@ def runner_active() -> bool:
 
 
 def status() -> tuple:
-    up = uptime_s()
-    if up < GRACE_S:
-        return 200, "booting"
-    if not runner_active():
-        return 503, "runner service inactive"
-    if DONE.exists():
+    if runner_active():
         return 200, "ok"
-    if up < MAX_BOOT_S:
-        return 200, "bootstrap running"
-    return 503, "bootstrap did not finish"
+    if uptime_s() < GRACE_S:
+        return 200, "booting"
+    return 503, "runner service inactive"
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -125,7 +117,6 @@ Wants=network-online.target
 ExecStart=/usr/bin/python3 /usr/local/bin/gpu-health
 Environment=GPU_HEALTH_PORT=${var.health_check_port}
 Environment=GPU_HEALTH_BOOT_GRACE_S=${local.health_boot_grace_sec}
-Environment=GPU_HEALTH_MAX_BOOT_S=${local.health_max_boot_sec}
 Restart=always
 RestartSec=5
 
@@ -837,8 +828,6 @@ if [ -f "$STACK_DIR/compose.yml" ] && [ -f "$STACK_DIR/.env" ]; then
   fi
 fi
 
-# gpu-health reports "ok" only once this boot got here (/run is cleared on every boot).
-touch /run/gpu-bootstrap-done
 echo "=== [gpu-mig-bootstrap] Finished at $(date -Is) (runner_started=$RUNNER_STARTED) ==="
 EOF
 
@@ -991,14 +980,14 @@ resource "google_compute_instance_template" "gpu" {
   }
 }
 
-# Autohealing probe (gpu-health in the startup script): a VM whose boot hangs, whose runner service dies, or that stops
-# answering is recreated by the MIG (in whichever zone has capacity) after 5 failed checks, i.e. ~5 min.
+# Autohealing probe (gpu-health in the startup script, runner service only): a VM whose runner never starts (boot hang)
+# or dies, or that stops answering, is recreated by the MIG (in whichever zone has capacity) after 5 failed checks (~5 min).
 resource "google_compute_health_check" "gpu" {
   count = local.autohealing_enabled ? 1 : 0
 
   project             = var.project_id
   name                = "${var.name_prefix}-health"
-  description         = "gpu-health host probe of the GPU MIG VM (boot progress + runner service)"
+  description         = "gpu-health host probe of the GPU MIG VM (GitHub Actions runner service)"
   check_interval_sec  = 60
   timeout_sec         = 10
   healthy_threshold   = 1

@@ -152,7 +152,7 @@ variable "enable_ingress_firewalls" {
 }
 
 variable "enable_autohealing" {
-  description = "Recreate the GPU VM when its host probe (gpu-health) reports a stuck boot or an inactive runner, or stops answering. Needs enable_ingress_firewalls = true (the probe must be reachable from Google's health checkers)."
+  description = "Recreate the GPU VM when its host probe (gpu-health) reports the GitHub Actions runner service inactive (after a 30 min boot grace), or stops answering. Needs enable_ingress_firewalls = true (the probe must be reachable from Google's health checkers)."
   type        = bool
   default     = true
 }

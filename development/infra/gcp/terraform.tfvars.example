@@ -31,7 +31,7 @@ use_default_vpc = false
 # enable_ingress_firewalls = true
 # enable_os_login          = true
 
-# MIG autohealing: recreate the VM when the gpu-health probe (boot progress + runner service) fails for ~5 min.
+# MIG autohealing: recreate the VM when the gpu-health probe (GitHub Actions runner service only) fails for ~5 min.
 # Needs enable_ingress_firewalls = true; the probe port is opened to Google's health checkers only.
 # enable_autohealing            = true
 # health_check_port             = 8090
