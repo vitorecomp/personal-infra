@@ -780,7 +780,8 @@ for raw in sys.stdin.read().replace("\r", "\n").splitlines():
     src = m.group("src") + ": " if m else ""
     body = prefix.sub("", raw).strip()
     if exc.match(body) or "out of memory" in body.lower() or body.startswith("Killed"):
-        found.append(src + body)
+        # Per-request IDs (e.g. Hugging Face's) would defeat the deduplication of one repeating error.
+        found.append(src + re.sub(r"\s*\(Request ID: [^)]*\)", "", body))
 uniq = []
 for f in found:
     if f not in uniq:
