@@ -578,6 +578,15 @@ EOF
 set -u
 export HOME="/root"
 export PATH="/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# A boot hook interrupted by a Spot preemption did not fail: re-arm it (running.sh -> hook.sh) so the next VM resumes the
+# stack. First, because a preempted VM gets ~30 s. Every other shutdown (MIG delete / autohealing, stop, a hook that
+# brought the VM down) leaves it disarmed, as the failsafe in the startup script intends.
+if systemctl is-active --quiet gpu-boot-hook.service 2>/dev/null && [ -r /etc/gpu-cache-bucket ] && \
+   [ "$(curl -s -m 2 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/preempted)" = "TRUE" ]; then
+  . /etc/gpu-cache-bucket
+  timeout 15 gcloud storage mv "gs://$CACHE_BUCKET/boot-hook/running.sh" "gs://$CACHE_BUCKET/boot-hook/hook.sh" >/dev/null 2>&1 \
+    && echo "[shutdown] Preempted while the boot hook was running; re-armed it for the next VM."
+fi
 if command -v podman >/dev/null 2>&1; then
   podman stop -t 10 --all >/dev/null 2>&1 || true
 fi
