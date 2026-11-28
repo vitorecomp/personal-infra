@@ -407,6 +407,9 @@ if [[ ! -d /var/log/journal ]]; then
   sudo systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
   sudo systemctl restart systemd-journald || true
 fi
+# Move this boot's runtime journal (/run/log/journal: the startup script, the boot hook) to disk, where log-shipper
+# reads it; without this, everything logged before the journal became persistent is never shipped.
+sudo journalctl --flush >/dev/null 2>&1 || true
 LOGDRV_CONF=/etc/containers/containers.conf.d/52-personal-infra-logs.conf
 LOGDRV_WANT=$'# Managed by personal-infra (development/scripts/deploy_gpu_stack.sh)\n[containers]\nlog_driver = "journald"\n'
 if [[ "$(sudo cat "$LOGDRV_CONF" 2>/dev/null)"$'\n' != "$LOGDRV_WANT" ]]; then
@@ -430,20 +433,35 @@ FAST_MODE=false
 command -v gcloud >/dev/null 2>&1 || { echo "[gpu-gcs-sync] gcloud not found; skipping."; exit 0; }
 mountpoint -q /mnt/data || { echo "[gpu-gcs-sync] /mnt/data is not mounted; skipping."; exit 0; }
 
+# gcloud's per-file progress is dropped (it floods the shipped journal every 15 min); failures are named, and the exit
+# status is non-zero when any sync failed.
+sync_dir() {  # LOCAL_DIR REMOTE_PREFIX [gcloud rsync flags...]
+  gcloud storage rsync -r "${@:3}" "$1" "gs://${CACHE_BUCKET}/$2" >/dev/null 2>&1 && return 0
+  echo "[gpu-gcs-sync] Sync of $1 failed."
+  return 1
+}
+fail=0
+
 # Phase 1: stack files + .env, reverse-tunnel key, harness state (small).
 (
   flock -n 9 || { echo "[gpu-gcs-sync] Small-state sync already running; skipping."; exit 0; }
+  rc=0
   for d in stacks/gpu-dev-machine reverse-tunnel deepseek-harness; do
     if [[ -n "$(ls -A "/mnt/data/$d" 2>/dev/null)" ]]; then
-      gcloud storage rsync -r -c "/mnt/data/$d" "gs://${CACHE_BUCKET}/$d" || true
+      sync_dir "/mnt/data/$d" "$d" -c || rc=1
     fi
   done
-) 9>/run/gpu-gcs-sync.lock
-[[ "$FAST_MODE" == "true" ]] && exit 0
+  exit "$rc"
+) 9>/run/gpu-gcs-sync.lock || fail=1
+if [[ "$FAST_MODE" == "true" ]]; then
+  echo "[gpu-gcs-sync] Fast sync done ($([[ $fail -eq 0 ]] && echo ok || echo 'with failures'))."
+  exit "$fail"
+fi
 
 # Phase 2: Hugging Face cache (blobs + a manifest of its snapshot symlinks) and the compile/JIT caches.
 (
   flock -n 8 || { echo "[gpu-gcs-sync] Cache sync already running; skipping."; exit 0; }
+  rc=0
   if [[ -n "$(ls -A /mnt/data/huggingface 2>/dev/null)" ]]; then
     python3 - /mnt/data/huggingface <<'PY' || true
 import os, sys
@@ -462,13 +480,16 @@ if entries:
     os.replace(tmp, dst)
 PY
     # No -c: checksum mode re-reads the ~475 GiB checkpoint on every run; HF blobs are immutable, size + mtime suffice.
-    gcloud storage rsync -r --exclude='(^|.*/)\.locks/.*|.*\.incomplete$|.*\.gcs-symlinks\.tsv\.tmp$' \
-      /mnt/data/huggingface "gs://${CACHE_BUCKET}/huggingface" || true
+    sync_dir /mnt/data/huggingface huggingface \
+      --exclude='(^|.*/)\.locks/.*|.*\.incomplete$|.*\.gcs-symlinks\.tsv\.tmp$' || rc=1
   fi
   if [[ -n "$(ls -A /mnt/data/vllm-cache 2>/dev/null)" ]]; then
-    gcloud storage rsync -r /mnt/data/vllm-cache "gs://${CACHE_BUCKET}/vllm-cache" || true
+    sync_dir /mnt/data/vllm-cache vllm-cache || rc=1
   fi
-) 8>/run/gpu-gcs-sync-hf.lock
+  exit "$rc"
+) 8>/run/gpu-gcs-sync-hf.lock || fail=1
+echo "[gpu-gcs-sync] Full sync done ($([[ $fail -eq 0 ]] && echo ok || echo 'with failures'))."
+exit "$fail"
 SYNCEOF
   sudo chmod 0755 /usr/local/bin/gpu-gcs-sync
   printf '%s\n' '[Unit]' 'Description=Sync GPU VM stack state and model caches to the regional GCS cache bucket' \
@@ -686,7 +707,7 @@ if [[ -x /usr/local/bin/gpu-gcs-sync ]]; then
   # gcloud prints every gs://<bucket> path and the bucket name embeds the GCP project ID, which must not reach the
   # (public) Actions log: keep the output, print a count, and redact bucket names if something has to be shown.
   if sync_out="$(sudo /usr/local/bin/gpu-gcs-sync --fast 2>&1)"; then
-    echo "[ok] Stack config persisted to the GCS cache bucket ($(grep -c '^Copying ' <<<"${sync_out}" || true) file(s) uploaded)."
+    echo "[ok] Stack files, .env and the deploy script are saved in the GCS cache bucket."
   else
     sync_rc=$?
     echo "[warn] gpu-gcs-sync --fast exited ${sync_rc}; the gpu-gcs-sync timer retries. Last lines (bucket redacted):"

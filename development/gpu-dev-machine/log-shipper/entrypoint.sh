@@ -43,6 +43,16 @@ redact() {
     -e 's/hf_[A-Za-z0-9]{20,}/hf_<redacted>/g'
 }
 
+# Healthcheck chatter, ~70% of the raw journal: podman's "healthy" results, the health-probe GETs, and the AppArmor
+# ptrace denials pgrep-based healthchecks trigger. Unhealthy/starting results, container starts and deaths are kept.
+drop_noise() {
+  grep --line-buffered -vE \
+    -e 'container health_status .*health_status=healthy' \
+    -e '"GET /health(/liveliness|/readiness)? HTTP/1\.[01]" 200' \
+    -e 'apparmor="DENIED" operation="ptrace" .*comm="pgrep"' \
+    -e 'kauditd_printk_skb: [0-9]+ callbacks suppressed'
+}
+
 # journalctl saves its cursor when it exits cleanly (SIGTERM), so stop it that way: on container stop (bash as PID 1
 # ignores SIGTERM unless trapped) and as soon as ssh drops (otherwise it only notices at its next write).
 stop_journalctl() { pkill -TERM -x journalctl 2>/dev/null || true; wait 2>/dev/null || true; }
@@ -57,6 +67,7 @@ while true; do
   echo "[log-shipper] Streaming the journal to ${LOG_SSH_USER}@${LOG_SSH_HOST}:${LOG_SSH_PORT} as '${LOG_STREAM}'..."
   set +e
   journalctl -D "${JOURNAL_DIR}" "${start[@]}" --follow --output=short-iso --no-pager --quiet \
+    | drop_noise \
     | redact \
     | ssh -p "${LOG_SSH_PORT}" -i "${SSH_DIR}/id_key" \
         -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
